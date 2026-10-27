@@ -169,9 +169,8 @@ class TimelineCueCard(CardWidget):
         layout.addWidget(self.cb)
 
         self.index_lbl = QLabel(f"{item.row_index}.", self)
-        self.index_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.index_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.index_lbl.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 600; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;")
-        self.index_lbl.setFixedWidth(26)
         layout.addWidget(self.index_lbl)
 
         # 2. Tag Pill (e.g. CLIP / S10E20)

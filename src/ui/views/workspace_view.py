@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import Optional
 from PySide6.QtCore import Qt, Signal
@@ -11,6 +12,7 @@ from ..components.drawers import NotesDrawer, LinksDrawer
 from ..components.widgets import GpuGlowSplitter
 from ...core.models import DocumentState, EditorNote
 from ...core.database import db
+from ...core.parser import save_blocks_to_docx, update_timecode_in_docx
 
 class WorkspaceView(QWidget):
     """The Dual Split-Pane Workspace (Source Script + A-Roll Timeline + Outline + Dockable Drawers)."""
@@ -50,13 +52,14 @@ class WorkspaceView(QWidget):
         self.script_viewer.timestamp_clicked.connect(self._on_script_timestamp_clicked)
         self.script_viewer.add_note_requested.connect(self._on_add_custom_note)
         self.script_viewer.copy_feedback_requested.connect(self.copy_feedback_requested.emit)
+        self.script_viewer.save_docx_requested.connect(self._on_save_docx_requested)
         left_layout.addWidget(self.script_viewer, 1)
 
         self.splitter.addWidget(self.left_container)
 
         # Right Pane: A-Roll Timeline
         self.timeline_list = TimelineList(self)
-        self.timeline_list.setMinimumWidth(300)
+        self.timeline_list.setMinimumWidth(286)
         self.timeline_list.item_checked_changed.connect(self._on_item_checked_changed)
         self.timeline_list.item_timecode_changed.connect(self._on_item_timecode_changed)
         self.timeline_list.sync_script_requested.connect(self._on_sync_script_requested)
@@ -91,10 +94,10 @@ class WorkspaceView(QWidget):
     def load_document(self, doc: DocumentState):
         self.current_doc = doc
         
-        # 1. Load Left Pane HTML, File Name & Headings
+        # 1. Load Left Pane HTML, Blocks, Page Geometry, File Name & Headings
         file_display_name = doc.name or (os.path.basename(doc.file_path) if doc.file_path else "SCRIPT")
         self.script_viewer.set_file_name(file_display_name)
-        self.script_viewer.set_content(doc.raw_html)
+        self.script_viewer.load_document_state(doc)
         self.outline_panel.load_headings(doc.headings)
 
         # 2. Load Right Pane Timeline Cards with Link Colors
@@ -171,14 +174,50 @@ class WorkspaceView(QWidget):
         db.save_document(self.current_doc)
         self._recompute_stats()
 
+    def _on_save_docx_requested(self, edited_blocks: list):
+        if not self.current_doc or not self.current_doc.file_path:
+            return
+        if not os.path.exists(self.current_doc.file_path):
+            return
+
+        script_scroll = self.script_viewer.browser.verticalScrollBar().value()
+        tl_scroll = self.timeline_list.scroll_area.verticalScrollBar().value()
+
+        updated_doc = save_blocks_to_docx(
+            self.current_doc.file_path,
+            edited_blocks,
+            previous_doc=self.current_doc
+        )
+        self.load_document(updated_doc)
+
+        self.script_viewer.browser.verticalScrollBar().setValue(script_scroll)
+        self.timeline_list.scroll_area.verticalScrollBar().setValue(tl_scroll)
+        self.copy_feedback_requested.emit("Saved .docx!")
+
     def _on_item_timecode_changed(self, item_id: str, new_tc: str):
         if not self.current_doc:
             return
 
+        target_item = None
         for item in self.current_doc.items:
             if item.id == item_id:
-                item.start_timecode = new_tc
+                target_item = item
                 break
+
+        if target_item and self.current_doc.file_path and os.path.exists(self.current_doc.file_path):
+            script_scroll = self.script_viewer.browser.verticalScrollBar().value()
+            tl_scroll = self.timeline_list.scroll_area.verticalScrollBar().value()
+            updated_doc = update_timecode_in_docx(
+                self.current_doc.file_path,
+                target_item,
+                target_item.start_timecode,
+                target_item.end_timecode,
+                previous_doc=self.current_doc
+            )
+            self.load_document(updated_doc)
+            self.script_viewer.browser.verticalScrollBar().setValue(script_scroll)
+            self.timeline_list.scroll_area.verticalScrollBar().setValue(tl_scroll)
+            return
 
         db.save_document(self.current_doc)
         self._recompute_stats()

@@ -2,15 +2,17 @@ import os
 from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPixmap, QCursor, QPainter, QColor
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame, QAbstractButton
+from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton
 from qfluentwidgets import ToolButton, TransparentToolButton, FluentIcon
 
 from .widgets import StatusDot, ClickableLabel, CopiedToastIndicator
 from ..theme import ThemeManager
 
 
-class CaptionPinButton(QAbstractButton):
+class CaptionPinButton(TitleBarButton):
     """Flat 46x32 square pin button that matches the native min/max/close caption buttons
-    (same size, square hover/press fill, no rounded box)."""
+    (same size, square hover/press fill, no rounded box). Inherits TitleBarButton so it seamlessly
+    integrates with frameless window dragging and titlebar hit testing."""
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -9,6 +9,8 @@ from typing import Tuple, List, Dict, Optional, Any
 from PySide6.QtCore import QRunnable, QObject, Signal
 from docx import Document
 from docx.text.run import Run
+from docx.shared import RGBColor, Pt
+from docx.oxml import OxmlElement
 
 from .models import DocumentState, ScriptItem, EditorNote
 from .database import db
@@ -167,12 +169,137 @@ def generate_link_colors(links: List[str]) -> Dict[str, str]:
         colors[link] = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
     return colors
 
-def render_span_text(text: str) -> str:
-    """Highlights @editor triggers and timestamps in text."""
-    # 1. Highlight @editor triggers (Yellow)
+def extract_page_geometry(doc: Document) -> Dict[str, float]:
+    """Extracts page size and margin dimensions in points from the first DOCX section."""
+    geom = {
+        "width_pt": 612.0,
+        "height_pt": 792.0,
+        "margin_top_pt": 72.0,
+        "margin_bottom_pt": 72.0,
+        "margin_left_pt": 72.0,
+        "margin_right_pt": 72.0,
+    }
+    try:
+        if doc.sections:
+            sec = doc.sections[0]
+            if sec.page_width is not None:
+                geom["width_pt"] = float(sec.page_width.pt)
+            if sec.page_height is not None:
+                geom["height_pt"] = float(sec.page_height.pt)
+            if sec.top_margin is not None:
+                geom["margin_top_pt"] = float(sec.top_margin.pt)
+            if sec.bottom_margin is not None:
+                geom["margin_bottom_pt"] = float(sec.bottom_margin.pt)
+            if sec.left_margin is not None:
+                geom["margin_left_pt"] = float(sec.left_margin.pt)
+            if sec.right_margin is not None:
+                geom["margin_right_pt"] = float(sec.right_margin.pt)
+    except Exception:
+        pass
+    return geom
+
+
+HIGHLIGHT_COLOR_MAP = {
+    'yellow': '#fef08a', 'green': '#bbf7d0', 'cyan': '#a5f3fc',
+    'magenta': '#fbcfe8', 'blue': '#bfdbfe', 'red': '#fecaca',
+    'darkblue': '#1e40af', 'darkcyan': '#0e7490', 'darkgreen': '#15803d',
+    'darkmagenta': '#86198f', 'darkred': '#991b1b', 'darkyellow': '#a16207',
+    'darkgray': '#475569', 'lightgray': '#e2e8f0', 'black': '#0f172a'
+}
+
+
+def extract_run_bg_color(run, p) -> Optional[str]:
+    """Extracts background fill color from run shading, highlight, or paragraph shading."""
+    try:
+        # 1. Run-level XML shading fill
+        fills = run._r.xpath('.//w:shd/@w:fill')
+        if fills:
+            f = str(fills[0]).strip().lstrip('#')
+            if len(f) == 6 and f.lower() not in ('auto', 'ffffff', '000000', 'none'):
+                return f"#{f.lower()}"
+        # 2. Run-level highlight color
+        hl = run.font.highlight_color
+        if hl is not None:
+            hl_str = str(hl).split()[-1].lower() if hasattr(hl, '__str__') else ''
+            if hl_str in HIGHLIGHT_COLOR_MAP:
+                return HIGHLIGHT_COLOR_MAP[hl_str]
+        hl_vals = run._r.xpath('.//w:highlight/@w:val')
+        if hl_vals:
+            v = str(hl_vals[0]).strip().lower()
+            if v in HIGHLIGHT_COLOR_MAP:
+                return HIGHLIGHT_COLOR_MAP[v]
+        # 3. Paragraph-level XML shading fill fallback
+        p_fills = p._p.xpath('./w:pPr/w:shd/@w:fill')
+        if p_fills:
+            pf = str(p_fills[0]).strip().lstrip('#')
+            if len(pf) == 6 and pf.lower() not in ('auto', 'ffffff', '000000', 'none'):
+                return f"#{pf.lower()}"
+    except Exception:
+        pass
+    return None
+
+
+def _adapt_bg_color_for_surface(hex_color: str, light_paper: bool) -> str:
+    """Ensures background highlight colors remain readable and contrast well on both light and dark paper."""
+    if not hex_color:
+        return hex_color
+    clean = hex_color.lstrip("#")
+    if len(clean) == 6:
+        try:
+            r = int(clean[0:2], 16) / 255.0
+            g = int(clean[2:4], 16) / 255.0
+            b = int(clean[4:6], 16) / 255.0
+            h, l, s = colorsys.rgb_to_hls(r, g, b)
+            if light_paper:
+                # White paper: docx pastel highlights look authentic as-is
+                return f"#{clean.lower()}"
+            else:
+                # Dark paper: darken pastel highlight so white body text remains crisp and readable
+                if l > 0.50:
+                    target_l = 0.22
+                    target_s = min(0.75, s * 1.4 + 0.15)
+                    nr, ng, nb = colorsys.hls_to_rgb(h, target_l, target_s)
+                    return f"#{int(nr * 255):02x}{int(ng * 255):02x}{int(nb * 255):02x}"
+        except Exception:
+            pass
+    return hex_color
+
+
+def _adapt_color_for_surface(hex_color: str, light_paper: bool) -> str:
+    """Ensures text colors remain readable on both Classic White Paper and Dark Paper/Surfaces."""
+    if not hex_color:
+        return hex_color
+    clean = hex_color.lstrip("#")
+    if len(clean) == 6:
+        try:
+            r = int(clean[0:2], 16) / 255.0
+            g = int(clean[2:4], 16) / 255.0
+            b = int(clean[4:6], 16) / 255.0
+            h, l, s = colorsys.rgb_to_hls(r, g, b)
+            if light_paper and l > 0.55:
+                # Darken bright/light colors (cyan, light blue, yellow) on white paper so text is crisp and readable
+                new_l = max(0.18, 0.28 if s < 0.2 else 0.32)
+                nr, ng, nb = colorsys.hls_to_rgb(h, new_l, min(1.0, s * 1.1))
+                return f"#{int(nr * 255):02x}{int(ng * 255):02x}{int(nb * 255):02x}"
+            elif not light_paper and l < 0.35:
+                # Lighten pure black / very dark DOCX run colors so they are crisp on dark surfaces
+                new_l = min(0.92, 0.82 if s < 0.2 else 0.72)
+                nr, ng, nb = colorsys.hls_to_rgb(h, new_l, s)
+                return f"#{int(nr * 255):02x}{int(ng * 255):02x}{int(nb * 255):02x}"
+        except ValueError:
+            pass
+    return hex_color
+
+
+def render_span_text(text: str, light_paper: bool = False) -> str:
+    """Highlights @editor triggers and timestamps in text with high-contrast readable colors."""
+    editor_col = "#9a3412" if light_paper else "#facc15"  # Deep burnt amber on white paper vs vibrant yellow on dark
+    ts_col = "#0369a1" if light_paper else "#38bdf8"      # Deep readable ocean blue on white paper vs sky cyan on dark
+
+    # 1. Highlight @editor triggers (Yellow / Amber)
     text = re.sub(
         r'(@?editor\s*[:;]?)', 
-        r"<span style='color: #facc15; font-weight: 700;'>\1</span>", 
+        f"<span style='color: {editor_col}; font-weight: 700;'>\\1</span>", 
         text, 
         flags=re.IGNORECASE
     )
@@ -187,28 +314,55 @@ def render_span_text(text: str) -> str:
         raw = m.group(0)
         if not raw.strip() or ':' not in raw:
             return raw
-        return f"<a href='time:{raw}' style='color: #38bdf8; text-decoration: underline; font-weight: 700; cursor: pointer;' data-time='{raw}'>{raw}</a>"
+        return f"<a href='time:{raw}' style='color: {ts_col}; text-decoration: underline; font-weight: 700; cursor: pointer;' data-time='{raw}'>{raw}</a>"
 
     text = time_pattern.sub(repl_time, text)
     return text
 
-def build_raw_html(blocks: List[Dict[str, Any]], link_colors: Dict[str, str]) -> str:
-    """Builds styled HTML for ScriptViewer preserving DOCX font colors, formatting, and headings."""
+
+def build_raw_html(
+    blocks: List[Dict[str, Any]],
+    link_colors: Dict[str, str],
+    light_paper: bool = False,
+    view_mode: str = "reading"
+) -> str:
+    """Builds styled HTML for ScriptViewer preserving DOCX font colors, highlights, formatting, and headings."""
     html_parts = []
+    is_doc = (view_mode == "document")
+    body_text_col = "#0f172a" if light_paper else "#f1f5f9"
+
+    # In Document Mode: respect MS Word styling (classic dark heading on light paper, classic blue links)
+    if is_doc:
+        heading_col = "#0f172a" if light_paper else "#f1f5f9"
+        doc_link_col = "#1155cc" if light_paper else "#60a5fa"
+    else:
+        heading_col = "#15803d" if light_paper else "#4ade80"
+        doc_link_col = "#0284c7" if light_paper else "#38bdf8"
+
     for b in blocks:
         block_id = b["id"]
         is_header = b["isHeader"]
         header_level = b["headerLevel"] or 1
 
         span_htmls = []
-        for s in b["spans"]:
+        for s in b.get("spans", []):
             txt = s["text"]
             escaped_txt = html.escape(txt)
-            styled_txt = render_span_text(escaped_txt)
+            styled_txt = render_span_text(escaped_txt, light_paper=light_paper)
 
             style_props = []
+            if s.get("bg_color"):
+                bg_col = _adapt_bg_color_for_surface(s["bg_color"], light_paper)
+                style_props.append(f"background-color: {bg_col}; border-radius: 2px; padding: 1px 2px;")
             if s.get("color"):
-                style_props.append(f"color: {s['color']}")
+                col = _adapt_color_for_surface(s["color"], light_paper)
+                style_props.append(f"color: {col}")
+            elif s.get("bg_color"):
+                # Explicitly enforce text color inside highlighted runs so light/dark surfaces don't default to wrong contrast
+                default_highlight_text_col = "#0f172a" if light_paper else "#f1f5f9"
+                style_props.append(f"color: {default_highlight_text_col}")
+            else:
+                style_props.append(f"color: {body_text_col}")
             if s.get("bold"):
                 style_props.append("font-weight: bold")
             if s.get("italic"):
@@ -216,14 +370,22 @@ def build_raw_html(blocks: List[Dict[str, Any]], link_colors: Dict[str, str]) ->
             if s.get("size"):
                 pt_match = re.search(r'([\d.]+)pt', s["size"])
                 if pt_match:
-                    em_val = round(float(pt_match.group(1)) / 11.0, 2)
-                    style_props.append(f"font-size: {em_val}em")
+                    pt_val = float(pt_match.group(1))
+                    if is_doc:
+                        style_props.append(f"font-size: {pt_val:.1f}pt")
+                    else:
+                        em_val = round(pt_val / 11.0, 2)
+                        style_props.append(f"font-size: {em_val}em")
 
             style_str = f" style='{'; '.join(style_props)}'" if style_props else ""
 
             if s.get("link"):
                 norm = normalize_link(s["link"])
-                link_col = link_colors.get(norm, "#38bdf8")
+                if is_doc:
+                    link_col = doc_link_col
+                else:
+                    raw_link_col = link_colors.get(norm, doc_link_col)
+                    link_col = _adapt_color_for_surface(raw_link_col, light_paper)
                 span_htmls.append(f"<a href='{s['link']}' style='color: {link_col}; text-decoration: underline; font-weight: bold;'>{styled_txt}</a>")
             else:
                 if style_props:
@@ -233,22 +395,33 @@ def build_raw_html(blocks: List[Dict[str, Any]], link_colors: Dict[str, str]) ->
 
         inner_content = "".join(span_htmls)
 
+        if not inner_content.strip() and not b.get("images"):
+            # Preserve blank paragraph lines for authentic DOCX layout
+            p_style = "margin-top: 0px; margin-bottom: 7px; line-height: 1.15; min-height: 12.65pt;" if is_doc else "margin: 4px 0; min-height: 1em;"
+            html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>&nbsp;</p>")
+            continue
+
         if is_header:
-            if header_level == 1:
-                tag = f"<h1 id='block-{block_id}' style='margin: 18px 0 8px 0; font-size: 1.5em; font-weight: 800; color: #4ade80;'><a name='block-{block_id}'></a>{inner_content}</h1>"
-            elif header_level == 2:
-                tag = f"<h2 id='block-{block_id}' style='margin: 14px 0 6px 0; font-size: 1.3em; font-weight: 700; color: #4ade80;'><a name='block-{block_id}'></a>{inner_content}</h2>"
-            elif header_level == 3:
-                tag = f"<h3 id='block-{block_id}' style='margin: 12px 0 4px 0; font-size: 1.15em; font-weight: 700; color: #4ade80;'><a name='block-{block_id}'></a>{inner_content}</h3>"
+            if is_doc:
+                # In Document Mode: authentic MS Word heading with before/after spacing
+                html_parts.append(f"<p id='block-{block_id}' style='margin-top: 10px; margin-bottom: 7px; line-height: 1.15; font-weight: bold; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</p>")
             else:
-                tag = f"<h4 id='block-{block_id}' style='margin: 10px 0 4px 0; font-size: 1.05em; font-weight: 700; color: #4ade80;'><a name='block-{block_id}'></a>{inner_content}</h4>"
-            html_parts.append(tag)
+                if header_level == 1:
+                    tag = f"<h1 id='block-{block_id}' style='margin: 18px 0 8px 0; font-size: 1.4em; font-weight: 800; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</h1>"
+                elif header_level == 2:
+                    tag = f"<h2 id='block-{block_id}' style='margin: 14px 0 6px 0; font-size: 1.25em; font-weight: 700; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</h2>"
+                elif header_level == 3:
+                    tag = f"<h3 id='block-{block_id}' style='margin: 12px 0 4px 0; font-size: 1.15em; font-weight: 700; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</h3>"
+                else:
+                    tag = f"<h4 id='block-{block_id}' style='margin: 10px 0 4px 0; font-size: 1.05em; font-weight: 700; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</h4>"
+                html_parts.append(tag)
         else:
-            html_parts.append(f"<p id='block-{block_id}' style='margin: 4px 0; line-height: 1.5;'><a name='block-{block_id}'></a>{inner_content}</p>")
+            p_style = f"margin-top: 0px; margin-bottom: 7px; line-height: 1.15; color: {body_text_col};" if is_doc else f"margin: 4px 0; line-height: 1.4; color: {body_text_col};"
+            html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>{inner_content}</p>")
 
     return "".join(html_parts)
 
-def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
+def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Optional[DocumentState] = None) -> DocumentState:
     """
     Parses a DOCX file using the authentic Python sidecar engine logic from the original React app.
     Extracts all run styling, font colors, headings, images, and correctly associates timestamps and links.
@@ -256,13 +429,14 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
     file_sig = compute_file_hash(file_path)
     file_name = os.path.basename(file_path)
 
-    existing_doc = db.get_document_by_signature(file_sig)
+    existing_doc = previous_doc or db.get_document_by_signature(file_sig)
     overrides = db.get_overrides(file_sig)
 
     if progress_callback:
         progress_callback(10, "Opening document...")
 
     doc = Document(file_path)
+    page_geometry = extract_page_geometry(doc)
     temp_img_dir = os.path.join(tempfile.gettempdir(), "knot_images", file_sig[:12])
     os.makedirs(temp_img_dir, exist_ok=True)
 
@@ -285,20 +459,17 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
                     break
 
         if not text and not has_images:
+            lines.append({
+                "text": "",
+                "spans": [],
+                "hiddenLinks": [],
+                "extractedImages": [],
+                "origIndex": i,
+                "isEditorLine": False,
+                "isHeader": False,
+                "headerLevel": None
+            })
             continue
-
-        is_header = False
-        header_level = None
-        if p.style and p.style.name:
-            style_name = p.style.name
-            if style_name.startswith('Heading'):
-                is_header = True
-                match = re.search(r'\d+', style_name)
-                if match:
-                    header_level = int(match.group())
-            elif 'Title' in style_name:
-                is_header = True
-                header_level = 1 if 'Subtitle' not in style_name else 2
 
         spans = []
         runs_and_links = []
@@ -332,9 +503,12 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
             size_obj = get_font_attr(run, p, 'size')
             size = f"{size_obj.pt}pt" if size_obj and hasattr(size_obj, 'pt') and size_obj.pt is not None else None
 
+            bg_color = extract_run_bg_color(run, p)
+
             spans.append({
                 "text": run.text,
                 "color": f"#{color}" if color else None,
+                "bg_color": bg_color,
                 "bold": bool(bold),
                 "italic": bool(italic),
                 "size": size,
@@ -349,6 +523,7 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
             else:
                 last_span = merged_spans[-1]
                 if (last_span["color"] == span["color"] and
+                    last_span.get("bg_color") == span.get("bg_color") and
                     last_span["bold"] == span["bold"] and
                     last_span["italic"] == span["italic"] and
                     last_span["size"] == span["size"] and
@@ -358,36 +533,65 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
                     merged_spans.append(span)
         spans = merged_spans
 
-        # Heuristic auto-detection for document headings if not marked by Word styles
-        if not is_header and text and not bool(re.search(r'@?editor', text, re.IGNORECASE)):
+        # Determine genuine document headings vs. accidental heading styles on body paragraphs
+        is_header = False
+        header_level = None
+
+        if text and not bool(re.search(r'@\w+', text, re.IGNORECASE)):
             clean_text = text.strip()
-            if len(clean_text) <= 80 and not clean_text.endswith(('.', '?', '!', ';')):
-                section_kw_match = re.match(r'^(lvl|level|chapter|section|part|tab|scene|act|outro|intro)\s*(\d*)', clean_text, re.IGNORECASE)
-                all_bold = len(spans) > 0 and all(s.get("bold") for s in spans if s.get("text", "").strip())
-                large_font = False
+            style_name = p.style.name if (p.style and p.style.name) else ""
+            is_heading_style = style_name.startswith('Heading') or 'Title' in style_name
+
+            # Check if line is dialogue/speaker line e.g. "D left:", "Sam:", "Jordan:"
+            is_dialogue = bool(re.match(r'^[A-Za-z0-9\s/–—_-]{1,25}:', clean_text)) and not clean_text.upper().startswith(
+                ('INTRO:', 'OUTRO:', 'CASE ', 'ACT ', 'HOOK:', 'BODY:', 'TITLE:')
+            )
+            is_url_line = clean_text.startswith(('http://', 'https://'))
+
+            if not is_dialogue and not is_url_line:
+                sizes = []
                 for s in spans:
-                    sz = s.get("size")
-                    if sz and sz.endswith("pt"):
+                    if s.get("size") and s["size"].endswith("pt"):
                         try:
-                            if float(sz.replace("pt", "")) >= 13.0:
-                                large_font = True
-                                break
+                            sizes.append(float(s["size"].replace("pt", "")))
                         except ValueError:
                             pass
+                max_sz = max(sizes) if sizes else None
+                has_large_font = max_sz is not None and max_sz >= 14.0
+                all_small_font = bool(sizes and all(sz <= 12.0 for sz in sizes))
+                has_bold = any(s.get("bold") for s in spans if s.get("text", "").strip())
+                all_bold = len(spans) > 0 and all(s.get("bold") for s in spans if s.get("text", "").strip())
 
-                if section_kw_match or all_bold or large_font:
-                    is_header = True
-                    if re.search(r'\b(lvl\s*2|level\s*2|sub[- ]?section)\b', clean_text, re.IGNORECASE):
-                        header_level = 2
-                    elif re.search(r'\b(lvl\s*3|level\s*3)\b', clean_text, re.IGNORECASE):
-                        header_level = 3
-                    elif section_kw_match:
-                        num = section_kw_match.group(2)
-                        header_level = int(num) if num and int(num) in [1, 2, 3, 4] else 1
-                    elif large_font:
-                        header_level = 1
+                section_kw_match = bool(re.match(
+                    r'^(\d+/\d+\.|\b(case|part|scene|act|chapter|level|lvl|tab)\b\s*\d*|intro:|outro:|hook:|body:|title:)',
+                    clean_text, re.IGNORECASE
+                ))
+
+                if is_heading_style:
+                    # In Google Docs, body text or URLs typed inside Heading 2 have explicit 11pt unbolded font
+                    if (all_small_font and not has_bold and len(clean_text) > 40) or (
+                        len(clean_text) > 85 and clean_text.endswith(('.', '?', '!', ';')) and not section_kw_match
+                    ):
+                        is_header = False
                     else:
-                        header_level = 1 if len(clean_text) < 40 else 2
+                        is_header = True
+                        m = re.search(r'\d+', style_name)
+                        if m:
+                            header_level = int(m.group())
+                        elif 'Subtitle' in style_name:
+                            header_level = 2
+                        else:
+                            header_level = 1
+                elif section_kw_match:
+                    is_header = True
+                    header_level = 1 if len(clean_text) < 40 else 2
+                elif len(clean_text) <= 80 and not clean_text.endswith(('.', '?', '!', ';')):
+                    if has_large_font:
+                        is_header = True
+                        header_level = 1
+                    elif all_bold and len(clean_text) < 40:
+                        is_header = True
+                        header_level = 2
 
         extracted_images = []
         hidden_links = []
@@ -609,6 +813,57 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
             for link in line_obj["hiddenLinks"]:
                 links_set.add(normalize_link(link))
 
+    # Reconcile new items & notes with existing_doc so checked states and IDs survive re-parses
+    if existing_doc:
+        unmatched_prev_items = list(existing_doc.items)
+        for new_item in items:
+            matched_prev = None
+            # 1. Exact (sync_id, raw_timestamp) match
+            for prev in unmatched_prev_items:
+                if prev.sync_id == new_item.sync_id and prev.raw_timestamp == new_item.raw_timestamp:
+                    matched_prev = prev
+                    break
+            # 2. Same (start_timecode, end_timecode, meta)
+            if not matched_prev:
+                for prev in unmatched_prev_items:
+                    if (prev.start_timecode == new_item.start_timecode and
+                        prev.end_timecode == new_item.end_timecode and
+                        prev.meta == new_item.meta):
+                        matched_prev = prev
+                        break
+            # 3. Same sync_id (when timestamp on that line was edited)
+            if not matched_prev:
+                for prev in unmatched_prev_items:
+                    if prev.sync_id == new_item.sync_id:
+                        matched_prev = prev
+                        break
+
+            if matched_prev:
+                unmatched_prev_items.remove(matched_prev)
+                new_item.id = matched_prev.id
+                new_item.is_checked = matched_prev.is_checked or new_item.is_checked
+                if new_item.id in overrides:
+                    ov = overrides[new_item.id]
+                    new_item.start_timecode = ov.get("start_tc") or new_item.start_timecode
+                    new_item.end_timecode = ov.get("end_tc") or new_item.end_timecode
+
+        unmatched_prev_notes = list(existing_doc.notes)
+        for new_note in notes:
+            matched_n = None
+            for prev_n in unmatched_prev_notes:
+                if prev_n.block_id == new_note.block_id and prev_n.text == new_note.text:
+                    matched_n = prev_n
+                    break
+            if not matched_n:
+                for prev_n in unmatched_prev_notes:
+                    if prev_n.text == new_note.text:
+                        matched_n = prev_n
+                        break
+            if matched_n:
+                unmatched_prev_notes.remove(matched_n)
+                new_note.id = matched_n.id
+                new_note.is_checked = matched_n.is_checked
+
     unique_links = list(links_set)
     link_colors = generate_link_colors(unique_links)
 
@@ -650,7 +905,10 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
         headings=headings,
         links=unique_links,
         checked_links=existing_doc.checked_links if existing_doc else {},
-        link_colors=link_colors
+        checked_notes=existing_doc.checked_notes if existing_doc else {},
+        link_colors=link_colors,
+        page_geometry=page_geometry,
+        blocks=blocks
     )
 
     db.save_document(new_doc_state)
@@ -660,6 +918,238 @@ def parse_docx_file(file_path: str, progress_callback=None) -> DocumentState:
         progress_callback(100, "Done!")
 
     return new_doc_state
+
+
+def _apply_spans_to_paragraph(p, spans: List[Dict[str, Any]], is_header: bool = False, header_level: Optional[int] = None, doc=None):
+    """Rebuilds text runs of a python-docx Paragraph from span dicts while preserving embedded drawings."""
+    # Preserve any run containing actual <w:drawing> or <w:pict> child elements
+    drawing_runs = []
+    for child in list(p._p):
+        if child.tag.endswith('}r'):
+            has_drawing = any(sub.tag.endswith('}drawing') or sub.tag.endswith('}pict') for sub in child.iter())
+            if has_drawing:
+                drawing_runs.append(child)
+            p._p.remove(child)
+        elif child.tag.endswith('}hyperlink'):
+            p._p.remove(child)
+
+    if doc is not None:
+        try:
+            if is_header:
+                lvl = header_level if header_level in (1, 2, 3, 4) else 1
+                style_name = f"Heading {lvl}"
+                if style_name in doc.styles:
+                    p.style = doc.styles[style_name]
+            else:
+                if p.style and p.style.name and p.style.name.startswith("Heading"):
+                    if "Normal" in doc.styles:
+                        p.style = doc.styles["Normal"]
+        except Exception:
+            pass
+
+    for s in spans:
+        txt = s.get("text", "")
+        if not txt:
+            continue
+        run = p.add_run(txt)
+        if s.get("bold") is not None:
+            run.bold = bool(s["bold"])
+        if s.get("italic") is not None:
+            run.italic = bool(s["italic"])
+        col_str = s.get("color")
+        if col_str and isinstance(col_str, str):
+            clean_hex = col_str.lstrip("#")
+            if len(clean_hex) == 6:
+                try:
+                    run.font.color.rgb = RGBColor.from_string(clean_hex.upper())
+                except Exception:
+                    pass
+        sz_str = s.get("size")
+        if sz_str and isinstance(sz_str, str) and sz_str.endswith("pt"):
+            try:
+                pt_val = float(sz_str.replace("pt", ""))
+                run.font.size = Pt(pt_val)
+            except Exception:
+                pass
+        bg_str = s.get("bg_color")
+        if bg_str and isinstance(bg_str, str):
+            clean_bg = bg_str.lstrip("#")
+            if len(clean_bg) == 6:
+                try:
+                    rPr = run._r.get_or_add_rPr()
+                    shd = OxmlElement('w:shd')
+                    shd.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', 'clear')
+                    shd.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}color', 'auto')
+                    shd.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fill', clean_bg.upper())
+                    rPr.append(shd)
+                except Exception:
+                    pass
+
+    for dr in drawing_runs:
+        p._p.append(dr)
+
+
+def save_blocks_to_docx(
+    file_path: str,
+    edited_blocks: List[Dict[str, Any]],
+    previous_doc: Optional[DocumentState] = None
+) -> DocumentState:
+    """
+    Writes modified/inserted blocks directly back to the .docx file on disk,
+    migrates the SQLite file signature in-place, and re-runs the parser to refresh DocumentState.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+
+    old_sig = previous_doc.file_signature if previous_doc else compute_file_hash(file_path)
+    doc = Document(file_path)
+    orig_paragraphs = list(doc.paragraphs)
+
+    # Index original blocks for change comparison so untouched paragraphs aren't modified
+    orig_block_map: Dict[int, Dict[str, Any]] = {}
+    if previous_doc and previous_doc.blocks:
+        for b in previous_doc.blocks:
+            if isinstance(b.get("id"), int):
+                orig_block_map[b["id"]] = b
+
+    seen_orig_ids = set()
+    last_anchor_p = orig_paragraphs[-1] if orig_paragraphs else None
+
+    for b in edited_blocks:
+        block_id = b.get("id")
+        spans = b.get("spans") or [{"text": b.get("text", ""), "bold": False, "italic": False, "color": None, "size": None, "link": None}]
+        is_header = bool(b.get("isHeader", False))
+        header_level = b.get("headerLevel")
+
+        if isinstance(block_id, int) and 0 <= block_id < len(orig_paragraphs):
+            seen_orig_ids.add(block_id)
+            target_p = orig_paragraphs[block_id]
+            last_anchor_p = target_p
+
+            orig_b = orig_block_map.get(block_id)
+            if orig_b:
+                norm_orig_txt = re.sub(r'\s+', ' ', (orig_b.get("text") or "").strip())
+                norm_new_txt = re.sub(r'\s+', ' ', (b.get("text") or "").strip())
+                # Skip touching XML if text, header state, and span styles are identical
+                if (norm_orig_txt == norm_new_txt and
+                    bool(orig_b.get("isHeader")) == is_header and
+                    orig_b.get("headerLevel") == header_level and
+                    orig_b.get("spans") == spans):
+                    continue
+
+            _apply_spans_to_paragraph(target_p, spans, is_header=is_header, header_level=header_level, doc=doc)
+        else:
+            # Newly inserted paragraph in Direct Edit Mode
+            new_p = doc.add_paragraph()
+            _apply_spans_to_paragraph(new_p, spans, is_header=is_header, header_level=header_level, doc=doc)
+            if last_anchor_p is not None and last_anchor_p._p is not new_p._p:
+                last_anchor_p._p.addnext(new_p._p)
+            last_anchor_p = new_p
+
+    # If any original text block was completely deleted by the user in Edit Mode, clear its text runs
+    if orig_block_map:
+        for orig_id, orig_b in orig_block_map.items():
+            if orig_id not in seen_orig_ids and 0 <= orig_id < len(orig_paragraphs):
+                if not orig_b.get("images"):
+                    _apply_spans_to_paragraph(orig_paragraphs[orig_id], [], is_header=False, doc=doc)
+
+    doc.save(file_path)
+    new_sig = compute_file_hash(file_path)
+    db.migrate_document_signature(old_sig, new_sig)
+
+    return parse_docx_file(file_path, previous_doc=previous_doc)
+
+
+def _format_tc_for_script(tc_norm: str, reference_raw: str = "") -> str:
+    """Formats a normalized HH:MM:SS:FF timecode to match script style (e.g., MM:SS if hours/frames are 00)."""
+    parts = tc_norm.split(":")
+    if len(parts) != 4:
+        return tc_norm
+    h, m, s, f = parts
+    ref_colons = reference_raw.count(":")
+    if f == "00" and h == "00" and ref_colons <= 1:
+        return f"{m}:{s}"
+    if f == "00" and ref_colons == 2:
+        return f"{h}:{m}:{s}"
+    return tc_norm
+
+
+def update_timecode_in_docx(
+    file_path: str,
+    item: ScriptItem,
+    new_start_tc: str,
+    new_end_tc: Optional[str] = None,
+    previous_doc: Optional[DocumentState] = None
+) -> DocumentState:
+    """
+    Updates a ScriptItem's timestamp directly inside the .docx paragraph (sync_id),
+    saves the .docx, migrates the signature, and refreshes DocumentState.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+
+    old_sig = previous_doc.file_signature if previous_doc else compute_file_hash(file_path)
+    doc = Document(file_path)
+    paragraphs = list(doc.paragraphs)
+
+    norm_start, _, _ = parse_time_single(new_start_tc)
+    if new_end_tc is not None:
+        norm_end, _, _ = parse_time_single(new_end_tc)
+    else:
+        norm_end = item.end_timecode
+
+    # Determine replacement raw timestamp string
+    raw_parts = re.split(r'\s*(?:[-–—]|to)\s*', item.raw_timestamp.strip()) if item.raw_timestamp else []
+    start_ref = raw_parts[0] if raw_parts else ""
+    end_ref = raw_parts[1] if len(raw_parts) > 1 else start_ref
+
+    fmt_start = _format_tc_for_script(norm_start, start_ref)
+    if not item.is_single and norm_end:
+        fmt_end = _format_tc_for_script(norm_end, end_ref)
+        replacement_raw = f"{fmt_start} - {fmt_end}"
+    else:
+        replacement_raw = fmt_start
+
+    # Locate paragraph containing raw_timestamp around item.sync_id
+    candidate_indices = []
+    if 0 <= item.sync_id < len(paragraphs):
+        candidate_indices.append(item.sync_id)
+    for offset in (-1, 1, 2, -2, 3):
+        idx = item.sync_id + offset
+        if 0 <= idx < len(paragraphs) and idx not in candidate_indices:
+            candidate_indices.append(idx)
+
+    replaced = False
+    for idx in candidate_indices:
+        p = paragraphs[idx]
+        if item.raw_timestamp and item.raw_timestamp in p.text:
+            # Try in-run replacement first to preserve run styling
+            for run in p.runs:
+                if item.raw_timestamp in run.text:
+                    run.text = run.text.replace(item.raw_timestamp, replacement_raw, 1)
+                    replaced = True
+                    break
+            if not replaced:
+                new_p_text = p.text.replace(item.raw_timestamp, replacement_raw, 1)
+                if p.runs:
+                    p.runs[0].text = new_p_text
+                    for r in p.runs[1:]:
+                        r.text = ""
+                else:
+                    p.add_run(new_p_text)
+                replaced = True
+            break
+
+    # Persist override as well so explicit timecode choice is guaranteed
+    db.save_override(old_sig, item.id, norm_start, norm_end or "")
+
+    if replaced:
+        doc.save(file_path)
+        new_sig = compute_file_hash(file_path)
+        db.migrate_document_signature(old_sig, new_sig)
+        return parse_docx_file(file_path, previous_doc=previous_doc)
+
+    return previous_doc or parse_docx_file(file_path)
 
 class ParseWorkerSignals(QObject):
     progress = Signal(int, str)

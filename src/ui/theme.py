@@ -312,6 +312,8 @@ class ThemeManager:
             if win_effect is not None:
                 is_dark_flag = 1 if cls.is_dark else 0
                 win_effect.DwmSetWindowAttribute(hwnd, 20, byref(c_int(is_dark_flag)), 4)
+                # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2 (Enforce native Windows 11 rounded window corners)
+                win_effect.DwmSetWindowAttribute(hwnd, 33, byref(c_int(2)), 4)
                 if not use_glass:
                     # 1 = DWMSBT_NONE (Completely disable DWM glass/mica for Adobe Gray / OLED Black)
                     win_effect.disableBlurBehindWindow(hwnd)

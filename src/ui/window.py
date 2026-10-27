@@ -67,6 +67,29 @@ class MainWindow(FluentWindow):
         self.resize(1340, 840)
         self.setMinimumSize(1024, 640)
 
+        # Early Theme Loading from SQLite so child widgets construct with correct palette
+        saved_var_str = db.get_setting("theme_variant", "pink")
+        saved_dark_str = db.get_setting("theme_dark", "true")
+        saved_orb_str = db.get_setting("orb_glow_intensity", "25")
+        saved_glass_str = db.get_setting("glass_transparency", "65")
+        saved_exp_dwm_str = db.get_setting("experimental_pure_dwm_glass", "false")
+        try:
+            self._saved_variant = ThemeVariant(saved_var_str)
+        except ValueError:
+            self._saved_variant = ThemeVariant.PINK
+        self._saved_dark = (saved_dark_str.lower() != "false")
+        try:
+            ThemeManager.orb_glow_intensity = max(0, min(100, int(saved_orb_str)))
+        except ValueError:
+            ThemeManager.orb_glow_intensity = 25
+        try:
+            ThemeManager.glass_transparency = max(0, min(100, int(saved_glass_str)))
+        except ValueError:
+            ThemeManager.glass_transparency = 65
+        ThemeManager.experimental_pure_dwm_glass = (saved_exp_dwm_str.lower() == "true")
+        ThemeManager.current_variant = self._saved_variant
+        ThemeManager.is_dark = self._saved_dark
+
         # 2. Native FluentTitleBar Configuration with Windows 11 Snap Layouts
         self.setTitleBar(FluentTitleBar(self))
         self.titleBar.setFixedHeight(40)
@@ -151,28 +174,8 @@ class MainWindow(FluentWindow):
         # Initial View: Home Screen (Full Width, Centered, No Sidebar, No Contextual Stats)
         self.go_home()
 
-        # Initial Theme & Ambient Orb Glow Apply (Loaded from SQLite single source of truth)
-        saved_var_str = db.get_setting("theme_variant", "pink")
-        saved_dark_str = db.get_setting("theme_dark", "true")
-        saved_orb_str = db.get_setting("orb_glow_intensity", "25")
-        saved_glass_str = db.get_setting("glass_transparency", "65")
-        saved_exp_dwm_str = db.get_setting("experimental_pure_dwm_glass", "false")
-        try:
-            saved_variant = ThemeVariant(saved_var_str)
-        except ValueError:
-            saved_variant = ThemeVariant.PINK
-        saved_dark = (saved_dark_str.lower() != "false")
-        try:
-            ThemeManager.orb_glow_intensity = max(0, min(100, int(saved_orb_str)))
-        except ValueError:
-            ThemeManager.orb_glow_intensity = 25
-        try:
-            ThemeManager.glass_transparency = max(0, min(100, int(saved_glass_str)))
-        except ValueError:
-            ThemeManager.glass_transparency = 65
-        ThemeManager.experimental_pure_dwm_glass = (saved_exp_dwm_str.lower() == "true")
-
-        self.apply_palette(saved_variant, dark=saved_dark)
+        # Initial Theme & Ambient Orb Glow Apply
+        self.apply_palette(self._saved_variant, dark=self._saved_dark)
 
         # 3. Asynchronous Licensing & Auth Verification
         self._init_auth()

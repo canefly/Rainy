@@ -2,7 +2,7 @@ import os
 import sys
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -901,3 +901,150 @@ def test_sizing_state_machine_left_edge_optimization(qapp):
     assert wv.timeline_list.container.updatesEnabled() is True
 
     win.close()
+
+
+def test_script_viewer_dual_modes_and_direct_editing(qapp):
+    """Verifies Reading vs. Document Mode, Dark vs. White Paper toggle, and Direct Edit Mode with .docx write-back."""
+    import shutil
+    import tempfile
+    from PySide6.QtGui import QImage
+
+    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    assert os.path.exists(sample_docx)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_docx = os.path.join(tmpdir, "ui_edit_test.docx")
+        shutil.copy2(sample_docx, temp_docx)
+
+        doc_state = parse_docx_file(temp_docx)
+        window = MainWindow()
+        window.show()
+        window.open_workspace()
+        window.workspace_view.load_document(doc_state)
+        qapp.processEvents()
+
+        sv = window.workspace_view.script_viewer
+        assert sv.view_mode == "reading"
+        assert sv.paper_theme_btn.isHidden()
+
+        # 1. Switch to Document Mode (Print Layout)
+        sv.document_mode_btn.click()
+        qapp.processEvents()
+        assert sv.view_mode == "document"
+        assert not sv.paper_theme_btn.isHidden()
+        assert sv.zoom_slider.isHidden()
+        assert sv.zoom_lbl.isHidden()
+        assert not sv.doc_status_bar.isHidden()
+        assert sv.browser._view_mode == "document"
+        assert sv.browser._page_count > 1
+        assert sv.page_indicator_lbl.text().startswith("Page 1 of ")
+        assert sv.browser._sheet_w == 816.0
+        assert sv.browser._margin_left == 96.0
+
+        # Test bottom Word-style zoom slider in Document Mode
+        sv.doc_zoom_slider.setValue(75)
+        qapp.processEvents()
+        assert sv.current_doc_zoom == 75
+        assert sv.doc_zoom_pct_btn.text() == "75%"
+        sv.doc_zoom_pct_btn.click()
+        qapp.processEvents()
+        assert sv.current_doc_zoom == 100
+        assert sv.doc_zoom_pct_btn.text() == "100%"
+
+        # Render Document Mode in Dark Paper and White Paper
+        img_dark = QImage(sv.browser.size(), QImage.Format_ARGB32)
+        sv.browser.render(img_dark)
+
+        sv.paper_theme_btn.click()
+        qapp.processEvents()
+        assert sv.paper_theme == "light"
+        assert sv.browser._paper_theme == "light"
+        img_light = QImage(sv.browser.size(), QImage.Format_ARGB32)
+        sv.browser.render(img_light)
+
+        # Switch back to Reading Mode
+        sv.reading_mode_btn.click()
+        qapp.processEvents()
+        assert sv.view_mode == "reading"
+        assert sv.paper_theme_btn.isHidden()
+
+        # 2. Toggle Direct Edit Mode
+        assert sv.is_edit_mode is False
+        assert sv.browser.isReadOnly() is True
+        assert sv.edit_toolbar.isHidden()
+
+        sv.edit_btn.click()
+        qapp.processEvents()
+        assert sv.is_edit_mode is True
+        assert sv.browser.isReadOnly() is False
+        assert not sv.edit_toolbar.isHidden()
+        assert not sv.save_btn.isHidden()
+
+        # Check first timeline card before saving edits
+        first_card = window.workspace_view.timeline_list.card_list[0]
+        first_card.set_checked(True)
+        qapp.processEvents()
+
+        # Insert an @editor tag and timestamp at the end of the document and save
+        cursor = sv.browser.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertBlock()
+        sv.browser.setTextCursor(cursor)
+        sv.insert_editor_tag()
+        sv.insert_timestamp_template()
+        qapp.processEvents()
+        assert sv.is_dirty is True
+
+        # Trigger Save (.docx)
+        sv.save_btn.click()
+        qapp.processEvents()
+
+        assert sv.is_edit_mode is False
+        assert len(window.workspace_view.current_doc.items) >= 165
+        assert window.workspace_view.current_doc.items[0].is_checked is True
+
+        window.close()
+
+
+def test_bidirectional_timestamp_sync_and_doc_mode_highlight(qapp):
+    """Verifies that clicking timestamps in script auto-scrolls to timeline card without focus outlines,
+    and clicking timeline cards in Document Mode auto-scrolls and animates the exact timestamp highlight."""
+    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    assert os.path.exists(sample_docx)
+
+    doc_state = parse_docx_file(sample_docx)
+    window = MainWindow()
+    window.show()
+    window.open_workspace()
+    window.workspace_view.load_document(doc_state)
+    qapp.processEvents()
+
+    wv = window.workspace_view
+    sv = wv.script_viewer
+    tl = wv.timeline_list
+
+    # 1. Script -> Timeline Cards
+    # Click first item's timestamp
+    first_item = doc_state.items[0]
+    sv.browser.anchorClicked.emit(QUrl(f"time:{first_item.raw_timestamp}"))
+    qapp.processEvents()
+
+    assert tl._active_highlighted_card is not None
+    assert not sv.browser.hasFocus()  # Ensure focus was cleared (no dotted outline)
+
+    # 2. Timeline Card -> Script in Document Mode
+    sv.document_mode_btn.click()
+    qapp.processEvents()
+    assert sv.view_mode == "document"
+
+    # Click card to sync script
+    card = tl.card_list[0]
+    card.sync_script_requested.emit(card.item.sync_id, card.item.raw_timestamp)
+    qapp.processEvents()
+
+    assert sv._highlight_cursor is not None
+    assert len(sv.browser.extraSelections()) > 0
+    sel = sv.browser.extraSelections()[0]
+    assert sel.format.background().color().alpha() > 0
+
+    window.close()

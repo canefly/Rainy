@@ -182,6 +182,8 @@ class Database:
             "checked_links": doc.checked_links,
             "checked_notes": doc.checked_notes,
             "link_colors": doc.link_colors,
+            "page_geometry": doc.page_geometry,
+            "blocks": doc.blocks,
             "created_at": doc.created_at,
             "updated_at": doc.updated_at,
             "is_deleted": doc.is_deleted
@@ -229,10 +231,43 @@ class Database:
             conn.execute("UPDATE documents SET is_deleted = 0, updated_at = ? WHERE id = ?", (time.time(), doc_id))
             conn.commit()
 
+    def migrate_document_signature(self, old_signature: str, new_signature: str):
+        """Migrates document state and overrides in-place when a .docx file is saved and its SHA256 changes."""
+        if not old_signature or not new_signature or old_signature == new_signature:
+            return
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT id, data_json FROM documents WHERE file_signature = ?", (old_signature,)).fetchone()
+            conn.execute("DELETE FROM documents WHERE file_signature = ? AND file_signature != ?", (new_signature, old_signature))
+            if row:
+                try:
+                    payload = json.loads(row["data_json"])
+                    payload["file_signature"] = new_signature
+                    new_json = json.dumps(payload)
+                except Exception:
+                    new_json = row["data_json"]
+                conn.execute(
+                    "UPDATE documents SET file_signature = ?, data_json = ?, updated_at = ? WHERE id = ?",
+                    (new_signature, new_json, time.time(), row["id"])
+                )
+            conn.execute("DELETE FROM delta_overrides WHERE doc_signature = ? AND doc_signature != ?", (new_signature, old_signature))
+            conn.execute(
+                "UPDATE delta_overrides SET doc_signature = ? WHERE doc_signature = ?",
+                (new_signature, old_signature)
+            )
+            conn.commit()
+
     def _deserialize_doc(self, data: Dict[str, Any]) -> DocumentState:
         items = [ScriptItem(**i) for i in data.get("items", [])]
         notes = [EditorNote(**n) for n in data.get("notes", [])]
         custom_notes = [EditorNote(**cn) for cn in data.get("custom_notes", [])]
+        default_geom = {
+            "width_pt": 612.0,
+            "height_pt": 792.0,
+            "margin_top_pt": 72.0,
+            "margin_bottom_pt": 72.0,
+            "margin_left_pt": 72.0,
+            "margin_right_pt": 72.0,
+        }
         
         return DocumentState(
             id=data["id"],
@@ -248,6 +283,8 @@ class Database:
             checked_links=data.get("checked_links", {}),
             checked_notes=data.get("checked_notes", {}),
             link_colors=data.get("link_colors", {}),
+            page_geometry=data.get("page_geometry", default_geom),
+            blocks=data.get("blocks", []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             is_deleted=bool(data.get("is_deleted", False))
