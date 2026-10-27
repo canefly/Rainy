@@ -70,6 +70,15 @@ class DocumentState:
     checked_links: Dict[str, bool] = field(default_factory=dict)
     checked_notes: Dict[str, bool] = field(default_factory=dict)
     link_colors: Dict[str, str] = field(default_factory=dict)
+    page_geometry: Dict[str, float] = field(default_factory=lambda: {
+        "width_pt": 612.0,
+        "height_pt": 792.0,
+        "margin_top_pt": 72.0,
+        "margin_bottom_pt": 72.0,
+        "margin_left_pt": 72.0,
+        "margin_right_pt": 72.0,
+    })
+    blocks: List[Dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     is_deleted: bool = False

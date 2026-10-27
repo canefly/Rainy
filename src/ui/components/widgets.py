@@ -429,7 +429,7 @@ class MiddleClickAutoScroller(QObject):
             if vp is not None:
                 if obj is vp:
                     return True
-                if hasattr(self.scroll_area, "isAncestorOf") and self.scroll_area.isAncestorOf(obj):
+                if isinstance(obj, QWidget) and hasattr(self.scroll_area, "isAncestorOf") and self.scroll_area.isAncestorOf(obj):
                     return True
         except RuntimeError:
             return False

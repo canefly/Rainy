@@ -1,3 +1,4 @@
+import re
 from typing import List, Dict, Optional
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor
@@ -8,6 +9,7 @@ from qfluentwidgets import ComboBox, SmoothScrollArea
 from .timeline_card import TimelineCard
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller
 from ...core.models import ScriptItem
+from ...core.parser import parse_time_single, process_time_span
 from ..theme import ThemeManager
 
 class TimelineList(QFrame):
@@ -21,7 +23,7 @@ class TimelineList(QFrame):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setObjectName("TimelineListPane")
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(286)
         self._is_compact = False
         self._pending_compact = False
         self._compact_timer = QTimer(self)
@@ -167,30 +169,65 @@ class TimelineList(QFrame):
                 card.setVisible(is_checked if mode == "Done" else not is_checked)
 
     def scroll_to_timestamp(self, tc: str):
-        cleaned_search = tc.replace('(', '').replace(')', '').strip()
+        if not tc:
+            return
+
+        norm_search = re.sub(r'[\s()]+', '', tc).lower()
+        clean_simple = tc.replace('(', '').replace(')', '').strip()
+
+        # Parse timecode if valid
+        parsed_s_tc = None
+        parsed_s_sec = None
+        try:
+            if any(sep in tc for sep in ('-', '–', '—', 'to')):
+                parsed_s_tc, parsed_s_sec, _, _, _, _, _, _ = process_time_span(tc)
+            else:
+                parsed_s_tc, parsed_s_sec, _ = parse_time_single(tc)
+        except Exception:
+            pass
+
+        target_card = None
         for item_id, card in self.card_widgets.items():
-            if (cleaned_search in card.item.raw_timestamp or 
-                card.item.start_timecode.startswith(cleaned_search) or 
-                cleaned_search.startswith(card.item.start_timecode) or
-                (card.item.raw_timestamp and card.item.raw_timestamp in cleaned_search)):
-                
-                if card.isHidden():
-                    card.show()
-                if self.cards_layout:
-                    self.cards_layout.activate()
+            raw_tc = card.item.raw_timestamp or ""
+            norm_raw = re.sub(r'[\s()]+', '', raw_tc).lower()
 
-                # Smoothly glide card to center of the scroll area viewport at monitor refresh rate
-                card_y = card.y()
-                viewport_h = self.scroll_area.viewport().height()
-                sb = self.scroll_area.verticalScrollBar()
-                target_scroll = max(0, min(sb.maximum(), card_y - (viewport_h // 2) + (card.height() // 2)))
-                self.smooth_scroller.scroll_to(target_scroll)
-
-                if self._active_highlighted_card is not None and self._active_highlighted_card is not card:
-                    try:
-                        self._active_highlighted_card.set_highlighted(False)
-                    except RuntimeError:
-                        pass
-                self._active_highlighted_card = card
-                card.pulse_highlight(1200)
+            # 1. Normalized whitespace-stripped equality or inclusion
+            if norm_search and norm_raw and (norm_search == norm_raw or norm_search in norm_raw or norm_raw in norm_search):
+                target_card = card
                 break
+
+            # 2. Parsed SMPTE timecode match
+            if parsed_s_tc and card.item.start_timecode == parsed_s_tc:
+                target_card = card
+                break
+
+            # 3. Parsed seconds proximity match
+            if parsed_s_sec is not None and abs(card.item.start_seconds - parsed_s_sec) < 0.5:
+                target_card = card
+                break
+
+            # 4. Fallback substring match
+            if clean_simple and (clean_simple in raw_tc or (raw_tc and raw_tc in clean_simple)):
+                target_card = card
+                break
+
+        if target_card is not None:
+            if target_card.isHidden():
+                target_card.show()
+            if self.cards_layout:
+                self.cards_layout.activate()
+
+            # Smoothly glide card to center of the scroll area viewport at monitor refresh rate
+            card_y = target_card.y()
+            viewport_h = self.scroll_area.viewport().height()
+            sb = self.scroll_area.verticalScrollBar()
+            target_scroll = max(0, min(sb.maximum(), card_y - (viewport_h // 2) + (target_card.height() // 2)))
+            self.smooth_scroller.scroll_to(target_scroll)
+
+            if self._active_highlighted_card is not None and self._active_highlighted_card is not target_card:
+                try:
+                    self._active_highlighted_card.set_highlighted(False)
+                except RuntimeError:
+                    pass
+            self._active_highlighted_card = target_card
+            target_card.pulse_highlight(1200)
