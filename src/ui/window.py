@@ -210,12 +210,12 @@ class MainWindow(FluentWindow):
 
     def moveEvent(self, e):
         super().moveEvent(e)
-        # Repaint screen-space orb parallax as the window moves across the monitor
-        # (Skipped during active window resize to prevent duplicate paints on left/top resize)
-        if not getattr(self, '_is_resizing', False) and ThemeManager.orb_glow_intensity > 0:
-            self.update()
+        # While actively moving/dragging the window across the screen, NEVER trigger synchronous repaints!
+        # Windows DWM handles window position translation in GPU hardware with zero CPU lag.
+        # Once the move finishes (WM_EXITSIZEMOVE), _on_resize_finished refreshes the screen-space orb parallax.
 
     def _on_resize_finished(self):
+        self._is_in_sizemove = False
         self._is_resizing = False
         self._is_left_resizing = False
         if hasattr(self, 'workspace_view') and self.stack.currentWidget() == self.workspace_view:
@@ -229,6 +229,7 @@ class MainWindow(FluentWindow):
             return super().nativeEvent(eventType, message)
 
         if msg.message == win32con.WM_ENTERSIZEMOVE:
+            self._is_in_sizemove = True
             self._is_resizing = False
             self._is_left_resizing = False
 

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import Slider, ComboBox
 from ..theme import ThemeManager
-from .widgets import GpuSmoothScroller, MiddleClickAutoScroller, get_display_frame_interval_ms
+from .widgets import GpuSmoothScroller, MiddleClickAutoScroller, get_display_frame_interval_ms, safe_copy_to_clipboard
 from ...core.parser import build_raw_html
 
 
@@ -503,6 +503,7 @@ class ScriptTextBrowser(QTextBrowser):
 class ScriptViewer(QFrame):
     """Left Pane: Source Script viewer with Reading/Document Print Layout modes, Direct Edit Mode, and Word status bar."""
     timestamp_clicked = Signal(str)
+    timestamp_sync_clicked = Signal(str, int)
     add_note_requested = Signal(str)
     copy_feedback_requested = Signal(str)
     save_docx_requested = Signal(list)
@@ -1400,13 +1401,17 @@ class ScriptViewer(QFrame):
             self._pulse_timer.setTimerType(Qt.PreciseTimer)
             self._pulse_timer.timeout.connect(self._step_pulse)
         self._pulse_timer.stop()
+        self._last_pulse_alpha = -1
         self._apply_pulse_alpha(230)
-        interval = get_display_frame_interval_ms(self)
+        interval = max(16, get_display_frame_interval_ms(self))
         self._pulse_timer.start(interval)
 
     def _apply_pulse_alpha(self, alpha: int):
         if not hasattr(self, '_highlight_cursor') or self._highlight_cursor is None:
             return
+        if getattr(self, '_last_pulse_alpha', None) == alpha:
+            return
+        self._last_pulse_alpha = alpha
         sel = QTextEdit.ExtraSelection()
         is_exact = self._highlight_cursor.hasSelection()
         is_light = (self.view_mode == "document" and self.paper_theme == "light")
@@ -1424,6 +1429,7 @@ class ScriptViewer(QFrame):
         elapsed = self._pulse_clock.nsecsElapsed() / 1_000_000.0
         if elapsed >= self._pulse_duration_ms:
             self._pulse_timer.stop()
+            self._last_pulse_alpha = -1
             self.browser.setExtraSelections([])
             if self.browser.viewport():
                 self.browser.viewport().update()
@@ -1523,9 +1529,21 @@ class ScriptViewer(QFrame):
             self.browser.clearFocus()
         raw_url = url.toString()
         if raw_url.startswith("time:"):
-            tc_str = raw_url.replace("time:", "")
-            QApplication.clipboard().setText(tc_str)
+            tc_part = raw_url.replace("time:", "")
+            sync_id = None
+            if "?sync=" in tc_part:
+                parts = tc_part.split("?sync=")
+                tc_str = parts[0]
+                try:
+                    sync_id = int(parts[1])
+                except (ValueError, TypeError):
+                    sync_id = None
+            else:
+                tc_str = tc_part
+            safe_copy_to_clipboard(tc_str)
             self.copy_feedback_requested.emit(tc_str)
+            if sync_id is not None:
+                self.timestamp_sync_clicked.emit(tc_str, sync_id)
             self.timestamp_clicked.emit(tc_str)
         elif raw_url.startswith("http://") or raw_url.startswith("https://"):
             import webbrowser

@@ -350,6 +350,9 @@ class RecentScriptsCard(QFrame):
         self.list_layout.addStretch(1)
 
         self.scroll.setWidget(self.list_widget)
+        if hasattr(self.scroll, "delegate") and self.scroll.delegate:
+            from qfluentwidgets.common.smooth_scroll import SmoothMode
+            self.scroll.delegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
         layout.addWidget(self.scroll)
 
         self.update_theme()

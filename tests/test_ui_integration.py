@@ -725,16 +725,29 @@ def test_middle_click_autoscroll_and_pane_titles(qapp):
     assert not sv.middle_scroller.is_active
     assert not tl.middle_scroller.is_active
 
-    # Test activating and deactivating middle click autoscroll
+    # Test activating and deactivating middle click autoscroll in both directions
     sv.middle_scroller.start(QPoint(200, 200))
     assert sv.middle_scroller.is_active
     assert sv.middle_scroller._indicator is not None
     assert not sv.middle_scroller._indicator.isHidden()
+    assert sv.middle_scroller._current_direction == 0
 
+    # Test moving downward past deadzone (distance > 8)
+    sv.middle_scroller._current_pos = QPoint(200, 240)
     sv.middle_scroller._on_frame()
+    assert sv.middle_scroller._current_direction == 1
+    assert sv.middle_scroller._indicator.direction == 1
+
+    # Test moving upward past deadzone
+    sv.middle_scroller._current_pos = QPoint(200, 160)
+    sv.middle_scroller._on_frame()
+    assert sv.middle_scroller._current_direction == -1
+    assert sv.middle_scroller._indicator.direction == -1
+
     sv.middle_scroller.stop()
     assert not sv.middle_scroller.is_active
     assert sv.middle_scroller._indicator.isHidden()
+    assert sv.middle_scroller._current_direction is None
 
     window.close()
 
@@ -1048,3 +1061,58 @@ def test_bidirectional_timestamp_sync_and_doc_mode_highlight(qapp):
     assert sel.format.background().color().alpha() > 0
 
     window.close()
+
+
+def test_splitter_drag_reflow_hold_and_zero_lag_rebake(qapp):
+    """Verifies that dragging the GpuGlowSplitter holds text reflow and timeline card cache invalidation
+    during drag ticks for 144Hz fluidity, and cleanly rebakes to settled width upon release."""
+    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    assert os.path.exists(sample_docx)
+
+    doc_state = parse_docx_file(sample_docx)
+    window = MainWindow()
+    window.resize(1080, 1920)
+    window.show()
+    window.open_workspace()
+    window.workspace_view.load_document(doc_state)
+    qapp.processEvents()
+
+    wv = window.workspace_view
+    sv = wv.script_viewer
+    tl = wv.timeline_list
+    splitter = wv.splitter
+
+    # Initial state: not held
+    assert sv.browser._is_reflow_held is False
+    assert tl._is_reflow_held is False
+
+    # Simulate splitter drag start
+    splitter.drag_started.emit()
+    qapp.processEvents()
+
+    assert sv.browser._is_reflow_held is True
+    assert tl._is_reflow_held is True
+    assert tl.is_resizing_held is True
+
+    # Pre-render cards to populate cache
+    first_card = tl.card_list[0]
+    cached_before = first_card.get_cached_surface(400, tl.card_height, 1.0)
+    assert cached_before is not None
+
+    # Resize splitter while dragging: cache MUST NOT be invalidated on pixel ticks
+    tl.resize(450, tl.height())
+    qapp.processEvents()
+    assert first_card._cached_surface is not None
+    # When requesting surface with hold_cache=True, existing surface is returned directly
+    surf_held = first_card.get_cached_surface(450, tl.card_height, 1.0, hold_cache=True)
+    assert surf_held is cached_before
+
+    # Simulate splitter drag release
+    splitter.drag_finished.emit()
+    qapp.processEvents()
+
+    assert sv.browser._is_reflow_held is False
+    assert tl._is_reflow_held is False
+
+    window.close()
+
