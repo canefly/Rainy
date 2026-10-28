@@ -291,7 +291,7 @@ def _adapt_color_for_surface(hex_color: str, light_paper: bool) -> str:
     return hex_color
 
 
-def render_span_text(text: str, light_paper: bool = False) -> str:
+def render_span_text(text: str, light_paper: bool = False, block_id: Optional[int] = None) -> str:
     """Highlights @editor triggers and timestamps in text with high-contrast readable colors."""
     editor_col = "#9a3412" if light_paper else "#facc15"  # Deep burnt amber on white paper vs vibrant yellow on dark
     ts_col = "#0369a1" if light_paper else "#38bdf8"      # Deep readable ocean blue on white paper vs sky cyan on dark
@@ -314,7 +314,8 @@ def render_span_text(text: str, light_paper: bool = False) -> str:
         raw = m.group(0)
         if not raw.strip() or ':' not in raw:
             return raw
-        return f"<a href='time:{raw}' style='color: {ts_col}; text-decoration: underline; font-weight: 700; cursor: pointer;' data-time='{raw}'>{raw}</a>"
+        href = f"time:{raw}?sync={block_id}" if block_id is not None else f"time:{raw}"
+        return f"<a href='{href}' style='color: {ts_col}; text-decoration: underline; font-weight: 700; cursor: pointer;' data-time='{raw}'>{raw}</a>"
 
     text = time_pattern.sub(repl_time, text)
     return text
@@ -348,7 +349,7 @@ def build_raw_html(
         for s in b.get("spans", []):
             txt = s["text"]
             escaped_txt = html.escape(txt)
-            styled_txt = render_span_text(escaped_txt, light_paper=light_paper)
+            styled_txt = render_span_text(escaped_txt, light_paper=light_paper, block_id=block_id)
 
             style_props = []
             if s.get("bg_color"):

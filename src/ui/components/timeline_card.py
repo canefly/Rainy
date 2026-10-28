@@ -12,7 +12,7 @@ from qfluentwidgets import (
 from ...core.models import ScriptItem
 from ...core.database import db
 from ..theme import ThemeManager
-from .widgets import get_display_frame_interval_ms
+from .widgets import get_display_frame_interval_ms, safe_copy_to_clipboard
 
 # Subtle pastel palette for meta tags matching original React linkColors
 META_PALETTE = [
@@ -46,7 +46,7 @@ class InlineTimecodeLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             text_to_copy = self.text().strip()
-            QApplication.clipboard().setText(text_to_copy)
+            safe_copy_to_clipboard(text_to_copy)
             self.copied.emit(text_to_copy)
             # Subtle flash feedback
             self.setStyleSheet("""
@@ -94,9 +94,21 @@ class InlineTimecodeLabel(QLabel):
             }}
         """)
 
+    def _get_parent_card(self):
+        curr = self.parent()
+        while curr:
+            if hasattr(curr, "is_editing"):
+                return curr
+            curr = curr.parent()
+        return None
+
     def _start_inline_edit(self):
         parent_layout = self.parent().layout()
         idx = parent_layout.indexOf(self)
+
+        parent_card = self._get_parent_card()
+        if parent_card:
+            parent_card.is_editing = True
 
         self.editor = QLineEdit(self.text(), self.parent())
         self.editor.setStyleSheet("""
@@ -114,11 +126,18 @@ class InlineTimecodeLabel(QLabel):
         self.editor.editingFinished.connect(self._finish_edit)
 
         self.hide()
-        parent_layout.insertWidget(idx, self.editor)
+        if hasattr(parent_layout, "insertWidget"):
+            parent_layout.insertWidget(idx, self.editor)
+        elif hasattr(parent_layout, "getItemPosition"):
+            row, col, rspan, cspan = parent_layout.getItemPosition(idx)
+            parent_layout.addWidget(self.editor, row, col, rspan, cspan)
+        else:
+            parent_layout.addWidget(self.editor)
         self.editor.setFocus()
         self.editor.selectAll()
 
     def _finish_edit(self):
+        parent_card = self._get_parent_card()
         if hasattr(self, 'editor') and self.editor:
             new_val = self.editor.text().strip()
             if new_val:
@@ -127,9 +146,14 @@ class InlineTimecodeLabel(QLabel):
             self.editor.deleteLater()
             self.editor = None
             self.show()
+        if parent_card:
+            parent_card.is_editing = False
+            parent_card.invalidate_cache()
+            if parent_card.parent():
+                parent_card.parent().update()
 
 
-class TimelineCueCard(CardWidget):
+class TimelineCueCard(QFrame):
     """Native Fluent card with automatic hover styling and 1px subtle stroke."""
     item_checked_changed = Signal(str, bool)
     item_timecode_changed = Signal(str, str)
@@ -138,7 +162,6 @@ class TimelineCueCard(CardWidget):
 
     def __init__(self, item: ScriptItem, doc_signature: str = "", link_colors: Dict[str, str] = None, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.item = item
         self.doc_signature = doc_signature
         self.link_colors = link_colors or {}
@@ -150,9 +173,14 @@ class TimelineCueCard(CardWidget):
         self._surface_cache: Optional[QPixmap] = None
         self._surface_cache_key = None
         self.is_compact = False
+        self.is_editing = False
+        self._cached_surface: Optional[QPixmap] = None
+        self._cached_surface_key = None
+        self.isHover = False
+        self._is_reflow_held = False
+        self.borderRadius = 8
         self.setFixedHeight(44)
         self.setObjectName("TimelineCard")
-        self.setBorderRadius(8)
 
         self._update_card_style()
 
@@ -319,6 +347,7 @@ class TimelineCueCard(CardWidget):
             wide_layout = QHBoxLayout(self.wide_widget)
             wide_layout.setContentsMargins(6, 4, 6, 4)
             wide_layout.setSpacing(5)
+            wide_layout.setAlignment(Qt.AlignCenter)
 
             self.start_btn = InlineTimecodeLabel(item.start_timecode, self.wide_widget)
             self.start_btn.setFixedWidth(86)
@@ -378,11 +407,17 @@ class TimelineCueCard(CardWidget):
                 if hasattr(self, 'out_lbl'):
                     self.out_lbl.hide()
         else:
-            self.setFixedHeight(44)
-            self.tc_container.setFixedSize(115, 32)
-            self.tc_stack.setCurrentIndex(0)
+            if compact:
+                self.setFixedHeight(50)
+                self.tc_container.setFixedSize(130, 40)
+                self.tc_stack.setCurrentIndex(0)
+            else:
+                self.setFixedHeight(44)
+                self.tc_container.setFixedSize(115, 32)
+                self.tc_stack.setCurrentIndex(0)
 
         self.updateGeometry()
+        self.invalidate_cache()
 
     _set_compact_mode = set_compact_mode
 
@@ -411,7 +446,7 @@ class TimelineCueCard(CardWidget):
             self._hl_timer = QTimer(self)
             self._hl_timer.setTimerType(Qt.PreciseTimer)
             self._hl_timer.timeout.connect(self._step_highlight_fade)
-        interval = get_display_frame_interval_ms(self)
+        interval = max(16, get_display_frame_interval_ms(self))
         self._hl_timer.start(interval)
         self.update()
 
@@ -427,12 +462,16 @@ class TimelineCueCard(CardWidget):
         # Hold full brightness briefly (first 20%), then smooth cubic ease-out fade
         progress = elapsed / self._hl_duration_ms
         if progress <= 0.2:
-            self._highlight_alpha = 1.0
+            new_alpha = 1.0
         else:
             fade_t = (progress - 0.2) / 0.8
             inv = 1.0 - fade_t
-            self._highlight_alpha = inv * inv * inv
-        self.update()
+            new_alpha = inv * inv * inv
+
+        # Only repaint when alpha visibly changes (prevents redundant repaints during initial hold)
+        if abs(new_alpha - self._highlight_alpha) > 0.01:
+            self._highlight_alpha = new_alpha
+            self.update()
 
     def paintEvent(self, e):
         w, h = self.width(), self.height()
@@ -484,10 +523,24 @@ class TimelineCueCard(CardWidget):
             painter.setPen(QColor(rgb_parts[0], rgb_parts[1], rgb_parts[2], alpha_pen))
             painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), r, r)
 
+    def enterEvent(self, event):
+        self.isHover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.isHover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        self.isHover = False
+        super().hideEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             copy_text = self.item.start_timecode or self.item.meta
-            QApplication.clipboard().setText(copy_text)
+            safe_copy_to_clipboard(copy_text)
             self.copy_feedback_requested.emit(copy_text)
             sync_target = self.item.raw_timestamp if self.item.raw_timestamp else (self.item.start_timecode or self.item.meta)
             self.sync_script_requested.emit(self.item.sync_id, sync_target)
@@ -496,6 +549,7 @@ class TimelineCueCard(CardWidget):
     def _update_card_style(self):
         pal = ThemeManager.get_palette()
         self.update()
+        self.invalidate_cache()
         if hasattr(self, 'index_lbl'):
             self.index_lbl.setStyleSheet(f"color: {pal['muted']}; font-size: 12px; font-weight: 600; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;")
         if hasattr(self, 'dur_lbl') and hasattr(self, 'item') and not self.item.is_single and self.item.end_timecode:
@@ -536,16 +590,18 @@ class TimelineCueCard(CardWidget):
 
     def set_checked(self, checked: bool):
         self.cb.setChecked(checked)
+        self.invalidate_cache()
 
     def _on_check_changed(self, state: int):
         is_checked = (state == Qt.Checked.value)
         self.item.is_checked = is_checked
         self._update_card_style()
+        self.invalidate_cache()
         self.item_checked_changed.emit(self.item.id, is_checked)
 
     def _on_meta_clicked(self, event):
         if event.button() == Qt.LeftButton:
-            QApplication.clipboard().setText(self.item.meta)
+            safe_copy_to_clipboard(self.item.meta)
             self.copy_feedback_requested.emit(self.item.meta)
             sync_target = self.item.raw_timestamp if self.item.raw_timestamp else self.item.meta
             self.sync_script_requested.emit(self.item.sync_id, sync_target)
@@ -564,6 +620,7 @@ class TimelineCueCard(CardWidget):
             self.start_btn_c.setText(new_tc)
         if self.doc_signature:
             db.save_override(self.doc_signature, self.item.id, new_tc, self.item.end_timecode, self.item.text)
+        self.invalidate_cache()
         self.item_timecode_changed.emit(self.item.id, new_tc)
 
     def _on_end_tc_edited(self, new_tc: str):
@@ -574,6 +631,46 @@ class TimelineCueCard(CardWidget):
             self.end_btn_c.setText(new_tc)
         if self.doc_signature:
             db.save_override(self.doc_signature, self.item.id, self.item.start_timecode, new_tc, self.item.text)
+        self.invalidate_cache()
         self.item_timecode_changed.emit(self.item.id, new_tc)
+
+    def isHidden(self) -> bool:
+        if getattr(self, "_filter_hidden", False):
+            return True
+        if getattr(self, "_virtual_visible", False):
+            return False
+        return super().isHidden()
+
+    def set_virtual_visible(self, val: bool):
+        self._virtual_visible = val
+        self._filter_hidden = not val
+
+    def set_hold_reflow(self, hold: bool):
+        self._is_reflow_held = hold
+
+    def get_cached_surface(self, w: int, h: int, dpr: float, hold_cache: bool = False) -> QPixmap:
+        """Returns a high-DPI GPU/RAM rasterized texture surface of this card."""
+        if (hold_cache or getattr(self, "_is_reflow_held", False)) and self._cached_surface is not None:
+            return self._cached_surface
+
+        cache_key = (w, h, int(round(dpr * 100)), bool(self.item.is_checked), bool(self.is_compact))
+        if self._cached_surface is None or self._cached_surface_key != cache_key:
+            pix = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
+            pix.setDevicePixelRatio(dpr)
+            pix.fill(Qt.transparent)
+            if self.width() != w or self.height() != h:
+                self.resize(w, h)
+            orig_hover = self.isHover
+            self.isHover = False
+            self.render(pix)
+            self.isHover = orig_hover
+            self._cached_surface = pix
+            self._cached_surface_key = cache_key
+        return self._cached_surface
+
+    def invalidate_cache(self):
+        """Invalidates pre-baked texture surface so next paint pass re-renders."""
+        self._cached_surface = None
+        self._cached_surface_key = None
 
 TimelineCard = TimelineCueCard

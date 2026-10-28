@@ -12,7 +12,8 @@ from qfluentwidgets import (
     FluentTitleBar, PushButton, PrimaryPushButton, ToolButton, FluentIcon, 
     IconWidget, SearchLineEdit, CheckBox, ProgressBar, SmoothScrollArea, ComboBox
 )
-from .widgets import MiddleClickAutoScroller
+from qfluentwidgets.components.widgets.menu import MenuAnimationType
+from .widgets import MiddleClickAutoScroller, safe_copy_to_clipboard
 from .titlebar import CaptionPinButton
 from ...core.models import EditorNote
 from ..theme import ThemeManager
@@ -264,6 +265,13 @@ class NotesDrawer(DrawerFrame):
         toolbar.setSpacing(8)
 
         self.filter_combo = ComboBox(self)
+        orig_create_menu = self.filter_combo._createComboMenu
+        def _fast_menu():
+            menu = orig_create_menu()
+            orig_exec = menu.exec
+            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(pos, ani=False, aniType=MenuAnimationType.NONE)
+            return menu
+        self.filter_combo._createComboMenu = _fast_menu
         self.filter_combo.addItems(["All", "Done", "Pending"])
         self.filter_combo.setCurrentIndex(0)
         self.filter_combo.setFixedWidth(112)
@@ -294,6 +302,9 @@ class NotesDrawer(DrawerFrame):
         self.list_layout.addStretch(1)
 
         self.scroll.setWidget(self.list_widget)
+        if hasattr(self.scroll, "delegate") and self.scroll.delegate:
+            from qfluentwidgets.common.smooth_scroll import SmoothMode
+            self.scroll.delegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
         self.middle_scroller = MiddleClickAutoScroller(self.scroll, self)
         self.main_layout.addWidget(self.scroll)
 
@@ -598,7 +609,7 @@ class NotesDrawer(DrawerFrame):
         self.apply_filter()
 
     def _copy_text(self, text: str):
-        QApplication.clipboard().setText(text)
+        safe_copy_to_clipboard(text)
         self.copy_feedback_requested.emit("Copied Note!")
 
     def _on_add_note(self):
@@ -626,6 +637,13 @@ class LinksDrawer(DrawerFrame):
         toolbar.setSpacing(8)
 
         self.filter_combo = ComboBox(self)
+        orig_create_menu = self.filter_combo._createComboMenu
+        def _fast_menu():
+            menu = orig_create_menu()
+            orig_exec = menu.exec
+            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(pos, ani=False, aniType=MenuAnimationType.NONE)
+            return menu
+        self.filter_combo._createComboMenu = _fast_menu
         self.filter_combo.addItems(["All", "Done", "Pending"])
         self.filter_combo.setCurrentIndex(0)
         self.filter_combo.setFixedWidth(112)
@@ -656,6 +674,9 @@ class LinksDrawer(DrawerFrame):
         self.list_layout.addStretch(1)
 
         self.scroll.setWidget(self.list_widget)
+        if hasattr(self.scroll, "delegate") and self.scroll.delegate:
+            from qfluentwidgets.common.smooth_scroll import SmoothMode
+            self.scroll.delegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
         self.middle_scroller = MiddleClickAutoScroller(self.scroll, self)
         self.main_layout.addWidget(self.scroll)
         self.apply_theme()
@@ -905,12 +926,12 @@ class LinksDrawer(DrawerFrame):
         self.apply_filter()
 
     def _copy_link(self, link: str):
-        QApplication.clipboard().setText(link)
+        safe_copy_to_clipboard(link)
         self.copy_feedback_requested.emit("Copied Link!")
 
     def _copy_all(self):
         if self.links:
-            QApplication.clipboard().setText("\n".join(self.links))
+            safe_copy_to_clipboard("\n".join(self.links))
             self.copy_feedback_requested.emit("Copied All Links!")
             self.copy_all_btn.setText("Copied!")
             from PySide6.QtCore import QTimer

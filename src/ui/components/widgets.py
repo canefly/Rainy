@@ -1,8 +1,8 @@
 import os
 import webbrowser
-from typing import Optional
-from PySide6.QtCore import Qt, Signal, QTimer, QRectF, QObject, QElapsedTimer, QEvent, QPointF, QPoint
-from PySide6.QtGui import QPainter, QColor, QCursor, QFont, QPen, QBrush, QLinearGradient, QRadialGradient
+from typing import Optional, Dict
+from PySide6.QtCore import Qt, Signal, QTimer, QRectF, QObject, QElapsedTimer, QEvent, QPointF, QPoint, QVariantAnimation, QEasingCurve
+from PySide6.QtGui import QPainter, QColor, QCursor, QFont, QPen, QBrush, QLinearGradient, QRadialGradient, QPixmap, QPolygonF
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QAbstractScrollArea, QApplication, QSplitter, QSplitterHandle
 from qfluentwidgets import FluentIcon, IconWidget
 
@@ -119,6 +119,68 @@ class CopiedToastIndicator(QWidget):
         self.timer.start(duration_ms)
 
 
+def safe_copy_to_clipboard(text: str, max_retries: int = 4) -> bool:
+    """Robust clipboard text setter with Win32 retry loop.
+    
+    Prevents COM error 0x800401d0 (OpenClipboard Failed) when external
+    processes (e.g. Windows Clipboard History Win+V, Office, etc.) briefly lock the clipboard.
+    """
+    if not text:
+        return False
+
+    import sys
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QThread
+
+    cb = QApplication.clipboard()
+    if cb is not None:
+        for attempt in range(max_retries):
+            try:
+                cb.setText(text)
+                if cb.text() == text:
+                    return True
+            except Exception:
+                pass
+            if attempt < max_retries - 1:
+                QThread.msleep(20)
+
+    # Direct Win32 API fallback if Qt OLE clipboard encountered a collision
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            CF_UNICODETEXT = 13
+            GMEM_MOVEABLE = 0x0002
+
+            opened = False
+            for _ in range(5):
+                if user32.OpenClipboard(None):
+                    opened = True
+                    break
+                kernel32.Sleep(20)
+
+            if opened:
+                try:
+                    user32.EmptyClipboard()
+                    encoded = text.encode("utf-16-le") + b"\x00\x00"
+                    h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                    if h_mem:
+                        p_mem = kernel32.GlobalLock(h_mem)
+                        if p_mem:
+                            ctypes.memmove(p_mem, encoded, len(encoded))
+                            kernel32.GlobalUnlock(h_mem)
+                            user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                            return True
+                finally:
+                    user32.CloseClipboard()
+        except Exception:
+            pass
+    return False
+
+
 def get_display_frame_interval_ms(widget: QWidget = None) -> int:
     """Returns the frame interval in ms matched to the active monitor's native refresh rate (e.g. 3ms @ 300Hz, 4ms @ 240Hz)."""
     hz = 60.0
@@ -142,31 +204,25 @@ def get_display_frame_interval_ms(widget: QWidget = None) -> int:
 
 
 class GpuSmoothScroller(QObject):
-    """High-refresh-rate (240Hz/300Hz VSync-paced) velocity-eased smooth scroll engine.
-
-    Uses a C2-continuous asymmetric ease-in-out velocity profile (20 * t * (1 - t)^3)
-    with Hermite initial-velocity preservation on mid-flight retargeting:
-    - Smoothly accelerates from rest over the first 25% of duration (no initial snap/jerk).
-    - Glides into the target over the remaining 75% with a silky quartic deceleration tail.
-    - Preserves real instantaneous velocity (px/ms) when retargeted mid-scroll.
+    """Hardware VSync-timed smooth scroll engine for native scroll areas.
+    
+    Provides velvety CSS-like scroll motion on programmatic jumps and timestamp clicks:
+    - Driven by Qt's QVariantAnimation with QEasingCurve.OutCubic.
+    - Yields immediately to user interaction (mouse wheel or scrollbar thumb press).
     """
     scroll_finished = Signal()
 
     def __init__(self, scroll_area: QAbstractScrollArea, parent: QObject = None):
         super().__init__(parent or scroll_area)
         self.scroll_area = scroll_area
-        self._start_val: float = 0.0
-        self._current_val: float = 0.0
-        self._target_val: float = 0.0
-        self._initial_velocity: float = 0.0  # px / ms at start of current trajectory
-        self._velocity: float = 0.0          # live instantaneous velocity (px / ms)
-        self._duration_ms: float = 360.0
+        self._target_val: int = 0
         self._active: bool = False
+        self.enable_smooth_wheel: bool = False
 
-        self._clock = QElapsedTimer()
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)
-        self._timer.timeout.connect(self._on_frame)
+        self._ani = QVariantAnimation(self)
+        self._ani.setEasingCurve(QEasingCurve.OutCubic)
+        self._ani.valueChanged.connect(self._on_ani_value_changed)
+        self._ani.finished.connect(self._on_ani_finished)
 
         if self.scroll_area.viewport():
             self.scroll_area.viewport().installEventFilter(self)
@@ -180,109 +236,84 @@ class GpuSmoothScroller(QObject):
 
     @property
     def target_value(self) -> int:
-        return int(round(self._target_val))
+        return self._target_val
 
     def eventFilter(self, obj, event: QEvent):
-        if event.type() == QEvent.Type.Wheel and self._active:
-            # Immediately yield to manual user mouse wheel scrolling
-            self.stop()
+        if event.type() == QEvent.Type.Wheel:
+            if self.enable_smooth_wheel:
+                delta_y = event.angleDelta().y()
+                if delta_y != 0:
+                    steps = -int((delta_y / 120.0) * 88)
+                    self.scroll_by(steps)
+                    event.accept()
+                    return True
+            elif self._active:
+                self.stop()
         return super().eventFilter(obj, event)
 
     def stop(self):
         if self._active:
             self._active = False
-            self._velocity = 0.0
-            self._initial_velocity = 0.0
-            self._timer.stop()
-            self._sync_fluent_delegate(self.scroll_area.verticalScrollBar().value())
+            self._ani.stop()
+            sb = self.scroll_area.verticalScrollBar()
+            if sb:
+                self._sync_fluent_delegate(sb.value())
+
+    def scroll_by(self, delta: int, duration_ms: int = None):
+        sb = self.scroll_area.verticalScrollBar()
+        if sb is None:
+            return
+        base_target = self._target_val if self._active else sb.value()
+        new_target = base_target + delta
+        wheel_dur = duration_ms if duration_ms is not None else 190
+        self.scroll_to(new_target, duration_ms=wheel_dur)
 
     def scroll_to(self, target_value: int, duration_ms: int = None):
         sb = self.scroll_area.verticalScrollBar()
         if sb is None:
             return
 
-        # Stop any competing QFluentWidgets SmoothScrollBar animation first
         self._stop_fluent_delegate_ani()
-
-        clamped_target = float(max(sb.minimum(), min(sb.maximum(), int(target_value))))
-        current = self._current_val if self._active else float(sb.value())
+        clamped_target = max(sb.minimum(), min(sb.maximum(), int(round(target_value))))
+        current = sb.value()
         distance = abs(clamped_target - current)
 
-        if distance < 1.5:
-            self._apply_scroll_value(int(round(clamped_target)))
+        if distance < 2:
+            self._apply_scroll_value(clamped_target)
             self.stop()
             self.scroll_finished.emit()
             return
 
-        self._start_val = current
-        self._current_val = current
         self._target_val = clamped_target
-        # Preserve live momentum if retargeting mid-flight, otherwise accelerate smoothly from 0
-        self._initial_velocity = self._velocity if self._active else 0.0
+        dur = int(duration_ms) if duration_ms is not None else int(min(460, max(280, 200 + (distance ** 0.5) * 4.6)))
 
-        if duration_ms is not None:
-            self._duration_ms = float(max(80, duration_ms))
-        else:
-            # Adaptive duration allowing smooth ease-in velocity buildup + long cushioned landing
-            self._duration_ms = float(min(540, max(250, int(200 + (distance ** 0.5) * 7.8))))
-
-        interval = get_display_frame_interval_ms(self.scroll_area)
-        self._clock.restart()
+        self._ani.stop()
+        self._ani.setDuration(dur)
+        self._ani.setStartValue(current)
+        self._ani.setEndValue(clamped_target)
         self._active = True
-        if self._timer.interval() != interval or not self._timer.isActive():
-            self._timer.start(interval)
+        self._ani.start()
 
-    def _on_frame(self):
+    def _on_ani_value_changed(self, val):
         if not self._active:
-            self._timer.stop()
             return
+        int_val = int(round(val))
+        self._apply_scroll_value(int_val)
 
+    def _on_ani_finished(self):
+        if not self._active:
+            return
+        self._active = False
         sb = self.scroll_area.verticalScrollBar()
-        if sb is None:
-            self.stop()
-            return
-
-        # Re-clamp target in case document/container max range changed dynamically
-        clamped_target = float(max(sb.minimum(), min(sb.maximum(), int(round(self._target_val)))))
-        dur = max(1.0, self._duration_ms)
-        elapsed_ms = self._clock.nsecsElapsed() / 1_000_000.0
-        t = min(1.0, max(0.0, elapsed_ms / dur))
-
-        # Asymmetric C2 ease-in-out velocity curve:
-        # s(t) = 1 - (1 - t)^4 * (1 + 4*t)
-        # ds/dt = 20 * t * (1 - t)^3  --> accelerates smoothly from 0, peaks at t=0.25, glides out to t=1.0
-        inv = 1.0 - t
-        inv3 = inv * inv * inv
-        inv4 = inv3 * inv
-        eased = 1.0 - inv4 * (1.0 + 4.0 * t)
-        deased_dt = 20.0 * t * inv3
-
-        delta = clamped_target - self._start_val
-        v0_term = (self._initial_velocity * dur) * t * inv4
-        dv0_dt = (self._initial_velocity * dur) * inv3 * (1.0 - 5.0 * t)
-
-        self._current_val = self._start_val + delta * eased + v0_term
-        self._velocity = (delta * deased_dt + dv0_dt) / dur
-        int_val = int(round(self._current_val))
-
-        if sb.value() != int_val:
-            self._apply_scroll_value(int_val)
-
-        if t >= 1.0 or (t > 0.35 and abs(clamped_target - self._current_val) < 0.5 and abs(self._velocity) < 0.02):
-            final_int = int(round(clamped_target))
-            if sb.value() != final_int:
-                self._apply_scroll_value(final_int)
-            self._active = False
-            self._velocity = 0.0
-            self._initial_velocity = 0.0
-            self._timer.stop()
-            self.scroll_finished.emit()
+        if sb is not None:
+            sb.setValue(self._target_val)
+            self._sync_fluent_delegate(self._target_val)
+        self.scroll_finished.emit()
 
     def _apply_scroll_value(self, val: int):
         sb = self.scroll_area.verticalScrollBar()
         if sb is not None:
             sb.setValue(val)
-        self._sync_fluent_delegate(val)
 
     def _stop_fluent_delegate_ani(self):
         delegate = getattr(self.scroll_area, "delegate", None)
@@ -298,8 +329,8 @@ class GpuSmoothScroller(QObject):
             if vbar is not None:
                 if hasattr(vbar, "resetValue"):
                     vbar.resetValue(val)
-                if vbar.value() != val:
-                    vbar.val = val
+                if hasattr(vbar, "setValue") and vbar.value() != val:
+                    vbar.setValue(val, useAni=False)
 
 
 class AutoScrollIndicator(QWidget):
@@ -390,6 +421,69 @@ class MiddleClickAutoScroller(QObject):
     """
     _ACTIVE_SCROLLER: Optional['MiddleClickAutoScroller'] = None
     _GLOBAL_FILTER: Optional[_GlobalAutoScrollFilter] = None
+    _CURSOR_CACHE: Dict[int, QCursor] = {}
+
+    @classmethod
+    def _get_cursor(cls, direction: int) -> QCursor:
+        """Returns a cached high-DPI directional autoscroll cursor.
+
+        direction:
+         0 -> Neutral / Origin (vertical double-arrow with center dot)
+        -1 -> Upward scroll arrow
+         1 -> Downward scroll arrow
+        """
+        if direction in cls._CURSOR_CACHE:
+            return cls._CURSOR_CACHE[direction]
+
+        # 32x32 crisp logical cursor canvas
+        pix = QPixmap(32, 32)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        # Dual outline: 1.5px dark shadow stroke + bright white 245-alpha fill
+        # Ensures 100% sharp contrast across dark, light, and translucent surfaces
+        pen = QPen(QColor(0, 0, 0, 220), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        brush = QBrush(QColor(255, 255, 255, 245))
+        p.setPen(pen)
+        p.setBrush(brush)
+
+        if direction == -1:
+            # High-visibility upward arrow with stem
+            poly = QPolygonF([
+                QPointF(16, 5),
+                QPointF(25, 16),
+                QPointF(19, 16),
+                QPointF(19, 27),
+                QPointF(13, 27),
+                QPointF(13, 16),
+                QPointF(7, 16),
+            ])
+            p.drawPolygon(poly)
+        elif direction == 1:
+            # High-visibility downward arrow with stem
+            poly = QPolygonF([
+                QPointF(16, 27),
+                QPointF(25, 16),
+                QPointF(19, 16),
+                QPointF(19, 5),
+                QPointF(13, 5),
+                QPointF(13, 16),
+                QPointF(7, 16),
+            ])
+            p.drawPolygon(poly)
+        else:
+            # Neutral / Origin: dual vertical triangles with center anchor dot
+            poly_up = QPolygonF([QPointF(16, 5), QPointF(22, 12), QPointF(10, 12)])
+            poly_down = QPolygonF([QPointF(16, 27), QPointF(22, 20), QPointF(10, 20)])
+            p.drawPolygon(poly_up)
+            p.drawPolygon(poly_down)
+            p.drawEllipse(QPointF(16, 16), 2.5, 2.5)
+
+        p.end()
+        cursor = QCursor(pix, 16, 16)
+        cls._CURSOR_CACHE[direction] = cursor
+        return cursor
 
     def __init__(self, scroll_area: QAbstractScrollArea, parent: QObject = None):
         super().__init__(parent or scroll_area)
@@ -402,6 +496,7 @@ class MiddleClickAutoScroller(QObject):
         self._press_pos = QPoint()
         self._has_dragged = False
         self._subpixel = 0.0
+        self._current_direction: Optional[int] = None
 
         self._clock = QElapsedTimer()
         self._timer = QTimer(self)
@@ -452,6 +547,20 @@ class MiddleClickAutoScroller(QObject):
             if not self._has_dragged:
                 if (self._current_pos - self._press_pos).manhattanLength() > 6:
                     self._has_dragged = True
+
+            # Instantaneous directional cursor response on mouse move
+            dy = self._current_pos.y() - self._anchor_pos.y()
+            dead_zone = 8
+            if abs(dy) <= dead_zone:
+                target_dir = 0
+            elif dy > 0:
+                target_dir = 1
+            else:
+                target_dir = -1
+
+            if self._current_direction != target_dir:
+                self._current_direction = target_dir
+                QApplication.changeOverrideCursor(self._get_cursor(target_dir))
             return False
 
         if etype == QEvent.MouseButtonPress:
@@ -491,7 +600,8 @@ class MiddleClickAutoScroller(QObject):
         self._indicator.show()
         self._indicator.raise_()
 
-        QApplication.setOverrideCursor(Qt.SizeVerCursor)
+        self._current_direction = 0
+        QApplication.setOverrideCursor(self._get_cursor(0))
 
         interval = get_display_frame_interval_ms(self.scroll_area)
         self._clock.restart()
@@ -512,6 +622,7 @@ class MiddleClickAutoScroller(QObject):
             QApplication.restoreOverrideCursor()
         except Exception:
             pass
+        self._current_direction = None
 
         sb = self.scroll_area.verticalScrollBar()
         if sb is not None:
@@ -533,15 +644,27 @@ class MiddleClickAutoScroller(QObject):
         if abs(dy) <= dead_zone:
             if self._indicator is not None:
                 self._indicator.set_direction(0)
+            if self._current_direction != 0:
+                self._current_direction = 0
+                QApplication.changeOverrideCursor(self._get_cursor(0))
             return
 
         sign = 1 if dy > 0 else -1
+        if self._current_direction != sign:
+            self._current_direction = sign
+            QApplication.changeOverrideCursor(self._get_cursor(sign))
+
         if self._indicator is not None:
             self._indicator.set_direction(sign)
 
+        # Boundary clamping: stop subpixel drift when pressed against start/end of content
+        if (sb.value() <= sb.minimum() and sign < 0) or (sb.value() >= sb.maximum() and sign > 0):
+            self._subpixel = 0.0
+            return
+
         delta = abs(dy) - dead_zone
-        # Smooth progressive speed curve
-        speed = sign * min(150.0, (delta * 0.35 + (delta ** 1.55) * 0.045))
+        # Browser-grade progressive velocity curve with subpixel acceleration
+        speed = sign * min(180.0, (delta * 0.28 + (delta ** 1.62) * 0.038))
 
         interval = max(2, self._timer.interval())
         self._subpixel += speed * (interval / 16.0)
@@ -553,7 +676,6 @@ class MiddleClickAutoScroller(QObject):
             new_val = max(sb.minimum(), min(sb.maximum(), old_val + step))
             if new_val != old_val:
                 sb.setValue(new_val)
-                self._sync_fluent_delegate(new_val)
 
     def _sync_fluent_delegate(self, val: int):
         delegate = getattr(self.scroll_area, "delegate", None)
@@ -576,6 +698,9 @@ class GpuGlowSplitterHandle(QSplitterHandle):
     - Hover / Drag: smooth 240Hz/300Hz animated neon/accent glow beam, radial bloom,
       and expanding tactile grip capsule.
     """
+    drag_started = Signal()
+    drag_finished = Signal()
+
     def __init__(self, orientation: Qt.Orientation, parent: QSplitter):
         super().__init__(orientation, parent)
         self.setMouseTracking(True)
@@ -607,12 +732,14 @@ class GpuGlowSplitterHandle(QSplitterHandle):
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self._start_anim()
+            self.drag_started.emit()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._dragging = False
             self._start_anim()
+            self.drag_finished.emit()
         super().mouseReleaseEvent(event)
 
     def _start_anim(self):
@@ -730,12 +857,18 @@ class GpuGlowSplitterHandle(QSplitterHandle):
 
 class GpuGlowSplitter(QSplitter):
     """Custom QSplitter with GPU-accelerated glowing hover/drag divider handle."""
+    drag_started = Signal()
+    drag_finished = Signal()
+
     def __init__(self, orientation: Qt.Orientation = Qt.Horizontal, parent: QWidget = None):
         super().__init__(orientation, parent)
         self.setHandleWidth(12)
 
     def createHandle(self) -> QSplitterHandle:
-        return GpuGlowSplitterHandle(self.orientation(), self)
+        handle = GpuGlowSplitterHandle(self.orientation(), self)
+        handle.drag_started.connect(self.drag_started.emit)
+        handle.drag_finished.connect(self.drag_finished.emit)
+        return handle
 
 
 class MagneticDetentSlider(QWidget):

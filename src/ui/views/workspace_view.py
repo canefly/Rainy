@@ -35,6 +35,8 @@ class WorkspaceView(QWidget):
         # Main Splitter: Left (Outline + Script) + Right (Timeline) with GPU glow handle
         self.splitter = GpuGlowSplitter(Qt.Horizontal, self)
         self.splitter.setChildrenCollapsible(False)
+        self.splitter.drag_started.connect(self._on_splitter_drag_started)
+        self.splitter.drag_finished.connect(self._on_splitter_drag_finished)
 
         # Left Container: Document Outline (Collapsible) + Source Script Viewer
         self.left_container = QWidget(self)
@@ -49,6 +51,7 @@ class WorkspaceView(QWidget):
         left_layout.addWidget(self.outline_panel)
 
         self.script_viewer = ScriptViewer(self.left_container)
+        self.script_viewer.timestamp_sync_clicked.connect(self._on_script_timestamp_sync_clicked)
         self.script_viewer.timestamp_clicked.connect(self._on_script_timestamp_clicked)
         self.script_viewer.add_note_requested.connect(self._on_add_custom_note)
         self.script_viewer.copy_feedback_requested.connect(self.copy_feedback_requested.emit)
@@ -152,8 +155,21 @@ class WorkspaceView(QWidget):
         self.notes_drawer.hide()
         self.links_drawer.hide()
 
+    def _on_splitter_drag_started(self):
+        """Freezes text reflow and texture rebaking while dragging the splitter for 144Hz fluidity."""
+        self.script_viewer.set_hold_reflow(True)
+        self.timeline_list.set_hold_reflow(True)
+
+    def _on_splitter_drag_finished(self):
+        """Unfreezes and runs a single clean rebake pass to the final settled width."""
+        self.script_viewer.set_hold_reflow(False)
+        self.timeline_list.set_hold_reflow(False)
+
     def _on_heading_clicked(self, heading_id: int):
         self.script_viewer.scroll_to_anchor(f"heading-{heading_id}")
+
+    def _on_script_timestamp_sync_clicked(self, tc: str, sync_id: int):
+        self.timeline_list.scroll_to_timestamp(tc, sync_id)
 
     def _on_script_timestamp_clicked(self, tc: str):
         self.timeline_list.scroll_to_timestamp(tc)
