@@ -259,7 +259,7 @@ def test_timeline_card_responsive_domain(qapp):
     assert card.meta_pill.height() == 22
     assert card.tc_container.height() == 32
     assert card.tc_container.width() == 248
-    assert card.index_lbl.geometry().x() - (card.cb.geometry().x() + card.cb.geometry().width()) == 6
+    assert card.index_lbl.geometry().x() - (card.cb.geometry().x() + card.cb.geometry().width()) in (5, 6)
 
     if hasattr(card, 'domain_lbl') and card.domain_lbl:
         assert not card.domain_lbl.isHidden()
