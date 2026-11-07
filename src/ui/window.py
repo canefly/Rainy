@@ -4,9 +4,9 @@ from typing import Optional
 from ctypes.wintypes import MSG
 import win32con
 from PySide6.QtCore import Qt, QThreadPool, QTimer
-from PySide6.QtGui import QIcon, QColor, QPainter, QImage, QBrush
+from PySide6.QtGui import QIcon, QColor, QPainter, QImage, QBrush, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QApplication
+    QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QApplication, QFileDialog, QInputDialog
 )
 from qfluentwidgets import (
     FluentWindow, FluentTitleBar, InfoBar, InfoBarPosition, isDarkTheme
@@ -16,7 +16,7 @@ from .theme import ThemeManager, ThemeVariant
 from .components.preferences_dialog import PreferencesDialog
 from .components.about_dialog import AboutWindow
 from .components.data_vault import DataVaultWindow
-from .components.titlebar import TitleBarBrandingWidget, TitleBarStatsWidget
+from .components.titlebar import TitleBarBrandingWidget, TitleBarStatsWidget, TitleBarMenuWidget
 from .components.sidebar import SidebarDock
 from .views.home_view import HomeView
 from .views.workspace_view import WorkspaceView
@@ -109,6 +109,38 @@ class MainWindow(FluentWindow):
         self.title_branding.setFixedHeight(32)
         self.titleBar.hBoxLayout.insertWidget(0, self.title_branding, 0, Qt.AlignTop)
 
+        # Inline Action Menubar: File | Edit | Export | Help
+        self.title_menu = TitleBarMenuWidget(self.titleBar)
+        self.title_menu.setFixedHeight(32)
+        self.titleBar.hBoxLayout.insertWidget(1, self.title_menu, 0, Qt.AlignTop)
+
+        # Wire title menu actions
+        self.title_menu.open_doc_requested.connect(self._on_menu_open_doc)
+        self.title_menu.open_project_requested.connect(self._on_menu_open_project)
+        self.title_menu.save_project_as_requested.connect(self._on_menu_save_project_as)
+        self.title_menu.set_footage_requested.connect(self._on_menu_set_footage)
+        self.title_menu.open_projects_folder_requested.connect(self._on_menu_open_projects_folder)
+        self.title_menu.close_workspace_requested.connect(self.go_home)
+        self.title_menu.exit_requested.connect(self.close)
+
+        self.title_menu.find_requested.connect(self._on_menu_find)
+        self.title_menu.mark_all_done_requested.connect(lambda: self.workspace_view.mark_all_done())
+        self.title_menu.reset_checklists_requested.connect(lambda: self.workspace_view.reset_all_checklists())
+
+        self.title_menu.export_xml_requested.connect(self._on_menu_export_xml)
+        self.title_menu.export_timestamps_requested.connect(self._on_menu_export_timestamps)
+
+        self.title_menu.shortcuts_requested.connect(self._on_menu_shortcuts)
+        self.title_menu.settings_requested.connect(self.open_settings)
+        self.title_menu.about_requested.connect(self.open_about)
+
+        # Global Keyboard Accelerators
+        QShortcut(QKeySequence("Ctrl+O"), self, self._on_menu_open_doc)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._on_menu_save_project_as)
+        QShortcut(QKeySequence("Ctrl+E"), self, self._on_menu_export_xml)
+        QShortcut(QKeySequence("Ctrl+F"), self, self._on_menu_find)
+        QShortcut(QKeySequence("F1"), self, self._on_menu_shortcuts)
+
         # Right stats widget (inserted right before window control buttons)
         self.title_stats = TitleBarStatsWidget(self.titleBar)
         self.title_stats.setFixedHeight(32)
@@ -143,7 +175,6 @@ class MainWindow(FluentWindow):
         self.sidebar.outline_clicked.connect(self._on_outline_clicked)
         self.sidebar.notes_clicked.connect(self._on_notes_clicked)
         self.sidebar.links_clicked.connect(self._on_links_clicked)
-        self.sidebar.focus_mode_clicked.connect(self._on_focus_mode_clicked)
         self.sidebar.vault_clicked.connect(self.open_vault)
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.hide()
@@ -158,7 +189,7 @@ class MainWindow(FluentWindow):
         self.home_view.file_selected.connect(self.load_docx_file)
         self.home_view.settings_requested.connect(self.open_settings)
         self.home_view.updates_requested.connect(self.open_about)
-        self.home_view.copyright_requested.connect(lambda: self.open_settings(initial_tab=3))
+        self.home_view.copyright_requested.connect(lambda: self.open_settings(initial_tab=4))
         self.stack.addWidget(self.home_view)
 
         self.workspace_view = WorkspaceView(self.stack)
@@ -166,6 +197,7 @@ class MainWindow(FluentWindow):
         self.workspace_view.copy_feedback_requested.connect(self.title_stats.trigger_copied)
         self.workspace_view.notes_count_changed.connect(self.sidebar.set_notes_count)
         self.workspace_view.links_count_changed.connect(self.sidebar.set_links_count)
+        self.workspace_view.links_drawer.relink_requested.connect(self._on_menu_set_footage)
         self.stack.addWidget(self.workspace_view)
 
         body_layout.addWidget(self.stack, 1)
@@ -333,6 +365,8 @@ class MainWindow(FluentWindow):
             self.setStyleSheet(qss)
         if hasattr(self, 'title_branding') and self.title_branding:
             self.title_branding.apply_theme()
+        if hasattr(self, 'title_menu') and self.title_menu:
+            self.title_menu.apply_theme()
         if hasattr(self, 'title_stats') and self.title_stats:
             self.title_stats.apply_theme()
         self._apply_caption_button_theme()
@@ -358,9 +392,15 @@ class MainWindow(FluentWindow):
                     ThemeManager.enable_window_backdrop(drawer)
 
     def go_home(self):
-        """Switches to Home Screen: Hides Sidebar & Hides Contextual Stats."""
+        """Switches to Home Screen: Hides Sidebar, closes floating tool drawers, & resets pending jobs."""
         self.sidebar.hide()
         self.title_stats.set_has_document(False)
+        if hasattr(self, 'title_menu') and self.title_menu:
+            self.title_menu.set_has_document(False)
+        if hasattr(self, 'workspace_view') and self.workspace_view:
+            self.workspace_view.close_drawers()
+        from ..core.unfurl_engine import unfurl_engine
+        unfurl_engine.cancel_pending()
         self.stack.setCurrentWidget(self.home_view)
         self.home_view.refresh_recents()
 
@@ -368,20 +408,27 @@ class MainWindow(FluentWindow):
         """Switches to Workspace View: Shows Sidebar & Shows Contextual Stats."""
         self.sidebar.show()
         self.title_stats.set_has_document(True)
+        if hasattr(self, 'title_menu') and self.title_menu:
+            self.title_menu.set_has_document(True)
         self.stack.setCurrentWidget(self.workspace_view)
 
-    def open_settings(self, initial_tab: int = 0):
+    def open_settings(self, initial_tab=0):
         """Opens or focuses the independent Preferences desktop window."""
         if not hasattr(self, 'pref_window') or self.pref_window is None:
             self.pref_window = PreferencesDialog(None, initial_tab=initial_tab)
             self.pref_window.theme_changed.connect(self.apply_palette)
             self.pref_window.document_opened.connect(self.load_docx_file)
+            self.pref_window.smpte_conforming_changed.connect(self._on_smpte_conforming_changed)
         else:
-            self.pref_window.nav_list.setCurrentRow(initial_tab)
+            self.pref_window.switch_tab(initial_tab)
 
         self.pref_window.show()
         self.pref_window.raise_()
         self.pref_window.activateWindow()
+
+    def _on_smpte_conforming_changed(self, checked: bool = True):
+        if hasattr(self, 'workspace_view') and self.workspace_view:
+            self.workspace_view.refresh_timecodes()
 
     def open_about(self):
         """Opens or focuses the independent About & Updates desktop window."""
@@ -394,7 +441,7 @@ class MainWindow(FluentWindow):
     def open_vault(self):
         """Opens or focuses the independent Data Vault desktop window."""
         if hasattr(self, 'pref_window') and self.pref_window is not None:
-            self.pref_window.nav_list.setCurrentRow(1)
+            self.pref_window.switch_tab(1)
         if not hasattr(self, 'vault_window') or self.vault_window is None:
             self.vault_window = DataVaultWindow()
             self.vault_window.document_opened.connect(self.load_docx_file)
@@ -501,6 +548,242 @@ class MainWindow(FluentWindow):
             self.updateFrameless()
         self.show()
         self._apply_backdrop_effect()
+
+    def _on_menu_open_doc(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Script or Project",
+            "",
+            "Supported Files (*.docx *.rainyproj);;Word Documents (*.docx);;Rainy Projects (*.rainyproj);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+        if file_path.lower().endswith(".rainyproj"):
+            self._load_rainyproj_file(file_path)
+        else:
+            self.load_docx_file(file_path)
+
+    def _on_menu_open_project(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Rainy Project",
+            "",
+            "Rainy Projects (*.rainyproj);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+        self._load_rainyproj_file(file_path)
+
+    def _load_rainyproj_file(self, proj_path: str):
+        from ..core.project_manager import project_manager
+        proj = project_manager.load_project(proj_path)
+        if not proj:
+            InfoBar.error(
+                title="Invalid Project",
+                content=f"Could not load project: {os.path.basename(proj_path)}",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500
+            )
+            return
+
+        target_docx = proj.docx_path
+        if not target_docx or not os.path.exists(target_docx):
+            target_docx, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Locate Associated Script (.docx) for {proj.doc_name}",
+                "",
+                "Word Documents (*.docx);;All Files (*.*)"
+            )
+        if target_docx and os.path.exists(target_docx):
+            self.load_docx_file(target_docx)
+
+    def _on_menu_save_project_as(self):
+        if not self.current_doc:
+            return
+        doc_base = self.current_doc.name or "Project"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project Copy As",
+            f"{doc_base}_copy.rainyproj",
+            "Rainy Project (*.rainyproj);;All Files (*.*)"
+        )
+        if save_path:
+            self.workspace_view._save_auto_project(custom_path=save_path)
+            InfoBar.success(
+                title="Project Copy Saved",
+                content=f"Saved copy to {os.path.basename(save_path)}",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500
+            )
+
+    def _on_menu_set_footage(self):
+        if not self.current_doc:
+            return
+        from .components.footage_relink_dialog import FootageRelinkDialog
+        curr_folder = getattr(self.workspace_view, "footage_folder", "")
+        curr_linked = getattr(self.workspace_view, "linked_footage", {})
+
+        dlg = FootageRelinkDialog(
+            links=self.current_doc.links,
+            current_footage_dir=curr_folder,
+            existing_linked=curr_linked,
+            parent=self
+        )
+
+        def _on_linked(folder: str, mapping: dict):
+            self.workspace_view.set_footage_folder(folder, mapping)
+            total = len(self.current_doc.links)
+            matched = len(mapping)
+            dir_name = os.path.basename(folder) or folder
+            InfoBar.success(
+                title="Footage Audit Complete",
+                content=f"Linked {matched} of {total} media assets in {dir_name}.",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4000
+            )
+
+        dlg.footage_linked.connect(_on_linked)
+        dlg.exec()
+
+    def _on_menu_open_projects_folder(self):
+        from ..core.project_manager import project_manager
+        folder = project_manager.get_projects_dir()
+        if sys.platform == "win32":
+            os.startfile(folder)
+        else:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _on_menu_find(self):
+        if self.stack.currentWidget() != self.workspace_view or not self.current_doc:
+            return
+        query, ok = QInputDialog.getText(self, "Find in Script", "Search text:")
+        if ok and query:
+            browser = self.workspace_view.script_viewer.browser
+            found = browser.find(query)
+            if not found:
+                browser.moveCursor(QTextCursor.Start)
+                found = browser.find(query)
+            if not found:
+                InfoBar.warning(
+                    title="Not Found",
+                    content=f"No occurrences of '{query}' found in script.",
+                    parent=self,
+                    position=InfoBarPosition.TOP_RIGHT,
+                    duration=2500
+                )
+
+    def _on_menu_export_xml(self):
+        if not self.current_doc:
+            return
+
+        from ..core.parser import normalize_link
+        from qfluentwidgets import MessageBox
+
+        footage = getattr(self.workspace_view, "footage_folder", "")
+        linked_map = getattr(self.workspace_view, "linked_footage", {})
+        total_links = len(self.current_doc.links)
+        matched_count = len([lk for lk in self.current_doc.links if linked_map.get(normalize_link(lk)) or linked_map.get(lk)])
+        missing_count = total_links - matched_count
+
+        if total_links > 0 and missing_count > 0:
+            box = MessageBox(
+                "Unlinked Media Detected",
+                f"{matched_count} of {total_links} media assets are linked to local files.\n\n"
+                f"{missing_count} asset(s) are currently unlinked and will be exported as offline media placeholders in Premiere Pro.\n\n"
+                "Would you like to locate the missing files first, or export anyway?",
+                self
+            )
+            box.yesButton.setText("Locate Missing Files...")
+            box.cancelButton.setText("Export Anyway")
+            if box.exec():
+                self._on_menu_set_footage()
+                return
+
+        doc_base = self.current_doc.name or "Sequence"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Premiere Pro XML Sequence",
+            f"{doc_base}_sequence.xml",
+            "Premiere Pro XML (*.xml);;All Files (*.*)"
+        )
+        if not save_path:
+            return
+        from ..core.xml_exporter import export_fcp_xml_file
+        try:
+            export_fcp_xml_file(save_path, self.current_doc, footage_folder=footage, linked_footage=linked_map)
+            InfoBar.success(
+                title="XML Exported",
+                content=f"Saved Premiere Pro XML sequence to {os.path.basename(save_path)}",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500
+            )
+        except Exception as e:
+            InfoBar.error(
+                title="Export Failed",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4000
+            )
+
+    def _on_menu_export_timestamps(self):
+        if not self.current_doc:
+            return
+        doc_base = self.current_doc.name or "Script"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Timestamps",
+            f"{doc_base}_timestamps.txt",
+            "Text Files (*.txt);;CSV Files (*.csv);;All Files (*.*)"
+        )
+        if not save_path:
+            return
+        is_csv = save_path.lower().endswith(".csv")
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                if is_csv:
+                    f.write("Status,Start Timecode,End Timecode,Duration,Text,Speaker\n")
+                    for item in self.current_doc.items:
+                        status = "Checked" if item.is_checked else "Pending"
+                        speaker = (getattr(item, "speaker", "") or "").replace('"', '""')
+                        clean_text = (item.text or "").replace('"', '""')
+                        f.write(f'"{status}","{item.start_timecode}","{item.end_timecode}","{item.duration_seconds}s","{clean_text}","{speaker}"\n')
+                else:
+                    f.write(f"Rainy Timestamps Export - {doc_base}\n")
+                    f.write("=" * 60 + "\n\n")
+                    for item in self.current_doc.items:
+                        box = "[x]" if item.is_checked else "[ ]"
+                        f.write(f"{box} {item.start_timecode} - {item.end_timecode} ({item.duration_seconds}s): {item.text}\n")
+            InfoBar.success(
+                title="Timestamps Exported",
+                content=f"Saved timestamps to {os.path.basename(save_path)}",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500
+            )
+        except Exception as e:
+            InfoBar.error(
+                title="Export Failed",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500
+            )
+
+    def _on_menu_shortcuts(self):
+        InfoBar.info(
+            title="Keyboard Shortcuts",
+            content="Ctrl+O: Open | Ctrl+Shift+S: Save Copy | Ctrl+E: Export XML | Ctrl+F: Find | F1: Shortcuts",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=6000
+        )
 
     def closeEvent(self, event):
         if hasattr(self, 'pref_window') and self.pref_window:

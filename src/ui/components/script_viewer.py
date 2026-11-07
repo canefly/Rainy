@@ -2,7 +2,7 @@ import os
 import re
 import copy
 from typing import List, Dict, Any, Optional
-from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QTimer, QElapsedTimer, QRectF, QSizeF, QPointF
+from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QTimer, QElapsedTimer, QRect, QRectF, QSizeF, QPoint, QPointF, QEvent
 from PySide6.QtGui import (
     QDrag, QPixmap, QCursor, QColor, QPainter, QPen,
     QTextCursor, QTextFormat, QTextCharFormat, QTextBlockFormat,
@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTextBrowser, QTextEdit, QAbstractScrollArea, QMenu, QApplication, QColorDialog
 )
-from qfluentwidgets import Slider, ComboBox
+from qfluentwidgets import Slider, ComboBox, SmoothScrollDelegate
 from ..theme import ThemeManager
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller, get_display_frame_interval_ms, safe_copy_to_clipboard
+from .link_embed_card import link_embed_controller
 from ...core.parser import build_raw_html
 
 
@@ -76,6 +77,14 @@ class DraggableImageLabel(QLabel):
         drag.exec(Qt.CopyAction)
 
 
+class ScriptSmoothScrollDelegate(SmoothScrollDelegate):
+    """Custom smooth scroll delegate preserving Ctrl+Wheel zoom in Document Mode."""
+    def eventFilter(self, obj, e: QEvent):
+        if e.type() == QEvent.Type.Wheel and (e.modifiers() & Qt.ControlModifier):
+            return False
+        return super().eventFilter(obj, e)
+
+
 class ScriptTextBrowser(QTextBrowser):
     """High-performance text browser supporting fluid Reading Mode, MS Word Print Layout Mode, and Direct Editing."""
     page_info_changed = Signal(int, int)       # (current_page, total_pages)
@@ -83,6 +92,7 @@ class ScriptTextBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.delegate = ScriptSmoothScrollDelegate(self, useAni=True)
         self.viewport().setAttribute(Qt.WA_Hover, True)
         self.viewport().setMouseTracking(True)
         self._is_reflow_held = False
@@ -95,6 +105,8 @@ class ScriptTextBrowser(QTextBrowser):
         self._page_count = 1
         self._current_page = 1
         self._page_gap = 24.0
+        self._doc_selecting = False
+        self._doc_sel_anchor = 0
 
         # Authentic 1:1 MS Word Geometry at 96 DPI:
         # US Letter: 8.5 x 11 in = 816 x 1056 px
@@ -185,7 +197,7 @@ class ScriptTextBrowser(QTextBrowser):
             if self._view_mode != "document":
                 self.setLineWrapMode(QTextEdit.WidgetWidth)
                 root_fmt.setLeftMargin(0)
-                root_fmt.setRightMargin(0)
+                root_fmt.setRightMargin(16)
                 root_fmt.setTopMargin(0)
                 root_fmt.setBottomMargin(0)
                 doc.rootFrame().setFrameFormat(root_fmt)
@@ -317,8 +329,8 @@ class ScriptTextBrowser(QTextBrowser):
                 return
         super().wheelEvent(event)
 
-    def _map_viewport_to_doc_coords(self, vp_pos):
-        """Maps viewport mouse position to 1:1 document coordinates for link clicking in Document Mode."""
+    def _map_viewport_to_doc_coords(self, vp_pos, clamp: bool = False):
+        """Maps viewport mouse position to 1:1 document coordinates for link clicking and text selection in Document Mode."""
         scale = self._doc_zoom_pct / 100.0
         scaled_w = self._sheet_w * scale
         scaled_h = self._sheet_h * scale
@@ -335,6 +347,17 @@ class ScriptTextBrowser(QTextBrowser):
 
         canvas_y = pos_y + scroll_y
         p_idx = int(canvas_y // max(1.0, stride))
+
+        if clamp:
+            p_idx = max(0, min(self._page_count - 1, p_idx))
+            page_top = gap + p_idx * stride
+            text_left = sheet_x + self._margin_left * scale
+            text_top = page_top - scroll_y + self._margin_top * scale
+            doc_x = max(0.0, min(self._printable_w, (pos_x - text_left) / scale))
+            in_page_y = max(0.0, min(self._printable_h, (pos_y - text_top) / scale))
+            doc_y = in_page_y + (p_idx * self._printable_h)
+            return p_idx, QPointF(doc_x, doc_y)
+
         if 0 <= p_idx < self._page_count:
             page_top = gap + p_idx * stride
             if page_top <= canvas_y <= page_top + scaled_h:
@@ -346,35 +369,125 @@ class ScriptTextBrowser(QTextBrowser):
                     return p_idx, QPointF(doc_x, doc_y)
         return None, None
 
+    def _handle_anchor_hover(self, anchor: Optional[str], vp_pos: QPoint):
+        viewer = self.parent()
+        resolved_url = ""
+        if anchor:
+            if hasattr(viewer, "resolve_link_for_anchor"):
+                resolved_url = viewer.resolve_link_for_anchor(anchor)
+            elif anchor.startswith(("http://", "https://")):
+                resolved_url = anchor
+
+        if resolved_url:
+            self.setToolTip("")
+            global_pt = self.viewport().mapToGlobal(vp_pos) if self.viewport() else self.mapToGlobal(vp_pos)
+            anchor_rect = QRect(global_pt.x() - 12, global_pt.y() - 10, 24, 24)
+            link_embed_controller.schedule_show(resolved_url, anchor_rect)
+        else:
+            link_embed_controller.schedule_hide()
+            self.setToolTip(anchor or "")
+
+    def _check_doc_selection_autoscroll(self, vp_y: int):
+        if not getattr(self, "_doc_selecting", False):
+            return
+        sb = self.verticalScrollBar()
+        if not sb:
+            return
+        vp_h = self.viewport().height() if self.viewport() else 600
+        margin = 32
+        scroll_speed = 22
+        if vp_y < margin:
+            sb.setValue(max(0, sb.value() - scroll_speed))
+        elif vp_y > vp_h - margin:
+            sb.setValue(min(sb.maximum(), sb.value() + scroll_speed))
+
     def mouseMoveEvent(self, event):
+        pos_pt = event.pos()
         if self._view_mode == "document":
-            p = event.position() if hasattr(event, "position") else event.pos()
-            p_idx, doc_pt = self._map_viewport_to_doc_coords(p)
+            p = event.position() if hasattr(event, "position") else pos_pt
+            if getattr(self, "_doc_selecting", False) and (event.buttons() & Qt.LeftButton):
+                self._check_doc_selection_autoscroll(pos_pt.y())
+                p_idx, doc_pt = self._map_viewport_to_doc_coords(p, clamp=True)
+                if doc_pt is not None:
+                    pos = self.document().documentLayout().hitTest(doc_pt, Qt.FuzzyHit)
+                    if pos >= 0:
+                        cursor = self.textCursor()
+                        cursor.setPosition(self._doc_sel_anchor, QTextCursor.MoveAnchor)
+                        cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                        self.setTextCursor(cursor)
+                        if self.viewport():
+                            self.viewport().update()
+                return
+
+            p_idx, doc_pt = self._map_viewport_to_doc_coords(p, clamp=False)
             if doc_pt is not None:
                 anchor = self.document().documentLayout().anchorAt(doc_pt)
                 if anchor:
                     if anchor != self._hovered_anchor:
                         self._hovered_anchor = anchor
                         self.viewport().setCursor(QCursor(Qt.PointingHandCursor))
-                        self.setToolTip(anchor)
+                    self._handle_anchor_hover(anchor, pos_pt)
                     return
+                # Hovering over document text in page: show text selection I-beam cursor
+                if self._hovered_anchor is not None:
+                    self._hovered_anchor = None
+                    self._handle_anchor_hover(None, pos_pt)
+                self.viewport().setCursor(QCursor(Qt.IBeamCursor))
+                return
+
             if self._hovered_anchor is not None:
                 self._hovered_anchor = None
-                self.viewport().setCursor(QCursor(Qt.ArrowCursor))
-                self.setToolTip("")
+                self._handle_anchor_hover(None, pos_pt)
+            self.viewport().setCursor(QCursor(Qt.ArrowCursor))
             return
+
+        anchor = self.anchorAt(pos_pt)
+        if anchor:
+            if anchor != self._hovered_anchor:
+                self._hovered_anchor = anchor
+            self._handle_anchor_hover(anchor, pos_pt)
+        elif self._hovered_anchor is not None:
+            self._hovered_anchor = None
+            self._handle_anchor_hover(None, pos_pt)
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hovered_anchor is not None:
+            self._hovered_anchor = None
+            self.setToolTip("")
+        link_embed_controller.schedule_hide()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if self._view_mode == "document" and event.button() == Qt.LeftButton:
             p = event.position() if hasattr(event, "position") else event.pos()
-            p_idx, doc_pt = self._map_viewport_to_doc_coords(p)
+            p_idx, doc_pt = self._map_viewport_to_doc_coords(p, clamp=False)
             if doc_pt is not None:
                 anchor = self.document().documentLayout().anchorAt(doc_pt)
                 if anchor:
                     self.anchorClicked.emit(QUrl(anchor))
                     event.accept()
                     return
+
+            # Start text selection / cursor positioning in document mode
+            p_idx_c, doc_pt_c = self._map_viewport_to_doc_coords(p, clamp=True)
+            if doc_pt_c is not None:
+                pos = self.document().documentLayout().hitTest(doc_pt_c, Qt.FuzzyHit)
+                if pos >= 0:
+                    self._doc_selecting = True
+                    self._doc_sel_anchor = pos
+                    cursor = self.textCursor()
+                    if event.modifiers() & Qt.ShiftModifier:
+                        cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                    else:
+                        cursor.setPosition(pos, QTextCursor.MoveAnchor)
+                    self.setTextCursor(cursor)
+                    self.setFocus(Qt.MouseFocusReason)
+                    if self.viewport():
+                        self.viewport().update()
+                    event.accept()
+                    return
+
         elif not self.isReadOnly() and event.button() == Qt.LeftButton and (event.modifiers() & Qt.ControlModifier):
             href = self.anchorAt(event.pos())
             if href:
@@ -383,10 +496,56 @@ class ScriptTextBrowser(QTextBrowser):
                 return
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if self._view_mode == "document" and event.button() == Qt.LeftButton:
+            p = event.position() if hasattr(event, "position") else event.pos()
+            p_idx, doc_pt = self._map_viewport_to_doc_coords(p, clamp=True)
+            if doc_pt is not None:
+                pos = self.document().documentLayout().hitTest(doc_pt, Qt.FuzzyHit)
+                if pos >= 0:
+                    cursor = self.textCursor()
+                    cursor.setPosition(pos)
+                    cursor.select(QTextCursor.WordUnderCursor)
+                    self.setTextCursor(cursor)
+                    self.setFocus(Qt.MouseFocusReason)
+                    if self.viewport():
+                        self.viewport().update()
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event):
+        if self._view_mode == "document":
+            self._doc_selecting = False
         super().mouseReleaseEvent(event)
-        if self.isReadOnly():
-            self.clearFocus()
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Copy) or (event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C):
+            viewer = self.parent()
+            if hasattr(viewer, "copy_selection"):
+                viewer.copy_selection()
+            else:
+                self.copy()
+            event.accept()
+            return
+        if event.matches(QKeySequence.SelectAll) or (event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_A):
+            self.selectAll()
+            if self._view_mode == "document" and self.viewport():
+                self.viewport().update()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape:
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                cursor.clearSelection()
+                self.setTextCursor(cursor)
+                if self.viewport():
+                    self.viewport().update()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+        if self._view_mode == "document" and self.viewport():
+            self.viewport().update()
 
     def paintEvent(self, event):
         if self._view_mode != "document":
@@ -492,6 +651,21 @@ class ScriptTextBrowser(QTextBrowser):
                 s.cursor = es.cursor
                 s.format = es.format
                 selections.append(s)
+
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                s = QAbstractTextDocumentLayout.Selection()
+                s.cursor = cursor
+                sel_format = QTextCharFormat()
+                if self._paper_theme == "light":
+                    sel_format.setBackground(QColor(186, 230, 253, 200))  # Light sky blue
+                    sel_format.setForeground(QColor("#0369a1"))           # Contrast blue text
+                else:
+                    sel_format.setBackground(QColor(56, 189, 248, 140))   # Glow cyan
+                    sel_format.setForeground(QColor("#ffffff"))
+                s.format = sel_format
+                selections.append(s)
+
             ctx.selections = selections
 
             self.document().documentLayout().draw(painter, ctx)
@@ -530,14 +704,17 @@ class ScriptViewer(QFrame):
         self.is_edit_mode = False
         self.is_dirty = False
         self._updating_programmatically = False
+        self._anchor_block_num_cache: Dict[str, int] = {}
+        self._sync_link_map: Dict[int, str] = {}
+        self._ts_link_map: Dict[str, str] = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 8)
+        layout.setContentsMargins(16, 12, 2, 8)
         layout.setSpacing(6)
 
         # Header Row: File Name + View Mode Toggle + Paper Toggle + Edit/Save Controls + Reading Font Slider
         header = QHBoxLayout()
-        header.setContentsMargins(2, 0, 2, 0)
+        header.setContentsMargins(0, 0, 14, 0)
         header.setSpacing(6)
 
         self.title_label = QLabel("SCRIPT")
@@ -612,7 +789,7 @@ class ScriptViewer(QFrame):
         self.edit_toolbar.setObjectName("ScriptEditToolbar")
         self.edit_toolbar.setFixedHeight(34)
         tb_layout = QHBoxLayout(self.edit_toolbar)
-        tb_layout.setContentsMargins(8, 3, 8, 3)
+        tb_layout.setContentsMargins(8, 3, 14, 3)
         tb_layout.setSpacing(6)
 
         self.style_combo = ComboBox(self.edit_toolbar)
@@ -670,7 +847,7 @@ class ScriptViewer(QFrame):
         self.browser.setOpenLinks(False)
         self.browser.setOpenExternalLinks(False)
         self.browser.setReadOnly(True)
-        self.browser.setFocusPolicy(Qt.NoFocus)
+        self.browser.setFocusPolicy(Qt.ClickFocus)
         self.browser.setAutoFillBackground(False)
         if self.browser.viewport():
             self.browser.viewport().setAutoFillBackground(False)
@@ -703,7 +880,7 @@ class ScriptViewer(QFrame):
         self.doc_status_bar.setObjectName("DocStatusBar")
         self.doc_status_bar.setFixedHeight(26)
         status_layout = QHBoxLayout(self.doc_status_bar)
-        status_layout.setContentsMargins(8, 0, 8, 0)
+        status_layout.setContentsMargins(8, 0, 14, 0)
         status_layout.setSpacing(6)
 
         self.page_indicator_lbl = QLabel("Page 1 of 1", self.doc_status_bar)
@@ -746,6 +923,12 @@ class ScriptViewer(QFrame):
         layout.addWidget(self.doc_status_bar)
 
         # Keyboard Shortcuts
+        self._shortcut_copy = QShortcut(QKeySequence.Copy, self)
+        self._shortcut_copy.setContext(Qt.WidgetWithChildrenShortcut)
+        self._shortcut_copy.activated.connect(self.copy_selection)
+        self._shortcut_select_all = QShortcut(QKeySequence.SelectAll, self)
+        self._shortcut_select_all.setContext(Qt.WidgetWithChildrenShortcut)
+        self._shortcut_select_all.activated.connect(self._on_select_all)
         self._shortcut_edit = QShortcut(QKeySequence("Ctrl+E"), self)
         self._shortcut_edit.activated.connect(self.toggle_edit_mode)
         self._shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self)
@@ -914,7 +1097,7 @@ class ScriptViewer(QFrame):
         try:
             self.is_edit_mode = enabled
             self.browser.setReadOnly(not enabled)
-            self.browser.setFocusPolicy(Qt.StrongFocus if enabled else Qt.NoFocus)
+            self.browser.setFocusPolicy(Qt.StrongFocus if enabled else Qt.ClickFocus)
             self.browser.setTextInteractionFlags(
                 Qt.TextEditorInteraction if enabled else Qt.TextBrowserInteraction
             )
@@ -1212,6 +1395,25 @@ class ScriptViewer(QFrame):
         self.set_edit_mode(False)
         self.save_docx_requested.emit(edited_blocks)
 
+    def copy_selection(self):
+        """Copies highlighted script text (or full script if no selection) to clipboard with toast feedback."""
+        cursor = self.browser.textCursor()
+        if cursor.hasSelection():
+            raw_text = cursor.selectedText()
+            clean_text = raw_text.replace('\u2029', '\n').strip('\r')
+            safe_copy_to_clipboard(clean_text)
+            self.copy_feedback_requested.emit("Copied!")
+        elif not self.is_edit_mode:
+            full_text = self.browser.toPlainText()
+            if full_text:
+                safe_copy_to_clipboard(full_text)
+                self.copy_feedback_requested.emit("Copied Script!")
+
+    def _on_select_all(self):
+        self.browser.selectAll()
+        if self.view_mode == "document" and self.browser.viewport():
+            self.browser.viewport().update()
+
     def set_hold_reflow(self, hold: bool):
         if hasattr(self, 'browser') and hasattr(self.browser, 'set_reflow_held'):
             self.browser.set_reflow_held(hold)
@@ -1234,6 +1436,18 @@ class ScriptViewer(QFrame):
 
     def load_document_state(self, doc_state):
         """Loads structured blocks, page geometry, link colors, and HTML from DocumentState."""
+        self._anchor_block_num_cache.clear()
+        self._sync_link_map.clear()
+        self._ts_link_map.clear()
+        for item in (getattr(doc_state, "items", []) or []):
+            first_link = item.links[0] if getattr(item, "links", None) else ""
+            if first_link and first_link != "#":
+                if getattr(item, "sync_id", None) is not None:
+                    self._sync_link_map.setdefault(int(item.sync_id), first_link)
+                raw_ts = re.sub(r'[\s()]+', '', getattr(item, "raw_timestamp", "") or "").lower()
+                if raw_ts:
+                    self._ts_link_map.setdefault(raw_ts, first_link)
+
         self._blocks = copy.deepcopy(getattr(doc_state, "blocks", []) or [])
         self._link_colors = dict(getattr(doc_state, "link_colors", {}) or {})
         geom = getattr(doc_state, "page_geometry", None)
@@ -1241,6 +1455,31 @@ class ScriptViewer(QFrame):
             self._page_geometry = dict(geom)
         self._raw_html = getattr(doc_state, "raw_html", "")
         self._update_display()
+
+    def resolve_link_for_anchor(self, anchor: str) -> str:
+        """Resolves an external URL or timestamp anchor to its associated external link."""
+        if not anchor:
+            return ""
+        if anchor.startswith(("http://", "https://")):
+            return anchor
+        if anchor.startswith("time:"):
+            tc_part = anchor.replace("time:", "")
+            sync_id = None
+            if "?sync=" in tc_part:
+                parts = tc_part.split("?sync=")
+                tc_str = parts[0]
+                try:
+                    sync_id = int(parts[1])
+                except (ValueError, TypeError):
+                    sync_id = None
+            else:
+                tc_str = tc_part
+            if sync_id is not None and sync_id in self._sync_link_map:
+                return self._sync_link_map[sync_id]
+            norm_tc = re.sub(r'[\s()]+', '', tc_str).lower()
+            if norm_tc and norm_tc in self._ts_link_map:
+                return self._ts_link_map[norm_tc]
+        return ""
 
     def set_content(self, html_content: str):
         self._raw_html = html_content
@@ -1259,6 +1498,20 @@ class ScriptViewer(QFrame):
 
     def _find_block_by_anchor(self, anchor_name: str):
         doc = self.browser.document()
+        if hasattr(self, "_anchor_block_num_cache") and anchor_name in self._anchor_block_num_cache:
+            blk_num = self._anchor_block_num_cache[anchor_name]
+            if 0 <= blk_num < doc.blockCount():
+                b = doc.findBlockByNumber(blk_num)
+                if b.isValid():
+                    it = b.begin()
+                    while not it.atEnd():
+                        frag = it.fragment()
+                        if frag.isValid():
+                            fmt = frag.charFormat()
+                            if anchor_name in fmt.anchorNames() or fmt.anchorHref() == f"#{anchor_name}":
+                                return b
+                        it += 1
+
         block = doc.begin()
         while block.isValid():
             it = block.begin()
@@ -1267,6 +1520,8 @@ class ScriptViewer(QFrame):
                 if frag.isValid():
                     fmt = frag.charFormat()
                     if anchor_name in fmt.anchorNames() or fmt.anchorHref() == f"#{anchor_name}":
+                        if hasattr(self, "_anchor_block_num_cache"):
+                            self._anchor_block_num_cache[anchor_name] = block.blockNumber()
                         return block
                 it += 1
             block = block.next()
@@ -1275,7 +1530,7 @@ class ScriptViewer(QFrame):
             return found.block()
         return None
 
-    def _smooth_scroll_to_block(self, target_block, highlight_cursor: Optional[QTextCursor] = None):
+    def _smooth_scroll_to_block(self, target_block, highlight_cursor: Optional[QTextCursor] = None, align_top: bool = False):
         if not target_block or not target_block.isValid():
             return
         doc = self.browser.document()
@@ -1302,25 +1557,68 @@ class ScriptViewer(QFrame):
             stride = scaled_h + gap
 
             canvas_y = gap + p_idx * stride + self.browser._margin_top * scale + in_page_y * scale
-            center_y = canvas_y - (viewport_h // 2)
-            target_scroll = max(0, min(sb.maximum(), int(center_y)))
+            if align_top:
+                target_scroll = max(0, min(sb.maximum(), int(canvas_y - 16)))
+            else:
+                center_y = canvas_y - (viewport_h // 2)
+                target_scroll = max(0, min(sb.maximum(), int(center_y)))
         else:
-            # Measure block position via a non-selecting cursor so QTextBrowser does NOT teleport
-            pos_cursor = QTextCursor(target_block)
-            cursor_rect = self.browser.cursorRect(pos_cursor)
-            center_y = sb.value() + cursor_rect.center().y() - (viewport_h // 2)
-            target_scroll = max(0, min(sb.maximum(), center_y))
+            brect = doc.documentLayout().blockBoundingRect(target_block)
+            if align_top:
+                target_scroll = max(0, min(sb.maximum(), int(brect.y() - 16)))
+            else:
+                center_y = brect.y() + (brect.height() / 2.0) - (viewport_h / 2.0)
+                target_scroll = max(0, min(sb.maximum(), int(center_y)))
 
         self.smooth_scroller.scroll_to(target_scroll)
-        self._pulse_highlight(clean_cursor)
+        if not align_top:
+            self._pulse_highlight(clean_cursor)
 
     def scroll_to_sync(self, sync_id: int, meta: str = ""):
         doc = self.browser.document()
         target_block = None
         target_cursor = None
 
-        # 1. Search directly for timestamp or text variants in the document (highest precision)
-        if meta:
+        # 1. Primary Precision Strategy: Locate exact block by sync_id anchor (f"block-{sync_id}")
+        if sync_id is not None:
+            target_block = self._find_block_by_anchor(f"block-{sync_id}")
+            if (target_block is None or not target_block.isValid()) and 0 <= sync_id < doc.blockCount():
+                block = doc.findBlockByNumber(sync_id)
+                if block.isValid():
+                    target_block = block
+
+        # 2. If target_block was located by sync_id, isolate cursor search STRICTLY within that block
+        if target_block and target_block.isValid():
+            b_txt = target_block.text()
+            b_pos = target_block.position()
+            if meta:
+                candidates = [
+                    meta.strip(),
+                    meta.replace("(", "").replace(")", "").strip(),
+                    re.sub(r'[\s()]+', '', meta),
+                    re.sub(r'\s*-\s*', ' - ', meta),
+                    re.sub(r'\s*-\s*', '-', meta),
+                ]
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    idx = b_txt.find(cand)
+                    if idx != -1:
+                        target_cursor = QTextCursor(doc)
+                        target_cursor.setPosition(b_pos + idx)
+                        target_cursor.setPosition(b_pos + idx + len(cand), QTextCursor.KeepAnchor)
+                        break
+
+            # If metadata substring wasn't found directly, extract timecode pattern inside target block
+            if target_cursor is None or target_cursor.isNull():
+                m = re.search(r'\(?((?:\d{1,2}:)?\d{1,2}:\d{2}(?::\d{2})?)\)?(?:\s*(?:[-–—]|to)\s*\(?((?:\d{1,2}:)?\d{1,2}:\d{2}(?::\d{2})?)\)?)?', b_txt)
+                if m and (m.group(0).strip()):
+                    target_cursor = QTextCursor(doc)
+                    target_cursor.setPosition(b_pos + m.start())
+                    target_cursor.setPosition(b_pos + m.end(), QTextCursor.KeepAnchor)
+
+        # 3. Fallback ONLY if sync_id didn't yield a valid block: search document for meta
+        if (target_block is None or not target_block.isValid()) and meta:
             candidates = [
                 meta.strip(),
                 meta.replace("(", "").replace(")", "").strip(),
@@ -1337,29 +1635,10 @@ class ScriptViewer(QFrame):
                     target_block = found.block()
                     break
 
-        # 2. Fallback to named anchor without instant viewport teleport
-        if target_block is None or not target_block.isValid():
-            target_block = self._find_block_by_anchor(f"block-{sync_id}")
-
-        # 3. Fallback to block index if within range
-        if (target_block is None or not target_block.isValid()) and 0 <= sync_id < doc.blockCount():
-            block = doc.findBlockByNumber(sync_id)
-            if block.isValid():
-                target_block = block
-
-        # 4. If target_block was located but target_cursor wasn't, find timestamp inside block text
-        if target_block and target_block.isValid() and (target_cursor is None or target_cursor.isNull()):
-            b_txt = target_block.text()
-            m = re.search(r'\(?((?:\d{1,2}:)?\d{1,2}:\d{2}(?::\d{2})?)\)?(?:\s*(?:[-–—]|to)\s*\(?((?:\d{1,2}:)?\d{1,2}:\d{2}(?::\d{2})?)\)?)?', b_txt)
-            if m and (m.group(0).strip()):
-                target_cursor = QTextCursor(doc)
-                target_cursor.setPosition(target_block.position() + m.start())
-                target_cursor.setPosition(target_block.position() + m.end(), QTextCursor.KeepAnchor)
-
         if target_block and target_block.isValid():
             self._smooth_scroll_to_block(target_block, highlight_cursor=target_cursor)
 
-    def scroll_to_block(self, block_id: int):
+    def scroll_to_block(self, block_id: int, align_top: bool = False):
         doc = self.browser.document()
         target_block = None
         if 0 <= block_id < doc.blockCount():
@@ -1373,13 +1652,13 @@ class ScriptViewer(QFrame):
                 target_block = self._find_block_by_anchor(f"heading-{block_id}")
 
         if target_block and target_block.isValid():
-            self._smooth_scroll_to_block(target_block)
+            self._smooth_scroll_to_block(target_block, align_top=align_top)
 
-    def scroll_to_anchor(self, anchor_name: str):
+    def scroll_to_anchor(self, anchor_name: str, align_top: bool = True):
         clean_anchor = anchor_name.lstrip("#")
         target_block = self._find_block_by_anchor(clean_anchor)
         if target_block and target_block.isValid():
-            self._smooth_scroll_to_block(target_block)
+            self._smooth_scroll_to_block(target_block, align_top=align_top)
             return
 
         # Fallback: resolve native anchor offset invisibly and animate smoothly
@@ -1391,6 +1670,41 @@ class ScriptViewer(QFrame):
         sb.setValue(old_val)
         self.browser.setUpdatesEnabled(True)
         self.smooth_scroller.scroll_to(target_val)
+
+    def get_visible_block_id(self) -> int:
+        """Returns the block index currently visible at the top of the viewport."""
+        doc = self.browser.document()
+        if not doc or doc.blockCount() == 0:
+            return 0
+
+        if self.view_mode == "document":
+            sb = self.browser.verticalScrollBar()
+            scroll_y = sb.value()
+            sample_offset = 32
+            canvas_y = scroll_y + sample_offset
+            scale = max(0.1, self.browser._doc_zoom_pct / 100.0)
+            scaled_h = self.browser._sheet_h * scale
+            gap = self.browser._page_gap * scale
+            stride = max(1.0, scaled_h + gap)
+            p_idx = int(canvas_y // stride)
+            pos_in_page = (canvas_y % stride) - (self.browser._margin_top * scale)
+            in_page_y = max(0.0, min(self.browser._printable_h, pos_in_page / scale))
+            doc_y = in_page_y + (p_idx * self.browser._printable_h)
+            pos = doc.documentLayout().hitTest(QPointF(40, doc_y), Qt.FuzzyHit)
+            b = doc.findBlock(pos)
+            if b.isValid():
+                return b.blockNumber()
+        else:
+            vp = self.browser.viewport()
+            sample_y = max(15, min(60, vp.height() // 10))
+            pt = QPoint(max(20, vp.width() // 4), sample_y)
+            c = self.browser.cursorForPosition(pt)
+            if c and not c.isNull():
+                b = c.block()
+                if b.isValid():
+                    return b.blockNumber()
+
+        return 0
 
     def _pulse_highlight(self, cursor: QTextCursor):
         self._highlight_cursor = cursor
@@ -1491,6 +1805,8 @@ class ScriptViewer(QFrame):
 
             b_pal = self.browser.palette()
             b_pal.setColor(QPalette.Text, QColor(body_color))
+            b_pal.setColor(QPalette.Highlight, QColor(pal["accent"]))
+            b_pal.setColor(QPalette.HighlightedText, QColor("#ffffff" if pal["is_dark"] else "#0b0f1a"))
             self.browser.setPalette(b_pal)
 
             scroll_pos = self.browser.verticalScrollBar().value()
@@ -1544,7 +1860,8 @@ class ScriptViewer(QFrame):
             self.copy_feedback_requested.emit(tc_str)
             if sync_id is not None:
                 self.timestamp_sync_clicked.emit(tc_str, sync_id)
-            self.timestamp_clicked.emit(tc_str)
+            else:
+                self.timestamp_clicked.emit(tc_str)
         elif raw_url.startswith("http://") or raw_url.startswith("https://"):
             import webbrowser
             webbrowser.open(raw_url)
@@ -1553,7 +1870,7 @@ class ScriptViewer(QFrame):
 
     def _show_context_menu(self, pos):
         cursor = self.browser.textCursor()
-        selected_text = cursor.selectedText().strip()
+        selected_text = cursor.selectedText().strip().replace('\u2029', ' ')
 
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -1571,7 +1888,8 @@ class ScriptViewer(QFrame):
             }
         """)
 
-        action_copy = menu.addAction("Copy")
+        action_copy = menu.addAction("Copy (Ctrl+C)" if selected_text else "Copy Script (Ctrl+C)")
+        action_select_all = menu.addAction("Select All (Ctrl+A)")
         action_edit_toggle = menu.addAction("Exit Edit Mode" if self.is_edit_mode else "Edit Script (Ctrl+E)")
         action_save = menu.addAction("Save to .docx (Ctrl+S)") if self.is_edit_mode else None
         action_note = None
@@ -1580,8 +1898,9 @@ class ScriptViewer(QFrame):
 
         res = menu.exec(self.browser.mapToGlobal(pos))
         if res == action_copy:
-            self.browser.copy()
-            self.copy_feedback_requested.emit("Copied!")
+            self.copy_selection()
+        elif res == action_select_all:
+            self._on_select_all()
         elif res == action_edit_toggle:
             self.toggle_edit_mode()
         elif action_save and res == action_save:

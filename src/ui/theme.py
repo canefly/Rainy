@@ -527,6 +527,14 @@ class ThemeManager:
             pref_sidebar_bg = sidebar
             pref_card_bg = surface
 
+        # Standard Windows 11 Settings colors (decoupled from workspace accent themes)
+        pref_win_text = "#ffffff" if dark else "#18181b"
+        pref_win_unselected = "#f4f4f5" if dark else "#18181b"
+        pref_win_muted = "#a1a1aa" if dark else "#71717a"
+        pref_win_body = "#e4e4e7" if dark else "#27272a"
+        pref_win_hover_bg = "rgba(255, 255, 255, 0.06)" if dark else "rgba(0, 0, 0, 0.05)"
+        pref_win_sel_bg = "rgba(255, 255, 255, 0.09)" if dark else "rgba(0, 0, 0, 0.07)"
+
         # 2. Surgical, targeted layout QSS strictly for containers, splitters, tables, and scrollbars
         return f"""
         /* Segoe UI Variable Global Typography */
@@ -658,9 +666,14 @@ class ThemeManager:
             background-color: transparent;
             color: {text};
         }}
-        QWidget#PrefHeader, QWidget#VaultHeader, QWidget#AboutHeader, QWidget#ToolWindowTitleBar {{
+        QWidget#VaultHeader, QWidget#AboutHeader, QWidget#ToolWindowTitleBar {{
             background-color: transparent;
             border-bottom: 1px solid {border};
+        }}
+        QWidget#PrefHeader {{
+            background-color: transparent;
+            border: none;
+            border-bottom: none;
         }}
         QFrame#PrefSidebar {{
             background: transparent;
@@ -678,46 +691,56 @@ class ThemeManager:
             outline: none;
         }}
         QFrame#PrefSidebar QListWidget::item {{
-            color: {muted};
-            font-size: 13px;
+            color: {pref_win_unselected};
+            font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, sans-serif;
+            font-size: 14px;
             font-weight: 600;
-            padding-left: 8px;
-            border-radius: 6px;
-            margin-bottom: 2px;
+            padding-left: 12px;
+            border-radius: 5px;
+            margin: 2px 0px;
+            border: none;
         }}
         QFrame#PrefSidebar QListWidget::item:hover {{
-            background-color: {surface_hover};
-            color: {text};
+            background-color: {pref_win_hover_bg};
+            color: {pref_win_text};
+            border: none;
         }}
         QFrame#PrefSidebar QListWidget::item:selected {{
-            background-color: rgba({rgb}, 0.14);
-            color: {accent};
-            font-weight: 700;
+            background-color: {pref_win_sel_bg};
+            color: {pref_win_text};
+            font-weight: 600;
+            border: none;
+            border-left: none;
         }}
         QLabel#PrefTabTitle {{
-            color: {text};
+            color: {pref_win_text};
             font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif;
-            font-size: 18px;
-            font-weight: 600;
+            font-size: 28px;
+            font-weight: 700;
         }}
         QLabel#PrefTabSubtitle {{
-            color: {muted};
-            font-size: 12px;
+            color: {pref_win_muted};
+            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+            font-size: 13.5px;
             font-weight: 400;
         }}
         QLabel#PrefSectionTitle {{
-            color: {text};
-            font-size: 13px;
+            color: {pref_win_text};
+            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+            font-size: 14.5px;
             font-weight: 600;
         }}
         QLabel#PrefCaption {{
-            color: {muted};
-            font-size: 11px;
+            color: {pref_win_muted};
+            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+            font-size: 12.5px;
             font-weight: 400;
         }}
         QLabel#PrefBodyText {{
-            color: {text};
-            font-size: 12px;
+            color: {pref_win_body};
+            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+            font-size: 13px;
+            font-weight: 400;
         }}
         QFrame#PrefCard {{
             background: transparent;
@@ -751,6 +774,22 @@ class ThemeManager:
             color: {text};
             font-size: 13px;
             spacing: 8px;
+        }}
+
+        /* Compact Checkboxes in Cards and Drawers */
+        CheckBox#CompactCheckBox,
+        QFrame#TimelineCard CheckBox,
+        QFrame#LinkCard CheckBox,
+        QFrame#NoteCard CheckBox {{
+            min-width: 22px;
+            max-width: 22px;
+            min-height: 22px;
+            max-height: 22px;
+            width: 22px;
+            height: 22px;
+            spacing: 0px;
+            margin: 0px;
+            padding: 0px;
         }}
 
         /* Tool Window Drawer Cards */

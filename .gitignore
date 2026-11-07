@@ -33,6 +33,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Native binary sidecars (packaged separately from git)
+bin/*.exe
+bin/*.dll
+
 # Nuitka & PyInstaller compilation artifacts
 *.build/
 *.dist/

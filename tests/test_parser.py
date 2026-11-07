@@ -235,3 +235,427 @@ def test_highlight_extraction_and_genuine_header_filtering():
     assert "background-color: #d9ead3" in html_out
     assert "#4ade80" not in html_out  # Neon green is disabled in Document Mode on White Paper
 
+
+def test_background_unfurl_engine_and_cookie_integration(monkeypatch):
+    from src.core.unfurl_engine import UnfurlEngine, extract_gdrive_id, infer_file_type_from_title, LinkMetadata
+    from src.core.cookie_manager import cookie_manager
+
+    orig_mode = cookie_manager.get_mode()
+    orig_prof = cookie_manager.get_firefox_profile()
+    orig_file = cookie_manager.get_cookie_file_path()
+    orig_raw = cookie_manager.get_raw_cookie_text()
+
+    engine = UnfurlEngine()
+    test_drive_url = "https://drive.google.com/file/d/1PersistentCacheTest999/view?usp=sharing"
+    locked_url = "https://drive.google.com/file/d/1RestrictedEntry888/view"
+
+    try:
+        # 1. Verify Google Drive ID & Folder extraction
+        fid, is_folder = extract_gdrive_id("https://drive.google.com/file/d/1ds0z_7ruKHci4Fohmgjm79GZVC9OLbBZ/view?usp=sharing")
+        assert fid == "1ds0z_7ruKHci4Fohmgjm79GZVC9OLbBZ"
+        assert is_folder is False
+
+        fold_id, is_fold = extract_gdrive_id("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz")
+        assert fold_id == "1AbCdEfGhIjKlMnOpQrStUvWxYz"
+        assert is_fold is True
+
+        assert infer_file_type_from_title("Sam Rivera Jr. 1-2-20 INTERVIEW.mp4") == "VIDEO"
+        assert infer_file_type_from_title("911_dispatch_call.wav") == "AUDIO"
+        assert infer_file_type_from_title("Transcript.pdf") == "DOC"
+        assert infer_file_type_from_title("Client Assets", is_folder=True) == "FOLDER"
+
+        # 2. Test Restricted Google Drive link detection (when unauthenticated)
+        cookie_manager.set_mode("disabled")
+
+        def mock_restricted_fetch(url, timeout=6.0, max_bytes=196608, **kw):
+            return (
+                200,
+                "https://accounts.google.com/ServiceLogin?service=wise",
+                "<html><head><title>Sign in - Google Accounts</title></head><body></body></html>"
+            )
+
+        monkeypatch.setattr(engine, "_fetch_url_text", mock_restricted_fetch)
+        monkeypatch.setattr(engine, "fetch_thumbnail_bytes", lambda url, **kw: b"fake_jpeg_bytes")
+
+        drive_url = "https://drive.google.com/file/d/1ds0z_7ruKHci4Fohmgjm79GZVC9OLbBZ/view?usp=sharing"
+        meta_locked = engine.unfurl_sync(drive_url)
+        assert meta_locked.is_restricted is True
+        assert "Restricted" in meta_locked.title
+        assert meta_locked.provider == "Google Drive"
+
+        # 3. Test Authenticated Google Drive Unfurling (when cookies are enabled in CookieManager)
+        cookie_manager.set_mode("paste")
+        cookie_manager.set_raw_cookie_text("Cookie: SID=test_sid; SAPISID=test_sapisid; __Secure-1PSID=test_psid")
+        assert "SAPISID=test_sapisid" in cookie_manager.get_cookie_header(drive_url)
+
+        def mock_authenticated_drive_fetch(url, timeout=6.0, max_bytes=196608, **kw):
+            return (
+                200,
+                url,
+                """
+                <html>
+                <head>
+                    <title>Sam Rivera Jr. 1-2-20 INTERVIEW (REDACTED).mp4 - Google Drive</title>
+                    <meta property="og:title" content="Sam Rivera Jr. 1-2-20 INTERVIEW (REDACTED).mp4">
+                    <meta property="og:type" content="video">
+                    <meta property="og:image" content="https://lh3.googleusercontent.com/d/1ds0z_7ruKHci4Fohmgjm79GZVC9OLbBZ=w320">
+                </head>
+                </html>
+                """
+            )
+
+        monkeypatch.setattr(engine, "_fetch_url_text", mock_authenticated_drive_fetch)
+        meta_unlocked = engine.unfurl_sync(drive_url)
+        assert meta_unlocked.is_restricted is False
+        assert meta_unlocked.title == "Sam Rivera Jr. 1-2-20 INTERVIEW (REDACTED).mp4"
+        assert meta_unlocked.file_type == "VIDEO"
+        assert meta_unlocked.provider == "Google Drive"
+        assert meta_unlocked.thumbnail_bytes == b"fake_jpeg_bytes"
+
+        # 4. Test YouTube oEmbed Unfurling
+        def mock_yt_fetch(url, timeout=6.0, max_bytes=196608, **kw):
+            if "oembed" in url:
+                return (
+                    200,
+                    url,
+                    '{"title": "Shooting 45 acp 100 Yards", "author_name": "Hickok45", "thumbnail_url": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}'
+                )
+            return (200, url, "")
+
+        monkeypatch.setattr(engine, "_fetch_url_text", mock_yt_fetch)
+        yt_meta = engine.unfurl_sync("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        assert yt_meta.title == "Shooting 45 acp 100 Yards"
+        assert yt_meta.author == "Hickok45"
+        assert yt_meta.provider == "YouTube"
+        assert yt_meta.file_type == "VIDEO"
+        assert yt_meta.thumbnail_url == "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+
+        # 5. Test General Web Open Graph Unfurling
+        def mock_web_fetch(url, timeout=6.0, max_bytes=196608, **kw):
+            return (
+                200,
+                url,
+                """
+                <html>
+                <head>
+                    <meta property="og:title" content="State Case Archive #12-34567">
+                    <meta property="og:description" content="Official court and police dispatch records.">
+                    <meta property="og:site_name" content="ND Court Records">
+                    <meta property="og:image" content="/assets/preview.png">
+                </head>
+                </html>
+                """
+            )
+
+        monkeypatch.setattr(engine, "_fetch_url_text", mock_web_fetch)
+        web_meta = engine.unfurl_sync("https://records.example.org/case/12-34567")
+        assert web_meta.title == "State Case Archive #12-34567"
+        assert web_meta.description == "Official court and police dispatch records."
+        assert web_meta.provider == "ND Court Records"
+        assert web_meta.thumbnail_url == "https://records.example.org/assets/preview.png"
+
+        # 6. Test Persistent SQLite Link Metadata Cache (0ms Startup Hydration & Selective Restricted Eviction)
+        meta_to_store = LinkMetadata(
+            url=test_drive_url,
+            title="Bodycam_Footage_01.mp4",
+            description="Google Drive • VIDEO",
+            provider="Google Drive",
+            domain="drive.google.com",
+            file_type="VIDEO",
+            thumbnail_url="https://lh3.googleusercontent.com/d/1PersistentCacheTest999=w320",
+            thumbnail_bytes=b"sqlite_cached_thumb_bytes",
+            is_restricted=False,
+        )
+        engine.store_metadata(test_drive_url, meta_to_store)
+
+        # Clear in-memory dictionary only -> verify 0ms hydration from SQLite knot.db
+        engine._cache.clear()
+        hydrated = engine.get_cached(test_drive_url)
+        assert hydrated is not None
+        assert hydrated.title == "Bodycam_Footage_01.mp4"
+        assert hydrated.file_type == "VIDEO"
+        assert hydrated.thumbnail_bytes == b"sqlite_cached_thumb_bytes"
+
+        # Store a restricted entry and verify clear_cache(restricted_only=True) evicts only restricted items
+        engine.store_metadata(
+            locked_url,
+            LinkMetadata(
+                url=locked_url,
+                title="🔒 Restricted — Configure Cookies",
+                provider="Google Drive",
+                domain="drive.google.com",
+                file_type="LINK",
+                is_restricted=True,
+            ),
+        )
+        assert engine.get_cached(locked_url) is not None
+        engine.clear_cache(restricted_only=True)
+        assert engine.get_cached(locked_url) is None
+        assert engine.get_cached(test_drive_url) is not None
+    finally:
+        db.delete_link_metadata(norm_url=normalize_link(test_drive_url))
+        db.delete_link_metadata(norm_url=normalize_link(locked_url))
+        cookie_manager.set_firefox_profile(orig_prof)
+        cookie_manager.set_cookie_file_path(orig_file)
+        cookie_manager.set_raw_cookie_text(orig_raw)
+        cookie_manager.set_mode(orig_mode)
+        cookie_manager.load_cookies(force_reload=True)
+
+
+def test_unfurl_queue_pacing_micro_jitter_and_rate_limit_backoff(monkeypatch):
+    import time
+    from PySide6.QtCore import QCoreApplication
+    app = QCoreApplication.instance() or QCoreApplication([])
+    from src.core.unfurl_engine import unfurl_engine, LinkMetadata
+    from src.core.parser import normalize_link
+
+    engine = unfurl_engine
+
+    # 1. Clamped Dedicated Pool: Verify max concurrency is strictly 3 (not CPU core count 16)
+    assert engine.thread_pool.maxThreadCount() == 3
+
+    # Reset test queue and backoff
+    engine.clear_cache()
+    engine._backoff_until = 0.0
+    if engine._dispatch_timer.isActive():
+        engine._dispatch_timer.stop()
+
+    try:
+        # 2. Test Queue Ingestion and FIFO Order
+        u1 = "https://example.com/asset_1"
+        u2 = "https://example.com/asset_2"
+        u3 = "https://example.com/asset_3"
+
+        # Mock unfurl_sync to record dispatch order and keep worker busy briefly
+        dispatched_urls = []
+        def mock_unfurl_sync(url, fetch_thumbnail=True):
+            dispatched_urls.append(url)
+            return LinkMetadata(url=url, title=f"Title for {url}", loading=False)
+
+        monkeypatch.setattr(engine, "unfurl_sync", mock_unfurl_sync)
+
+        # 3. Test Priority Dispatch (Instant insertion to index 0, bypassing micro-jitter)
+        # Put engine in backoff state so items remain in queue for inspection
+        engine._backoff_until = time.time() + 10.0
+        from PySide6.QtCore import QMutexLocker
+        with QMutexLocker(engine._mutex):
+            engine._queue.append((u1, normalize_link(u1), False))
+            engine._queued_norms.add(normalize_link(u1))
+            engine._queue.append((u2, normalize_link(u2), False))
+            engine._queued_norms.add(normalize_link(u2))
+
+        # Enqueue high-priority link (user hover or refresh)
+        u_priority = "https://example.com/priority_manual_hover"
+        engine.request_unfurl(u_priority, priority=True)
+
+        with QMutexLocker(engine._mutex):
+            # Priority link MUST be promoted to index 0 of queue ahead of u1 and u2!
+            assert len(engine._queue) == 3
+            assert engine._queue[0][0] == u_priority
+
+        # 4. Test HTTP 429 Rate-Limit Backoff (Automatic cooldown on rate-limiting)
+        t_now = time.time()
+        engine.trigger_rate_limit_backoff(backoff_sec=7.5)
+        assert engine._backoff_until >= t_now + 7.0
+        assert engine._dispatch_timer.isActive()
+
+        # In backoff state, scheduling another dispatch must respect the cooldown remaining
+        remaining = engine._backoff_until - time.time()
+        assert remaining > 5.0
+
+    finally:
+        engine._backoff_until = 0.0
+        if engine._dispatch_timer.isActive():
+            engine._dispatch_timer.stop()
+        engine.clear_cache()
+
+
+def test_sqlite_wal_integrity_and_backups():
+    from src.core.database import db
+
+    # 1. Verify WAL mode and NORMAL synchronous settings
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode;")
+        mode = cursor.fetchone()[0]
+        assert mode.lower() == "wal"
+
+        cursor.execute("PRAGMA synchronous;")
+        sync = cursor.fetchone()[0]
+        # In SQLite, 1 corresponds to NORMAL
+        assert sync == 1
+
+    # 2. Verify PRAGMA quick_check integrity
+    assert db.verify_integrity() is True
+
+    # 3. Verify automated rolling database backup
+    backup_path = db.backup_database(max_backups=3)
+    assert backup_path is not None
+    assert os.path.exists(backup_path)
+    assert os.path.getsize(backup_path) > 0
+
+    # 4. Verify Link Metadata V3 Schema Persistence (file sizes, resolutions, durations)
+    test_url = "https://drive.google.com/file/d/test_meta_persist_v3/view"
+    db.save_link_metadata(
+        test_url,
+        {
+            "title": "Persist Test Video.mp4",
+            "file_type": "VIDEO",
+            "file_size_bytes": 524288000,
+            "file_size_display": "500.00 MB",
+            "resolution": "1080p",
+            "duration_seconds": 360.5,
+            "duration_display": "6m 00s"
+        }
+    )
+    cached = db.get_link_metadata(test_url)
+    assert cached is not None
+    assert cached["file_size_bytes"] == 524288000
+    assert cached["file_size_display"] == "500.00 MB"
+    assert cached["resolution"] == "1080p"
+    assert cached["duration_seconds"] == 360.5
+    assert cached["duration_display"] == "6m 00s"
+
+
+def test_project_manager_atomic_saves_and_recovery(tmp_path):
+    from src.core.project_manager import project_manager, ProjectData
+
+    test_file = str(tmp_path / "TestProject.rainyproj")
+    data = ProjectData(
+        format_version=1,
+        project_name="TestProject",
+        script_file_name="C:/Users/example/Documents/TestScript.docx",
+        file_signature="sig-abc-123",
+        footage_folder="D:/Videos/Episode_42",
+        checked_items=["item-1", "item-5", "item-9"],
+        checked_notes=["note-2"],
+        checked_links=["https://drive.google.com/file/d/xyz"],
+        notes_data=[{"id": "custom-1", "text": "Cut scene at 02:30"}]
+    )
+
+    # 1. Save atomically
+    assert project_manager.save_project(test_file, data) is True
+    assert os.path.exists(test_file)
+    assert not os.path.exists(test_file + ".tmp")  # Temporary swap file is cleaned up
+
+    # 2. Load and verify exact state match
+    loaded = project_manager.load_project(test_file)
+    assert loaded is not None
+    assert loaded.project_name == "TestProject"
+    assert loaded.footage_folder == "D:/Videos/Episode_42"
+    assert loaded.checked_items == ["item-1", "item-5", "item-9"]
+    assert loaded.checked_notes == ["note-2"]
+    assert loaded.checked_links == ["https://drive.google.com/file/d/xyz"]
+    assert len(loaded.notes_data) == 1
+    assert loaded.notes_data[0]["id"] == "custom-1"
+
+    # 3. Test managed folder path resolver
+    auto_path = project_manager.get_auto_project_path("Family Guy Episode 1.docx")
+    assert auto_path.endswith("Family Guy Episode 1.rainyproj")
+    assert "Rainy" in auto_path
+    assert "Projects" in auto_path
+
+
+def test_fcp_xml_exporter():
+    import xml.etree.ElementTree as ET
+    from src.core.models import DocumentState, ScriptItem
+    from src.core.xml_exporter import generate_fcp_xml, parse_timecode_to_frames
+
+    # Test timecode parsing
+    assert parse_timecode_to_frames("00:01:00:00", fps=30) == 1800
+    assert parse_timecode_to_frames("01:00", fps=30) == 1800
+    assert parse_timecode_to_frames("00:00:10:15", fps=30) == 315
+
+    # Test XML generation
+    doc = DocumentState(
+        id="doc-1",
+        file_signature="sig-1",
+        name="XML Test Episode",
+        file_path="test.docx",
+        raw_html=""
+    )
+    doc.items = [
+        ScriptItem(
+            id="item-1",
+            row_index=1,
+            raw_timestamp="00:01:00:00",
+            start_timecode="00:01:00:00",
+            start_seconds=60.0,
+            end_timecode="00:01:10:00",
+            end_seconds=70.0,
+            duration_seconds=10.0,
+            duration_display="10s",
+            text="First dialogue cue",
+            links=["https://drive.google.com/file/d/clip1"],
+            is_checked=True
+        ),
+        ScriptItem(
+            id="item-2",
+            row_index=2,
+            raw_timestamp="00:01:15:00",
+            start_timecode="00:01:15:00",
+            start_seconds=75.0,
+            end_timecode="00:01:25:00",
+            end_seconds=85.0,
+            duration_seconds=10.0,
+            duration_display="10s",
+            text="Second dialogue cue",
+            links=[],
+            is_checked=False
+        )
+    ]
+    doc.name = "XML Test Episode"
+    doc.items = [
+        ScriptItem(
+            id="item-1",
+            row_index=1,
+            raw_timestamp="00:01:00:00",
+            start_timecode="00:01:00:00",
+            start_seconds=60.0,
+            end_timecode="00:01:10:00",
+            end_seconds=70.0,
+            duration_seconds=10.0,
+            duration_display="10s",
+            text="First dialogue cue",
+            links=["https://drive.google.com/file/d/clip1"],
+            is_checked=True
+        ),
+        ScriptItem(
+            id="item-2",
+            row_index=2,
+            raw_timestamp="00:01:15:00",
+            start_timecode="00:01:15:00",
+            start_seconds=75.0,
+            end_timecode="00:01:25:00",
+            end_seconds=85.0,
+            duration_seconds=10.0,
+            duration_display="10s",
+            text="Second dialogue cue",
+            links=[],
+            is_checked=False
+        )
+    ]
+
+    xml_content = generate_fcp_xml(doc, footage_folder="D:/Footage", fps=30)
+    assert "<?xml version=" in xml_content
+    assert "<!DOCTYPE xmeml>" in xml_content
+    assert '<xmeml version="4">' in xml_content
+    assert "<name>XML Test Episode</name>" in xml_content
+    assert "clipitem-1" in xml_content
+    assert "clipitem-2" in xml_content
+    assert "[DONE] First dialogue cue" in xml_content
+    assert "[AROL] Second dialogue cue" in xml_content
+
+    # Validate XML parser successfully parses document tree
+    root = ET.fromstring(xml_content.split("<!DOCTYPE xmeml>\n")[-1])
+    assert root.tag == "xmeml"
+    seq = root.find("sequence")
+    assert seq is not None
+    assert seq.find("name").text == "XML Test Episode"
+    track = seq.find("media/video/track")
+    assert track is not None
+    assert len(track.findall("clipitem")) == 2
+
+
+
+

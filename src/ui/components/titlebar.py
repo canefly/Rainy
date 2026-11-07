@@ -1,9 +1,9 @@
 import os
-from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtCore import Qt, Signal, QRectF, QPoint
 from PySide6.QtGui import QPixmap, QCursor, QPainter, QColor
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame, QAbstractButton
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame, QAbstractButton, QPushButton
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton
-from qfluentwidgets import ToolButton, TransparentToolButton, FluentIcon
+from qfluentwidgets import ToolButton, TransparentToolButton, FluentIcon, RoundMenu, Action
 
 from .widgets import StatusDot, ClickableLabel, CopiedToastIndicator
 from ..theme import ThemeManager
@@ -91,6 +91,204 @@ class TitleBarBrandingWidget(QWidget):
             default_style=f"color: {muted_col}; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; font-size: 11px; font-weight: 500;",
             hover_style=f"color: {accent_col}; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; font-size: 11px; font-weight: 500; text-decoration: underline;"
         )
+
+
+class TitleBarMenuButton(QPushButton):
+    """Subtle transparent top-bar menu button matching VS Code / Office Fluent titlebar."""
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setFixedHeight(26)
+        self.setCursor(Qt.ArrowCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.apply_theme()
+
+    def apply_theme(self):
+        pal = ThemeManager.get_palette()
+        is_dark = pal.get("is_dark", True)
+        text_col = pal.get("text", "#ffffff")
+        hover_bg = "rgba(255, 255, 255, 0.08)" if is_dark else "rgba(0, 0, 0, 0.06)"
+        press_bg = "rgba(255, 255, 255, 0.14)" if is_dark else "rgba(0, 0, 0, 0.10)"
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                color: {text_col};
+                font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, sans-serif;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 2px 8px;
+            }}
+            QPushButton:hover {{
+                background: {hover_bg};
+            }}
+            QPushButton:pressed, QPushButton:checked {{
+                background: {press_bg};
+            }}
+        """)
+
+
+class TitleBarMenuWidget(QWidget):
+    """Inline VS Code style menubar: File | Edit | Export | Help inside the 40px TitleBar (0px added height)."""
+    # File actions
+    open_doc_requested = Signal()
+    open_project_requested = Signal()
+    save_project_as_requested = Signal()
+    set_footage_requested = Signal()
+    open_projects_folder_requested = Signal()
+    close_workspace_requested = Signal()
+    exit_requested = Signal()
+
+    # Edit actions
+    find_requested = Signal()
+    mark_all_done_requested = Signal()
+    reset_checklists_requested = Signal()
+
+    # Export actions
+    export_xml_requested = Signal()
+    export_timestamps_requested = Signal()
+
+    # Help actions
+    shortcuts_requested = Signal()
+    settings_requested = Signal()
+    about_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._has_document = False
+
+        self.menu_layout = QHBoxLayout(self)
+        self.menu_layout.setContentsMargins(4, 3, 8, 3)
+        self.menu_layout.setSpacing(2)
+        self.menu_layout.setAlignment(Qt.AlignVCenter)
+
+        self.file_btn = TitleBarMenuButton("File", self)
+        self.edit_btn = TitleBarMenuButton("Edit", self)
+        self.export_btn = TitleBarMenuButton("Export", self)
+        self.help_btn = TitleBarMenuButton("Help", self)
+
+        self.menu_layout.addWidget(self.file_btn)
+        self.menu_layout.addWidget(self.edit_btn)
+        self.menu_layout.addWidget(self.export_btn)
+        self.menu_layout.addWidget(self.help_btn)
+
+        self.file_btn.clicked.connect(self._show_file_menu)
+        self.edit_btn.clicked.connect(self._show_edit_menu)
+        self.export_btn.clicked.connect(self._show_export_menu)
+        self.help_btn.clicked.connect(self._show_help_menu)
+
+    def set_has_document(self, has_doc: bool):
+        self._has_document = has_doc
+
+    def apply_theme(self):
+        for btn in (self.file_btn, self.edit_btn, self.export_btn, self.help_btn):
+            btn.apply_theme()
+
+    def _show_file_menu(self):
+        menu = RoundMenu(parent=self)
+
+        open_doc_act = Action(FluentIcon.DOCUMENT, "Open Document...", self)
+        open_doc_act.setShortcut("Ctrl+O")
+        open_doc_act.triggered.connect(self.open_doc_requested.emit)
+        menu.addAction(open_doc_act)
+
+        open_proj_act = Action(FluentIcon.FOLDER, "Open Project (.rainyproj)...", self)
+        open_proj_act.triggered.connect(self.open_project_requested.emit)
+        menu.addAction(open_proj_act)
+
+        save_proj_act = Action(FluentIcon.SAVE_AS, "Save Project Copy As...", self)
+        save_proj_act.setShortcut("Ctrl+Shift+S")
+        save_proj_act.setEnabled(self._has_document)
+        save_proj_act.triggered.connect(self.save_project_as_requested.emit)
+        menu.addAction(save_proj_act)
+
+        menu.addSeparator()
+
+        footage_act = Action(FluentIcon.FOLDER_ADD, "Set Footage Directory...", self)
+        footage_act.setEnabled(self._has_document)
+        footage_act.triggered.connect(self.set_footage_requested.emit)
+        menu.addAction(footage_act)
+
+        folder_act = Action(FluentIcon.ZIP_FOLDER, "Open Projects Folder (Explorer)", self)
+        folder_act.triggered.connect(self.open_projects_folder_requested.emit)
+        menu.addAction(folder_act)
+
+        menu.addSeparator()
+
+        close_ws_act = Action(FluentIcon.CLOSE, "Close Workspace", self)
+        close_ws_act.setEnabled(self._has_document)
+        close_ws_act.triggered.connect(self.close_workspace_requested.emit)
+        menu.addAction(close_ws_act)
+
+        exit_act = Action(FluentIcon.CLOSE, "Exit", self)
+        exit_act.setShortcut("Alt+F4")
+        exit_act.triggered.connect(self.exit_requested.emit)
+        menu.addAction(exit_act)
+
+        pos = self.file_btn.mapToGlobal(QPoint(0, self.file_btn.height() + 2))
+        menu.exec(pos, ani=False)
+
+    def _show_edit_menu(self):
+        menu = RoundMenu(parent=self)
+
+        find_act = Action(FluentIcon.SEARCH, "Find in Script...", self)
+        find_act.setShortcut("Ctrl+F")
+        find_act.setEnabled(self._has_document)
+        find_act.triggered.connect(self.find_requested.emit)
+        menu.addAction(find_act)
+
+        menu.addSeparator()
+
+        mark_all_act = Action(FluentIcon.CHECKBOX, "Mark All Items Done", self)
+        mark_all_act.setEnabled(self._has_document)
+        mark_all_act.triggered.connect(self.mark_all_done_requested.emit)
+        menu.addAction(mark_all_act)
+
+        reset_act = Action(FluentIcon.SYNC, "Reset All Checklists", self)
+        reset_act.setEnabled(self._has_document)
+        reset_act.triggered.connect(self.reset_checklists_requested.emit)
+        menu.addAction(reset_act)
+
+        pos = self.edit_btn.mapToGlobal(QPoint(0, self.edit_btn.height() + 2))
+        menu.exec(pos, ani=False)
+
+    def _show_export_menu(self):
+        menu = RoundMenu(parent=self)
+
+        xml_act = Action(FluentIcon.SHARE, "Premiere Pro XML Sequence (.xml)...", self)
+        xml_act.setShortcut("Ctrl+E")
+        xml_act.setEnabled(self._has_document)
+        xml_act.triggered.connect(self.export_xml_requested.emit)
+        menu.addAction(xml_act)
+
+        ts_act = Action(FluentIcon.DOCUMENT, "Export Timestamps (.txt / .csv)...", self)
+        ts_act.setEnabled(self._has_document)
+        ts_act.triggered.connect(self.export_timestamps_requested.emit)
+        menu.addAction(ts_act)
+
+        pos = self.export_btn.mapToGlobal(QPoint(0, self.export_btn.height() + 2))
+        menu.exec(pos, ani=False)
+
+    def _show_help_menu(self):
+        menu = RoundMenu(parent=self)
+
+        sc_act = Action(FluentIcon.HELP, "Keyboard Shortcuts", self)
+        sc_act.setShortcut("F1")
+        sc_act.triggered.connect(self.shortcuts_requested.emit)
+        menu.addAction(sc_act)
+
+        pref_act = Action(FluentIcon.SETTING, "Cookie & Auth Settings...", self)
+        pref_act.triggered.connect(self.settings_requested.emit)
+        menu.addAction(pref_act)
+
+        menu.addSeparator()
+
+        about_act = Action(FluentIcon.INFO, "About Rainy...", self)
+        about_act.triggered.connect(self.about_requested.emit)
+        menu.addAction(about_act)
+
+        pos = self.help_btn.mapToGlobal(QPoint(0, self.help_btn.height() + 2))
+        menu.exec(pos, ani=False)
 
 
 class TitleBarStatsWidget(QWidget):

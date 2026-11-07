@@ -5,17 +5,21 @@ from PySide6.QtCore import Qt, Signal, QRect
 from PySide6.QtGui import QCursor, QIcon, QPainter, QColor, QPalette
 from PySide6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, 
-    QWidget, QTextEdit, QApplication, QSizePolicy
+    QWidget, QTextEdit, QApplication, QSizePolicy, QDialog
 )
 from qframelesswindow import FramelessWindow
 from qfluentwidgets import (
-    FluentTitleBar, PushButton, PrimaryPushButton, ToolButton, FluentIcon, 
-    IconWidget, SearchLineEdit, CheckBox, ProgressBar, SmoothScrollArea, ComboBox
+    FluentTitleBar, MessageBoxBase, PushButton, PrimaryPushButton, ToolButton, FluentIcon, 
+    IconWidget, LineEdit, CheckBox, ProgressBar, SmoothScrollArea, ComboBox
 )
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
-from .widgets import MiddleClickAutoScroller, safe_copy_to_clipboard
+from .widgets import MiddleClickAutoScroller, safe_copy_to_clipboard, CompactCheckBox, StatusDot
 from .titlebar import CaptionPinButton
+from .link_embed_card import link_embed_controller
+from .link_info_dialog import LinkMetadataDialog
 from ...core.models import EditorNote
+from ...core.parser import normalize_link
+from ...core.unfurl_engine import unfurl_engine, LinkMetadata
 from ..theme import ThemeManager
 
 
@@ -41,23 +45,40 @@ def format_domain_badge(link: str) -> str:
 
 class ElidedUrlLabel(QLabel):
     """A URL label that cleanly elides middle text with '...' to fit available space,
-    never forces its parent layout to expand or push buttons off-screen, and preserves full URL in tooltip."""
+    never forces its parent layout to expand or push buttons off-screen, and triggers the rich embed hover card."""
     
     def __init__(self, url: str, parent=None):
         super().__init__(parent)
         self._url = url
-        self.setToolTip(url)
+        self._display_text = url
         self.setCursor(QCursor(Qt.PointingHandCursor))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMinimumWidth(60)
 
     def set_url(self, url: str):
         self._url = url
-        self.setToolTip(url)
+        self._display_text = url
         self.update()
+
+    def set_display_text(self, text: str):
+        self._display_text = text or self._url
+        self.update()
+
+    def display_text(self) -> str:
+        return self._display_text
 
     def url(self) -> str:
         return self._url
+
+    def enterEvent(self, event):
+        if self._url and self._url != "#":
+            top_left = self.mapToGlobal(self.rect().topLeft())
+            link_embed_controller.schedule_show(self._url, QRect(top_left, self.size()))
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        link_embed_controller.schedule_hide()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -69,7 +90,8 @@ class ElidedUrlLabel(QLabel):
         painter.setRenderHint(QPainter.Antialiasing)
         metrics = painter.fontMetrics()
         avail_w = max(10, self.width() - 4)
-        elided = metrics.elidedText(self._url, Qt.ElideMiddle, avail_w)
+        elide_mode = Qt.ElideRight if self._display_text != self._url else Qt.ElideMiddle
+        elided = metrics.elidedText(self._display_text, elide_mode, avail_w)
         painter.setPen(self.palette().color(QPalette.WindowText))
         painter.drawText(QRect(2, 0, avail_w, self.height()), Qt.AlignLeft | Qt.AlignVCenter, elided)
 
@@ -173,80 +195,166 @@ class ToolWindowTitleBar(FluentTitleBar):
         self.closeBtn.update()
 
 
-class DesktopToolWindow(FramelessWindow):
-    """Independent modeless desktop tool window with window icon, always-on-top pin, and Segoe UI Variable typography."""
+class DrawerStatusDot(StatusDot):
+    """Vector status dot with dynamic color switching for modal checklists."""
+    def set_color(self, color: str, halo_color: str = None):
+        self._dot_color = QColor(color)
+        if halo_color:
+            self._halo_color = QColor(halo_color)
+        else:
+            c = QColor(color)
+            self._halo_color = QColor(c.red(), c.green(), c.blue(), 90)
+        self.update()
+
+
+class FluentModalDrawer(MessageBoxBase):
+    """Windows 11 Fluent Modal Checklist Drawer matching FootageRelinkDialog styling.
+    Replaces detached DWM floating window with centered elevated card, smoke mask overlay,
+    inline Top-Nav stats, and responsive Segoe UI Variable typography."""
     closed = Signal()
     pin_toggled = Signal(bool)
 
-    def __init__(self, title: str, icon_enum: FluentIcon, badge_color: str = None, parent=None):
-        super().__init__(parent)
+    def __init__(self, title: str, icon_enum: FluentIcon, subtitle: str = "", badge_color: str = None, parent=None):
+        self._fallback_parent = None
+        target_parent = None
+        if parent:
+            target_parent = parent.window() if (hasattr(parent, 'window') and parent.window()) else parent
+        if target_parent is None:
+            target_parent = QApplication.activeWindow()
+        if target_parent is None:
+            self._fallback_parent = QWidget()
+            self._fallback_parent.resize(960, 680)
+            target_parent = self._fallback_parent
+
+        super().__init__(parent=target_parent)
+        self._title = title
+        self._subtitle = subtitle
+        self._custom_badge_color = badge_color
         self.is_pinned = False
-        self.badge_color = badge_color
-        self.setObjectName("DesktopToolWindow")
-        self.setWindowTitle(f"{title} - Rainy Tools")
-        self.resize(440, 640)
-        self.setMinimumSize(340, 360)
 
-        # Set Window Icon
-        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "logo.png"))
-        if os.path.exists(logo_path):
-            self.setWindowIcon(QIcon(logo_path))
+        self.viewLayout.setSpacing(10)
+        self.viewLayout.setContentsMargins(20, 20, 20, 16)
 
-        # TitleBar
-        self.title_bar_widget = ToolWindowTitleBar(title, icon_enum, badge_color, self)
-        self.setTitleBar(self.title_bar_widget)
-        self.title_bar_widget.pin_btn.clicked.connect(self._toggle_pin)
+        # 1. Dialog Header: Title & Inline Status & Stats
+        header_layout = QVBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
 
-        # Exposed attributes for callers/tests
-        self.title_label = self.title_bar_widget.title_label
-        self.count_badge = self.title_bar_widget.count_badge
-        self.pin_btn = self.title_bar_widget.pin_btn
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_row.setAlignment(Qt.AlignVCenter)
 
-        # Content container layout offset for 40px titlebar
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(14, 46, 14, 12)
-        self.main_layout.setSpacing(10)
+        self.icon_widget = IconWidget(icon_enum, self.widget)
+        self.icon_widget.setFixedSize(16, 16)
+        title_row.addWidget(self.icon_widget, 0, Qt.AlignVCenter)
 
-    def _toggle_pin(self):
-        self.is_pinned = not self.is_pinned
-        flags = self.windowFlags()
-        if self.is_pinned:
-            flags |= Qt.WindowStaysOnTopHint
+        self.header_title = QLabel(title, self.widget)
+        self.header_title.setObjectName("DrawerDialogTitle")
+        title_row.addWidget(self.header_title, 0, Qt.AlignVCenter)
+
+        # Inline stats container matching Top Nav stats
+        self.header_stats = QWidget(self.widget)
+        self.header_stats.setObjectName("DrawerHeaderStats")
+        hs_layout = QHBoxLayout(self.header_stats)
+        hs_layout.setContentsMargins(0, 0, 0, 0)
+        hs_layout.setSpacing(8)
+        hs_layout.setAlignment(Qt.AlignVCenter)
+
+        self.header_div1 = QFrame(self.header_stats)
+        self.header_div1.setFrameShape(QFrame.VLine)
+        self.header_div1.setFixedHeight(12)
+        hs_layout.addWidget(self.header_div1)
+
+        # Status dot (green if all done, amber/accent if pending)
+        self.status_dot = DrawerStatusDot("#34d399", "rgba(52, 211, 153, 0.35)", self.header_stats)
+        hs_layout.addWidget(self.status_dot)
+
+        # Count badge: displays "0 / 0 Done"
+        self.count_badge = QLabel("0 / 0 Done", self.header_stats)
+        self.count_badge.setObjectName("DrawerHeaderCountBadge")
+        hs_layout.addWidget(self.count_badge)
+
+        title_row.addWidget(self.header_stats, 0, Qt.AlignVCenter)
+        title_row.addStretch(1)
+        header_layout.addLayout(title_row)
+
+        if self._subtitle:
+            self.header_desc = QLabel(self._subtitle, self.widget)
+            self.header_desc.setObjectName("DrawerDialogSubtitle")
+            self.header_desc.setWordWrap(True)
+            header_layout.addWidget(self.header_desc)
         else:
-            flags &= ~Qt.WindowStaysOnTopHint
-        self.pin_btn.set_pinned(self.is_pinned)
-        self.setWindowFlags(flags)
-        self.show()
-        self.pin_toggled.emit(self.is_pinned)
+            self.header_desc = None
+
+        self.viewLayout.addLayout(header_layout)
+
+        # Compatibility aliases for callers and tests
+        self.title_label = self.header_title
+        self.main_layout = self.viewLayout
+        self.pin_btn = CaptionPinButton(self)
+        self.pin_btn.hide()
+
+        # Dialog Footer
+        self.buttonGroup.setFixedHeight(64)
+        self.buttonLayout.setContentsMargins(20, 10, 20, 14)
+        self.yesButton.setText("Done")
+        self.yesButton.setIcon(FluentIcon.ACCEPT)
+        self.yesButton.clicked.connect(self.hide)
+        self.cancelButton.hide()
+        self.setClosableOnMaskClicked(True)
+
+    def windowTitle(self) -> str:
+        return self._title
+
+    def setWindowTitle(self, title: str):
+        self._title = title
+        if hasattr(self, "header_title") and self.header_title:
+            self.header_title.setText(title)
 
     def set_badge_text(self, text: str):
         self.count_badge.setText(text)
 
-    def paintEvent(self, e):
-        painter = QPainter(self)
-        ThemeManager.paint_window_backdrop(self, painter)
-
-    def moveEvent(self, e):
-        super().moveEvent(e)
-        if ThemeManager.orb_glow_intensity > 0:
-            self.update()
+    def activateWindow(self):
+        super().activateWindow()
+        self.raise_()
 
     def showEvent(self, e):
-        super().showEvent(e)
-        ThemeManager.enable_window_backdrop(self)
+        self.setGraphicsEffect(None)
+        p = self.parentWidget() or self.window()
+        if p and p.width() > 0 and p.height() > 0:
+            self.resize(p.size())
+        QDialog.showEvent(self, e)
         if hasattr(self, "apply_theme"):
             self.apply_theme()
+
+    def done(self, code):
+        self.setGraphicsEffect(None)
+        if hasattr(self, "widget") and self.widget:
+            self.widget.setGraphicsEffect(None)
+        QDialog.done(self, code)
+        self.closed.emit()
+
+    def close(self) -> bool:
+        self.hide()
+        self.closed.emit()
+        return True
 
     def closeEvent(self, event):
         event.ignore()
         self.hide()
         self.closed.emit()
 
-DrawerFrame = DesktopToolWindow
+
+DrawerFrame = FluentModalDrawer
+DesktopToolWindow = FluentModalDrawer
 
 
 class NotesDrawer(DrawerFrame):
-    """Full-featured Editor Notes Checklist Drawer with search, progress tracking, and line jumps."""
+    """Windows 11 Fluent Modal Checklist Dialog for Editor Notes.
+    Features progress tracking, dropdown filtering (All | Done | Pending),
+    jump to script line, copy note, and custom note addition.
+    Strictly NO emojis are used in icons, labels, or badges."""
     note_added = Signal(str)
     note_deleted = Signal(str)
     note_checked_changed = Signal(str, bool)
@@ -254,17 +362,28 @@ class NotesDrawer(DrawerFrame):
     copy_feedback_requested = Signal(str)
 
     def __init__(self, parent=None):
-        super().__init__("Editor Notes", FluentIcon.EDIT, badge_color=None, parent=parent)
+        super().__init__(
+            title="Editor Notes",
+            icon_enum=FluentIcon.EDIT,
+            subtitle="Review editorial feedback, script revisions, and production directives.",
+            badge_color=None,
+            parent=parent,
+        )
         self.notes: List[EditorNote] = []
         self.note_cards: List[QFrame] = []
         self.checked_state: Dict[str, bool] = {}
+        self.empty_lbl = None
 
-        # 1. Toolbar: Dropdown Filter (All | Done | Pending) + "Mark all as done" PushButton
+        target_parent = self.parentWidget() or QApplication.activeWindow()
+        parent_w = target_parent.width() if target_parent else 900
+        self.widget.setFixedWidth(min(660, max(520, parent_w - 60)))
+
+        # 1. Toolbar: Dropdown Filter (All | Done | Pending) + "Mark all as done" PushButton (NO SEARCH BAR)
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(8)
 
-        self.filter_combo = ComboBox(self)
+        self.filter_combo = ComboBox(self.widget)
         orig_create_menu = self.filter_combo._createComboMenu
         def _fast_menu():
             menu = orig_create_menu()
@@ -281,7 +400,7 @@ class NotesDrawer(DrawerFrame):
 
         toolbar.addStretch(1)
 
-        self.toggle_all_btn = PushButton("Mark all as done", self)
+        self.toggle_all_btn = PushButton("Mark all as done", self.widget)
         self.toggle_all_btn.setFixedHeight(28)
         self.toggle_all_btn.clicked.connect(self._toggle_all)
         toolbar.addWidget(self.toggle_all_btn)
@@ -289,9 +408,10 @@ class NotesDrawer(DrawerFrame):
         self.main_layout.addLayout(toolbar)
 
         # 2. Notes List Smooth Scroll Area
-        self.scroll = SmoothScrollArea(self)
+        self.scroll = SmoothScrollArea(self.widget)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setFixedHeight(340)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         self.list_widget = QWidget(self.scroll)
@@ -308,24 +428,30 @@ class NotesDrawer(DrawerFrame):
         self.middle_scroller = MiddleClickAutoScroller(self.scroll, self)
         self.main_layout.addWidget(self.scroll)
 
-        # 3. Add Note Input Row
-        self.note_input = QTextEdit(self)
-        self.note_input.setObjectName("DrawerNoteInput")
-        self.note_input.setPlaceholderText("Add a custom note...")
-        self.note_input.setFixedHeight(50)
-        self.main_layout.addWidget(self.note_input)
+        # 3. Add Note Input Row (Clean Horizontal Layout)
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 4, 0, 0)
+        add_row.setSpacing(8)
 
-        self.add_btn = PushButton("Add Note", self)
+        self.note_input = LineEdit(self.widget)
+        self.note_input.toPlainText = lambda: self.note_input.text()
+        self.note_input.setObjectName("DrawerNoteInput")
+        self.note_input.setPlaceholderText("Add a custom note to checklist...")
+        self.note_input.setFixedHeight(32)
+        self.note_input.returnPressed.connect(self._on_add_note)
+        add_row.addWidget(self.note_input, 1, Qt.AlignVCenter)
+
+        self.add_btn = PushButton("Add Note", self.widget)
         self.add_btn.setIcon(FluentIcon.ADD)
         self.add_btn.setFixedHeight(32)
         self.add_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.add_btn.clicked.connect(self._on_add_note)
-        self.main_layout.addWidget(self.add_btn)
+        add_row.addWidget(self.add_btn, 0, Qt.AlignVCenter)
+
+        self.main_layout.addLayout(add_row)
         self.apply_theme()
 
     def apply_theme(self):
-        if hasattr(self, "title_bar_widget") and self.title_bar_widget:
-            self.title_bar_widget.apply_theme()
         pal = ThemeManager.get_palette()
         accent = pal.get("accent", "#38bdf8")
         rgb = pal.get("accent_rgb", "56, 189, 248")
@@ -334,6 +460,36 @@ class NotesDrawer(DrawerFrame):
         surface = pal.get("surface", "#18181b")
         surface_hover = pal.get("surface_hover", "#27272a")
         border = pal.get("border", "#27272a")
+        col = self._custom_badge_color if self._custom_badge_color else accent
+
+        self.header_title.setStyleSheet(f"""
+            QLabel#DrawerDialogTitle {{
+                color: {text_col};
+                font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                font-size: 15px;
+                font-weight: 700;
+            }}
+        """)
+        if self.header_desc:
+            self.header_desc.setStyleSheet(f"""
+                QLabel#DrawerDialogSubtitle {{
+                    color: {muted_col};
+                    font-size: 11px;
+                }}
+            """)
+        self.header_div1.setStyleSheet(f"color: {border};")
+        self.count_badge.setStyleSheet(f"""
+            QLabel#DrawerHeaderCountBadge {{
+                background-color: rgba({rgb}, 0.14);
+                color: {col};
+                font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 1px 8px;
+                border-radius: 9px;
+                border: 1px solid rgba({rgb}, 0.28);
+            }}
+        """)
 
         if hasattr(self, "empty_lbl") and self.empty_lbl:
             self.empty_lbl.setStyleSheet(f"color: {muted_col}; background: transparent; font-size: 11px; font-style: italic;")
@@ -357,16 +513,16 @@ class NotesDrawer(DrawerFrame):
 
         if hasattr(self, "note_input") and self.note_input:
             self.note_input.setStyleSheet(f"""
-                QTextEdit#DrawerNoteInput {{
+                LineEdit#DrawerNoteInput {{
                     background-color: {surface};
                     color: {text_col};
                     border: 1px solid {border};
                     border-radius: 6px;
-                    padding: 6px;
+                    padding: 4px 8px;
                     font-size: 11px;
                     font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
                 }}
-                QTextEdit#DrawerNoteInput:focus {{
+                LineEdit#DrawerNoteInput:focus {{
                     border: 1px solid {accent};
                 }}
             """)
@@ -378,9 +534,9 @@ class NotesDrawer(DrawerFrame):
                     color: {text_col};
                     border: 1px solid rgba({rgb}, 0.32);
                     border-radius: 6px;
-                    font-size: 12px;
+                    font-size: 11px;
                     font-weight: 600;
-                    padding: 5px 12px 6px 36px;
+                    padding: 4px 12px;
                 }}
                 PushButton:hover {{
                     background-color: rgba({rgb}, 0.22);
@@ -430,9 +586,7 @@ class NotesDrawer(DrawerFrame):
             top_row = QHBoxLayout()
             top_row.setSpacing(6)
 
-            cb = CheckBox("", card)
-            cb.setStyleSheet("CheckBox { min-width: 18px; max-width: 18px; margin: 0px; spacing: 0px; padding: 0px; }")
-            cb.setFixedSize(18, 18)
+            cb = CompactCheckBox(card)
             cb.setChecked(is_checked)
             cb.stateChanged.connect(lambda state, n=note, c=card: self._on_note_check(n, state, c))
             top_row.addWidget(cb, 0, Qt.AlignVCenter)
@@ -563,11 +717,14 @@ class NotesDrawer(DrawerFrame):
 
     def _update_all_done_button(self):
         total = len(self.notes)
-        checked = sum(1 for v in self.checked_state.values() if v)
+        checked = sum(1 for note in self.notes if self.checked_state.get(note.id, False))
         if total > 0 and checked == total:
             self.toggle_all_btn.setText("Mark all as not done")
+            self.status_dot.set_color("#34d399", "rgba(52, 211, 153, 0.35)")
         else:
             self.toggle_all_btn.setText("Mark all as done")
+            self.status_dot.set_color("#fbbf24" if total > 0 else "#94a3b8", "rgba(251, 191, 36, 0.35)" if total > 0 else "rgba(148, 163, 184, 0.25)")
+        self.count_badge.setText(f"{checked} / {total} Done")
 
     def _update_progress(self):
         self._update_all_done_button()
@@ -598,12 +755,18 @@ class NotesDrawer(DrawerFrame):
         total = len(self.notes)
         if total == 0:
             return
-        checked = sum(1 for v in self.checked_state.values() if v)
+        checked = sum(1 for note in self.notes if self.checked_state.get(note.id, False))
         new_state = (checked < total)
 
         for card in self.note_cards:
+            note_id = card.property("note_id")
+            if note_id:
+                self.checked_state[note_id] = new_state
+                self.note_checked_changed.emit(note_id, new_state)
+            card.setProperty("is_checked", new_state)
+            self._apply_note_style(card, new_state)
             cb = card.property("checkbox")
-            if cb:
+            if cb and cb.isChecked() != new_state:
                 cb.setChecked(new_state)
         self._update_all_done_button()
         self.apply_filter()
@@ -613,30 +776,46 @@ class NotesDrawer(DrawerFrame):
         self.copy_feedback_requested.emit("Copied Note!")
 
     def _on_add_note(self):
-        text = self.note_input.toPlainText().strip()
+        text = self.note_input.text().strip() if hasattr(self.note_input, 'text') else self.note_input.toPlainText().strip()
         if text:
             self.note_added.emit(text)
             self.note_input.clear()
 
 
 class LinksDrawer(DrawerFrame):
-    """Full-featured Source Links Checklist Drawer with search, progress tracking, and batch copy."""
+    """Windows 11 Fluent Modal Checklist Dialog for Source Links.
+    Features progress tracking, dropdown filtering (All | Done | Pending),
+    relink local footage, link metadata inspect, and batch copy.
+    Strictly NO emojis are used in icons, labels, or badges."""
     link_checked_changed = Signal(str, bool)
     copy_feedback_requested = Signal(str)
+    relink_requested = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Source Links", FluentIcon.LINK, badge_color=None, parent=parent)
+        super().__init__(
+            title="Source Links",
+            icon_enum=FluentIcon.LINK,
+            subtitle="Verified external references, media assets, and research footage.",
+            badge_color=None,
+            parent=parent,
+        )
         self.links: List[str] = []
         self.link_cards: List[QFrame] = []
         self.checked_links: Dict[str, bool] = {}
+        self.linked_footage: Dict[str, str] = {}
         self.active_filter: str = "all"
+        self.empty_lbl = None
 
-        # 1. Toolbar: Dropdown Filter (All | Done | Pending) + "Mark all as done" PushButton
+        target_parent = self.parentWidget() or QApplication.activeWindow()
+        parent_w = target_parent.width() if target_parent else 900
+        self.widget.setFixedWidth(min(760, max(560, parent_w - 60)))
+
+        # 1. Toolbar: Dropdown Filter + Relink Local Footage + Mark All Done Button (NO SEARCH BAR)
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(8)
 
-        self.filter_combo = ComboBox(self)
+        self.filter_combo = ComboBox(self.widget)
         orig_create_menu = self.filter_combo._createComboMenu
         def _fast_menu():
             menu = orig_create_menu()
@@ -653,7 +832,13 @@ class LinksDrawer(DrawerFrame):
 
         toolbar.addStretch(1)
 
-        self.toggle_all_btn = PushButton("Mark all as done", self)
+        self.relink_btn = ToolButton(FluentIcon.FOLDER, self.widget)
+        self.relink_btn.setFixedSize(28, 28)
+        self.relink_btn.setToolTip("Relink Local Footage")
+        self.relink_btn.clicked.connect(self.relink_requested.emit)
+        toolbar.addWidget(self.relink_btn)
+
+        self.toggle_all_btn = PushButton("Mark all as done", self.widget)
         self.toggle_all_btn.setFixedHeight(28)
         self.toggle_all_btn.clicked.connect(self._toggle_all)
         toolbar.addWidget(self.toggle_all_btn)
@@ -661,9 +846,10 @@ class LinksDrawer(DrawerFrame):
         self.main_layout.addLayout(toolbar)
 
         # 2. Links List Smooth Scroll Area
-        self.scroll = SmoothScrollArea(self)
+        self.scroll = SmoothScrollArea(self.widget)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setFixedHeight(380)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         self.list_widget = QWidget(self.scroll)
@@ -679,18 +865,135 @@ class LinksDrawer(DrawerFrame):
             self.scroll.delegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
         self.middle_scroller = MiddleClickAutoScroller(self.scroll, self)
         self.main_layout.addWidget(self.scroll)
+        unfurl_engine.metadata_ready.connect(self._on_link_metadata_ready)
         self.apply_theme()
 
+    def _on_link_metadata_ready(self, url: str, meta: LinkMetadata):
+        if not meta or meta.loading or meta.is_fallback or not meta.title:
+            return
+        if not hasattr(self, "link_cards") or not self.link_cards:
+            return
+        norm = normalize_link(url)
+        for card in list(self.link_cards):
+            try:
+                raw_url = card.property("raw_link_url") or card.property("link_url") or ""
+                if raw_url and normalize_link(raw_url) == norm:
+                    lbl = card.property("text_label")
+                    if isinstance(lbl, ElidedUrlLabel):
+                        lbl.set_display_text(meta.title)
+                    sb = card.property("stat_badge")
+                    if sb is not None:
+                        self._update_stat_badge(sb, meta)
+            except (RuntimeError, ReferenceError):
+                continue
+
+    def _update_stat_badge(self, badge: QLabel, meta: Optional[LinkMetadata]):
+        if not meta or meta.loading or meta.is_fallback:
+            badge.hide()
+            return
+
+        if meta.is_restricted:
+            badge.setText("RESTRICTED")
+            badge.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(245, 158, 11, 0.16);
+                    color: #fbbf24;
+                    font-size: 9px;
+                    font-weight: 700;
+                    padding: 0px 5px;
+                    border-radius: 4px;
+                    border: 1px solid rgba(245, 158, 11, 0.32);
+                    font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                }
+            """)
+            badge.show()
+        stat_parts = []
+        if meta.resolution:
+            stat_parts.append(meta.resolution)
+        if meta.duration_display:
+            stat_parts.append(meta.duration_display)
+        if meta.file_size_display:
+            stat_parts.append(meta.file_size_display)
+
+        if stat_parts:
+            badge.setText(" • ".join(stat_parts))
+            badge.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(56, 189, 248, 0.12);
+                    color: #38bdf8;
+                    font-size: 9px;
+                    font-weight: 700;
+                    padding: 0px 5px;
+                    border-radius: 4px;
+                    border: 1px solid rgba(56, 189, 248, 0.28);
+                    font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                }
+            """)
+            badge.show()
+        elif meta.title:
+            badge.setText("● FETCHED")
+            badge.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(16, 185, 129, 0.12);
+                    color: #34d399;
+                    font-size: 9px;
+                    font-weight: 700;
+                    padding: 0px 5px;
+                    border-radius: 4px;
+                    border: 1px solid rgba(16, 185, 129, 0.28);
+                    font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                }
+            """)
+            badge.show()
+        else:
+            badge.hide()
+
+    def _show_link_info(self, link: str):
+        link_embed_controller.hide_immediately()
+        norm = normalize_link(link)
+        local_path = self.linked_footage.get(norm) or self.linked_footage.get(link)
+        dialog = LinkMetadataDialog(link, parent=self, local_path=local_path)
+        dialog.exec()
+
     def apply_theme(self):
-        if hasattr(self, "title_bar_widget") and self.title_bar_widget:
-            self.title_bar_widget.apply_theme()
         pal = ThemeManager.get_palette()
         accent = pal.get("accent", "#38bdf8")
+        rgb = pal.get("accent_rgb", "56, 189, 248")
         text_col = pal.get("text", "#ffffff")
         muted_col = pal.get("muted", "#94a3b8")
         surface = pal.get("surface", "#18181b")
         surface_hover = pal.get("surface_hover", "#27272a")
         border = pal.get("border", "#27272a")
+        col = self._custom_badge_color if self._custom_badge_color else accent
+
+        self.header_title.setStyleSheet(f"""
+            QLabel#DrawerDialogTitle {{
+                color: {text_col};
+                font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                font-size: 15px;
+                font-weight: 700;
+            }}
+        """)
+        if self.header_desc:
+            self.header_desc.setStyleSheet(f"""
+                QLabel#DrawerDialogSubtitle {{
+                    color: {muted_col};
+                    font-size: 11px;
+                }}
+            """)
+        self.header_div1.setStyleSheet(f"color: {border};")
+        self.count_badge.setStyleSheet(f"""
+            QLabel#DrawerHeaderCountBadge {{
+                background-color: rgba({rgb}, 0.14);
+                color: {col};
+                font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 1px 8px;
+                border-radius: 9px;
+                border: 1px solid rgba({rgb}, 0.28);
+            }}
+        """)
 
         if hasattr(self, "empty_lbl") and self.empty_lbl:
             self.empty_lbl.setStyleSheet(f"color: {muted_col}; background: transparent; font-size: 11px; font-style: italic;")
@@ -716,9 +1019,16 @@ class LinksDrawer(DrawerFrame):
             is_checked = bool(card.property("is_checked"))
             self._apply_link_style(card, is_checked)
 
-    def load_links(self, links: List[str], checked_links: Optional[Dict[str, bool]] = None):
+    def load_links(
+        self,
+        links: List[str],
+        checked_links: Optional[Dict[str, bool]] = None,
+        linked_footage: Optional[Dict[str, str]] = None
+    ):
         self.links = sorted(list(set(links)))
         self.checked_links = checked_links.copy() if checked_links else {}
+        if linked_footage is not None:
+            self.linked_footage = linked_footage.copy()
         self.link_cards.clear()
         self.empty_lbl = None
 
@@ -750,9 +1060,7 @@ class LinksDrawer(DrawerFrame):
             c_layout.setContentsMargins(10, 6, 10, 6)
             c_layout.setSpacing(6)
 
-            cb = CheckBox("", card)
-            cb.setStyleSheet("CheckBox { min-width: 18px; max-width: 18px; margin: 0px; spacing: 0px; padding: 0px; }")
-            cb.setFixedSize(18, 18)
+            cb = CompactCheckBox(card)
             cb.setChecked(is_checked)
             cb.stateChanged.connect(lambda state, l=link, c=card: self._on_link_check(l, state, c))
             c_layout.addWidget(cb, 0, Qt.AlignVCenter)
@@ -765,7 +1073,91 @@ class LinksDrawer(DrawerFrame):
             c_layout.addWidget(badge, 0, Qt.AlignVCenter)
 
             lbl = ElidedUrlLabel(link, card)
+            cached_meta = unfurl_engine.get_cached(link)
+            if cached_meta and not cached_meta.loading and not cached_meta.is_fallback and cached_meta.title:
+                lbl.set_display_text(cached_meta.title)
             c_layout.addWidget(lbl, 1, Qt.AlignVCenter)
+
+            # Local footage indicator
+            norm = normalize_link(link)
+            local_path = self.linked_footage.get(norm) or self.linked_footage.get(link)
+            if local_path and os.path.isfile(local_path):
+                from ...core.media_probe import probe_media_file
+                from ...core.unfurl_engine import format_bytes_display, format_duration_display
+                probed = probe_media_file(local_path, use_cache=True)
+                if probed:
+                    if not cached_meta or not cached_meta.duration_display or not cached_meta.resolution:
+                        if not cached_meta:
+                            cached_meta = LinkMetadata(url=link, title=os.path.basename(local_path), domain="LOCAL", is_fallback=False, loading=False)
+                        if not cached_meta.title or cached_meta.is_fallback:
+                            cached_meta.title = os.path.basename(local_path)
+                        if probed.resolution:
+                            cached_meta.resolution = probed.resolution
+                        if probed.duration_seconds > 0:
+                            cached_meta.duration_seconds = probed.duration_seconds
+                            cached_meta.duration_display = probed.duration_display or format_duration_display(probed.duration_seconds)
+                        if probed.file_size > 0:
+                            cached_meta.file_size_bytes = probed.file_size
+                            cached_meta.file_size_display = format_bytes_display(probed.file_size)
+                        cached_meta.is_fallback = False
+                        cached_meta.loading = False
+                        unfurl_engine.store_metadata(link, cached_meta, persist_sqlite=True)
+                        if norm != link:
+                            unfurl_engine.store_metadata(norm, cached_meta, persist_sqlite=True)
+                        if hasattr(lbl, 'set_display_text') and cached_meta.title:
+                            lbl.set_display_text(cached_meta.title)
+
+                local_badge = QLabel("LOCAL", card)
+                local_badge.setFixedHeight(18)
+                tip_text = f"Linked Local File:\n{local_path}"
+                if probed and abs(probed.start_time) > 0.001:
+                    tip_text += f"\nOffset: +{probed.start_time:.3f}s"
+                local_badge.setToolTip(tip_text)
+                local_badge.setStyleSheet("""
+                    QLabel {
+                        background-color: rgba(16, 185, 129, 0.16);
+                        color: #34d399;
+                        border: 1px solid rgba(16, 185, 129, 0.38);
+                        border-radius: 4px;
+                        font-size: 9px;
+                        font-weight: 700;
+                        padding: 0px 5px;
+                        font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                    }
+                """)
+                c_layout.addWidget(local_badge, 0, Qt.AlignVCenter)
+
+                if probed and probed.is_vfr:
+                    vfr_badge = QLabel("VFR", card)
+                    vfr_badge.setFixedHeight(18)
+                    vfr_badge.setToolTip(f"Variable Frame Rate ({probed.frame_rate} FPS avg)\nTimecode may drift in Premiere without CFR transcode.")
+                    vfr_badge.setStyleSheet("""
+                        QLabel {
+                            background-color: rgba(245, 158, 11, 0.16);
+                            color: #fbbf24;
+                            border: 1px solid rgba(245, 158, 11, 0.38);
+                            border-radius: 4px;
+                            font-size: 9px;
+                            font-weight: 700;
+                            padding: 0px 5px;
+                            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                        }
+                    """)
+                    c_layout.addWidget(vfr_badge, 0, Qt.AlignVCenter)
+
+            # Metadata stat badge (shows 1080p, 142 MB, or FETCHED status)
+            stat_badge = QLabel(card)
+            stat_badge.setFixedHeight(18)
+            stat_badge.setAlignment(Qt.AlignCenter)
+            self._update_stat_badge(stat_badge, cached_meta)
+            c_layout.addWidget(stat_badge, 0, Qt.AlignVCenter)
+
+            # More info button
+            info_btn = ToolButton(FluentIcon.INFO, card)
+            info_btn.setFixedSize(24, 24)
+            info_btn.setToolTip("View Metadata & File Details")
+            info_btn.clicked.connect(lambda _, l=link: self._show_link_info(l))
+            c_layout.addWidget(info_btn, 0, Qt.AlignVCenter)
 
             # Copy link button
             copy_btn = ToolButton(FluentIcon.COPY, card)
@@ -780,11 +1172,14 @@ class LinksDrawer(DrawerFrame):
             open_btn.clicked.connect(lambda _, l=link: webbrowser.open(l))
             c_layout.addWidget(open_btn, 0, Qt.AlignVCenter)
 
+            card.setProperty("raw_link_url", link)
             card.setProperty("link_url", link.lower())
             card.setProperty("is_checked", is_checked)
             card.setProperty("checkbox", cb)
             card.setProperty("domain_badge", badge)
+            card.setProperty("stat_badge", stat_badge)
             card.setProperty("text_label", lbl)
+            card.setProperty("info_btn", info_btn)
             card.setProperty("copy_btn", copy_btn)
             card.setProperty("open_btn", open_btn)
 
@@ -840,7 +1235,7 @@ class LinksDrawer(DrawerFrame):
                 background-color: rgba({rgb}, 0.22);
             }}
         """
-        for b_name in ("copy_btn", "open_btn"):
+        for b_name in ("info_btn", "copy_btn", "open_btn"):
             btn = card.property(b_name)
             if btn is not None:
                 btn.setStyleSheet(btn_qss)
@@ -880,11 +1275,14 @@ class LinksDrawer(DrawerFrame):
 
     def _update_all_done_button(self):
         total = len(self.links)
-        checked = sum(1 for v in self.checked_links.values() if v)
+        checked = sum(1 for link in self.links if self.checked_links.get(link, False))
         if total > 0 and checked == total:
             self.toggle_all_btn.setText("Mark all as not done")
+            self.status_dot.set_color("#34d399", "rgba(52, 211, 153, 0.35)")
         else:
             self.toggle_all_btn.setText("Mark all as done")
+            self.status_dot.set_color("#fbbf24" if total > 0 else "#94a3b8", "rgba(251, 191, 36, 0.35)" if total > 0 else "rgba(148, 163, 184, 0.25)")
+        self.count_badge.setText(f"{checked} / {total} Done")
 
     def _update_progress(self):
         self._update_all_done_button()
@@ -915,12 +1313,18 @@ class LinksDrawer(DrawerFrame):
         total = len(self.links)
         if total == 0:
             return
-        checked = sum(1 for v in self.checked_links.values() if v)
+        checked = sum(1 for link in self.links if self.checked_links.get(link, False))
         new_state = (checked < total)
 
         for card in self.link_cards:
+            raw_url = card.property("raw_link_url") or card.property("link_url")
+            if raw_url:
+                self.checked_links[raw_url] = new_state
+                self.link_checked_changed.emit(raw_url, new_state)
+            card.setProperty("is_checked", new_state)
+            self._apply_link_style(card, new_state)
             cb = card.property("checkbox")
-            if cb:
+            if cb and cb.isChecked() != new_state:
                 cb.setChecked(new_state)
         self._update_all_done_button()
         self.apply_filter()

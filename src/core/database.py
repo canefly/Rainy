@@ -4,6 +4,9 @@ import sqlite3
 import time
 from typing import List, Optional, Dict, Any
 from .models import DocumentState, ScriptItem, EditorNote, GamificationStats
+from .logger import get_logger
+
+logger = get_logger("Database")
 
 DB_DIR = os.path.expanduser("~/.knot")
 DB_PATH = os.path.join(DB_DIR, "knot.db")
@@ -21,11 +24,18 @@ class Database:
 
     def _get_connection(self) -> sqlite3.Connection:
         os.makedirs(DB_DIR, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     def _init_db(self):
+        # 1. Verify integrity on startup and take daily rolling snapshot
+        self.verify_integrity()
+        self.backup_database()
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
@@ -89,7 +99,155 @@ class Database:
                 """)
 
                 cursor.execute("PRAGMA user_version = 1")
+                version = 1
                 conn.commit()
+
+            if version < 2:
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS link_metadata (
+                    norm_url TEXT PRIMARY KEY,
+                    url TEXT,
+                    title TEXT,
+                    description TEXT,
+                    author TEXT,
+                    provider TEXT,
+                    domain TEXT,
+                    file_type TEXT,
+                    thumbnail_url TEXT,
+                    thumbnail_blob BLOB,
+                    is_restricted INTEGER DEFAULT 0,
+                    updated_at REAL
+                )
+                """)
+                cursor.execute("PRAGMA user_version = 2")
+                version = 2
+                conn.commit()
+
+            if version < 3:
+                cols = {row[1] for row in cursor.execute("PRAGMA table_info(link_metadata)").fetchall()}
+                new_cols = [
+                    ("file_size_bytes", "INTEGER"),
+                    ("file_size_display", "TEXT"),
+                    ("resolution", "TEXT"),
+                    ("duration_seconds", "REAL"),
+                    ("duration_display", "TEXT"),
+                ]
+                for col_name, col_type in new_cols:
+                    if col_name not in cols:
+                        cursor.execute(f"ALTER TABLE link_metadata ADD COLUMN {col_name} {col_type}")
+                cursor.execute("PRAGMA user_version = 3")
+                conn.commit()
+
+            if version < 4:
+                # Clean up legacy cached link_metadata rows that lack media stat probes so they re-probe automatically
+                cursor.execute("""
+                    DELETE FROM link_metadata 
+                    WHERE (file_size_display IS NULL OR file_size_display = '') 
+                      AND (resolution IS NULL OR resolution = '')
+                      AND is_restricted = 0
+                """)
+                cursor.execute("PRAGMA user_version = 4")
+                conn.commit()
+
+            if version < 5:
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS local_media_probe (
+                    file_path TEXT PRIMARY KEY,
+                    file_size INTEGER,
+                    mtime REAL,
+                    duration_seconds REAL,
+                    duration_display TEXT,
+                    width INTEGER,
+                    height INTEGER,
+                    resolution TEXT,
+                    frame_rate REAL,
+                    audio_channels INTEGER,
+                    sample_rate INTEGER,
+                    video_codec TEXT,
+                    audio_codec TEXT,
+                    probed_at REAL
+                )
+                """)
+                cursor.execute("PRAGMA user_version = 5")
+                conn.commit()
+                logger.info("Migrated SQLite schema to version 5 (added local_media_probe)")
+
+            if version < 6:
+                cols = {row[1] for row in cursor.execute("PRAGMA table_info(local_media_probe)").fetchall()}
+                new_cols = [
+                    ("start_time", "REAL DEFAULT 0.0"),
+                    ("start_timecode", "TEXT DEFAULT ''"),
+                    ("is_vfr", "INTEGER DEFAULT 0"),
+                    ("avg_frame_rate", "REAL DEFAULT 0.0"),
+                ]
+                for col_name, col_def in new_cols:
+                    if col_name not in cols:
+                        cursor.execute(f"ALTER TABLE local_media_probe ADD COLUMN {col_name} {col_def}")
+                cursor.execute("PRAGMA user_version = 6")
+                conn.commit()
+                logger.info("Migrated SQLite schema to version 6 (added start_time, start_timecode, is_vfr, avg_frame_rate to local_media_probe)")
+
+    def verify_integrity(self) -> bool:
+        """Verifies database integrity using PRAGMA quick_check; restores from latest backup if corrupt."""
+        try:
+            if not os.path.exists(DB_PATH):
+                return True
+            conn = sqlite3.connect(DB_PATH, timeout=3.0)
+            row = conn.execute("PRAGMA quick_check;").fetchone()
+            conn.close()
+            if row and row[0] == "ok":
+                return True
+        except Exception:
+            pass
+        return self._restore_latest_backup()
+
+    def backup_database(self, max_backups: int = 7) -> Optional[str]:
+        """Creates an atomic zero-risk hot backup of the database using SQLite's native backup API."""
+        if not os.path.exists(DB_PATH):
+            return None
+        try:
+            backups_dir = os.path.join(DB_DIR, "backups")
+            os.makedirs(backups_dir, exist_ok=True)
+            today_str = time.strftime("%Y-%m-%d")
+            backup_file = os.path.join(backups_dir, f"knot-{today_str}.db")
+            latest_bak = os.path.join(DB_DIR, "knot.db.bak")
+            
+            with self._get_connection() as conn:
+                # 1. Daily snapshot
+                b_conn = sqlite3.connect(backup_file)
+                conn.backup(b_conn)
+                b_conn.close()
+
+                # 2. Latest quick-recovery shadow copy
+                bak_conn = sqlite3.connect(latest_bak)
+                conn.backup(bak_conn)
+                bak_conn.close()
+
+            # Prune old backups past max_backups
+            backup_files = sorted([
+                os.path.join(backups_dir, f) for f in os.listdir(backups_dir)
+                if f.startswith("knot-") and f.endswith(".db")
+            ])
+            while len(backup_files) > max_backups:
+                old = backup_files.pop(0)
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+            return backup_file
+        except Exception:
+            return None
+
+    def _restore_latest_backup(self) -> bool:
+        latest_bak = os.path.join(DB_DIR, "knot.db.bak")
+        if os.path.exists(latest_bak):
+            try:
+                import shutil
+                shutil.copy2(latest_bak, DB_PATH)
+                return True
+            except Exception:
+                pass
+        return False
 
     # Settings
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -325,5 +483,147 @@ class Database:
             WHERE id = 1
             """)
             conn.commit()
+
+    # Persistent Link Unfurl Metadata Cache
+    def save_link_metadata(self, norm_url: str, meta: Dict[str, Any]):
+        if not norm_url or norm_url == "#":
+            return
+        with self._get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO link_metadata (
+                norm_url, url, title, description, author, provider,
+                domain, file_type, thumbnail_url, thumbnail_blob,
+                is_restricted, updated_at,
+                file_size_bytes, file_size_display, resolution,
+                duration_seconds, duration_display
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                norm_url,
+                meta.get("url", norm_url),
+                meta.get("title", ""),
+                meta.get("description", ""),
+                meta.get("author", ""),
+                meta.get("provider", ""),
+                meta.get("domain", ""),
+                meta.get("file_type", "LINK"),
+                meta.get("thumbnail_url"),
+                meta.get("thumbnail_bytes"),
+                1 if meta.get("is_restricted") else 0,
+                meta.get("updated_at", time.time()),
+                meta.get("file_size_bytes"),
+                meta.get("file_size_display", ""),
+                meta.get("resolution", ""),
+                meta.get("duration_seconds"),
+                meta.get("duration_display", ""),
+            ))
+            conn.commit()
+
+    def get_link_metadata(self, norm_url: str) -> Optional[Dict[str, Any]]:
+        if not norm_url or norm_url == "#":
+            return None
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM link_metadata WHERE norm_url = ?",
+                (norm_url,)
+            ).fetchone()
+            if not row:
+                return None
+            keys = row.keys()
+            return {
+                "norm_url": row["norm_url"],
+                "url": row["url"],
+                "title": row["title"] or "",
+                "description": row["description"] or "",
+                "author": row["author"] or "",
+                "provider": row["provider"] or "",
+                "domain": row["domain"] or "",
+                "file_type": row["file_type"] or "LINK",
+                "thumbnail_url": row["thumbnail_url"],
+                "thumbnail_bytes": row["thumbnail_blob"],
+                "is_restricted": bool(row["is_restricted"]),
+                "updated_at": float(row["updated_at"] or 0.0),
+                "file_size_bytes": row["file_size_bytes"] if "file_size_bytes" in keys else None,
+                "file_size_display": (row["file_size_display"] or "") if "file_size_display" in keys else "",
+                "resolution": (row["resolution"] or "") if "resolution" in keys else "",
+                "duration_seconds": row["duration_seconds"] if "duration_seconds" in keys else None,
+                "duration_display": (row["duration_display"] or "") if "duration_display" in keys else "",
+            }
+
+    def delete_link_metadata(self, norm_url: Optional[str] = None, restricted_only: bool = False):
+        with self._get_connection() as conn:
+            if norm_url:
+                conn.execute("DELETE FROM link_metadata WHERE norm_url = ?", (norm_url,))
+            elif restricted_only:
+                conn.execute("DELETE FROM link_metadata WHERE is_restricted = 1")
+            else:
+                conn.execute("DELETE FROM link_metadata")
+            conn.commit()
+
+    def get_local_media_probe(self, file_path: str, file_size: int, mtime: float) -> Optional[Dict[str, Any]]:
+        """Returns cached media probe record if file_size and mtime match exactly."""
+        norm_path = os.path.normpath(file_path)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM local_media_probe WHERE file_path = ?",
+                (norm_path,)
+            ).fetchone()
+            if not row:
+                return None
+            if row["file_size"] != file_size or abs(float(row["mtime"]) - mtime) > 0.01:
+                return None
+            return dict(row)
+
+    def store_local_media_probe(
+        self,
+        file_path: str,
+        file_size: int,
+        mtime: float,
+        duration_seconds: float,
+        duration_display: str,
+        width: int,
+        height: int,
+        resolution: str,
+        frame_rate: float,
+        audio_channels: int,
+        sample_rate: int,
+        video_codec: str,
+        audio_codec: str,
+        start_time: float = 0.0,
+        start_timecode: str = "",
+        is_vfr: bool = False,
+        avg_frame_rate: float = 0.0
+    ):
+        """Persists probed media stream properties into SQLite."""
+        norm_path = os.path.normpath(file_path)
+        with self._get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO local_media_probe (
+                file_path, file_size, mtime, duration_seconds, duration_display,
+                width, height, resolution, frame_rate, audio_channels,
+                sample_rate, video_codec, audio_codec, start_time,
+                start_timecode, is_vfr, avg_frame_rate, probed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                norm_path, file_size, mtime, duration_seconds, duration_display,
+                width, height, resolution, frame_rate, audio_channels,
+                sample_rate, video_codec, audio_codec, float(start_time or 0.0),
+                str(start_timecode or ""), 1 if is_vfr else 0, float(avg_frame_rate or 0.0), time.time()
+            ))
+            conn.commit()
+
+    def get_probed_media_count(self) -> int:
+        """Returns total number of cached media probe records."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM local_media_probe").fetchone()
+            return int(row[0]) if row else 0
+
+    def clear_probed_media(self) -> int:
+        """Clears all cached media probe records and returns count deleted."""
+        with self._get_connection() as conn:
+            count = self.get_probed_media_count()
+            conn.execute("DELETE FROM local_media_probe")
+            conn.commit()
+            logger.info("Cleared %d cached local media probe records", count)
+            return count
 
 db = Database()
