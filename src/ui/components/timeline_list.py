@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import ComboBox, SmoothScrollArea
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 from .timeline_card import TimelineCard
+from .link_embed_card import link_embed_controller
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller
 from ...core.models import ScriptItem
-from ...core.parser import parse_time_single, process_time_span
+from ...core.parser import parse_time_single, process_time_span, normalize_link
+from ...core.unfurl_engine import unfurl_engine, LinkMetadata
 from ..theme import ThemeManager
 
 
@@ -42,13 +44,15 @@ class TimelineCanvas(QWidget):
 
         target_card = cards[idx]
         if self.active_card is not None and self.active_card is not target_card:
-            if not getattr(self.active_card, "is_editing", False):
+            try:
                 self.active_card.isHover = False
                 self.active_card.hide()
+            except (RuntimeError, ReferenceError):
+                pass
 
         slot_h = self.timeline.slot_height
         card_h = self.timeline.card_height
-        w = max(100, self.width() - 4)
+        w = max(100, self.width() - 8)
         target_card.setGeometry(0, idx * slot_h, w, card_h)
         target_card.show()
         target_card.raise_()
@@ -58,11 +62,15 @@ class TimelineCanvas(QWidget):
 
     def deactivate_card(self):
         if self.active_card is not None:
-            if not getattr(self.active_card, "is_editing", False):
+            try:
                 self.active_card.isHover = False
                 self.active_card.hide()
+            except (RuntimeError, ReferenceError):
+                pass
+            finally:
                 self.active_card = None
                 self.active_idx = -1
+                link_embed_controller.schedule_hide()
                 self.update()
 
     def mouseMoveEvent(self, event):
@@ -91,11 +99,13 @@ class TimelineCanvas(QWidget):
         super().mousePressEvent(event)
 
     def paintEvent(self, event):
+        if self.width() <= 0 or self.height() <= 0:
+            return
         painter = QPainter(self)
         rect = event.rect()
         slot_h = self.timeline.slot_height
         card_h = self.timeline.card_height
-        w = max(100, self.width() - 4)
+        w = max(100, self.width() - 8)
         dpr = self.devicePixelRatioF() or 1.0
 
         f_idx = max(0, rect.top() // slot_h)
@@ -103,8 +113,13 @@ class TimelineCanvas(QWidget):
         is_held = getattr(self.timeline, "is_resizing_held", False)
 
         for i in range(f_idx, l_idx + 1):
-            if i == self.active_idx and self.active_card is not None and self.active_card.isVisible():
-                continue
+            if i == self.active_idx:
+                try:
+                    if self.active_card is not None and self.active_card.isVisible():
+                        continue
+                except (RuntimeError, ReferenceError):
+                    self.active_card = None
+                    self.active_idx = -1
             card = self.timeline.filtered_cards[i]
             pix = card.get_cached_surface(w, card_h, dpr, hold_cache=is_held)
             if pix is not None and not pix.isNull():
@@ -122,7 +137,7 @@ class TimelineList(QFrame):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setObjectName("TimelineListPane")
-        self.setMinimumWidth(286)
+        self.setMinimumWidth(285)
         self._is_compact = False
         self._pending_compact = False
         self._compact_timer = QTimer(self)
@@ -133,12 +148,12 @@ class TimelineList(QFrame):
         self.filtered_cards: List[TimelineCard] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(12, 10, 2, 10)
         layout.setSpacing(8)
 
         # Header toolbar: Title + Status Dropdown Filter (All | Done | Pending)
         header = QHBoxLayout()
-        header.setContentsMargins(4, 0, 4, 0)
+        header.setContentsMargins(4, 0, 10, 0)
         title = QLabel("TIMESTAMPS")
         title.setObjectName("PaneTitle")
         header.addWidget(title)
@@ -201,16 +216,31 @@ class TimelineList(QFrame):
         if sb:
             sb.valueChanged.connect(self._on_scroll_changed)
 
+        unfurl_engine.metadata_ready.connect(self._on_link_metadata_ready)
+
+    def _on_link_metadata_ready(self, url: str, meta: LinkMetadata):
+        norm = normalize_link(url)
+        updated = False
+        for card in list(self.card_list):
+            try:
+                if card.first_link and normalize_link(card.first_link) == norm:
+                    card.update_link_metadata(meta)
+                    updated = True
+            except (RuntimeError, ReferenceError):
+                continue
+        if updated and hasattr(self, "container"):
+            self.container.update()
+
     @property
     def slot_height(self) -> int:
-        return 55 if self._is_compact else 49
+        return 48
 
     @property
     def card_height(self) -> int:
-        return 50 if self._is_compact else 44
+        return 44
 
     def _on_scroll_changed(self, val: int):
-        if self.container.active_card is not None and not getattr(self.container.active_card, "is_editing", False):
+        if self.container.active_card is not None:
             self.container.deactivate_card()
         self.container.update()
         self._scroll_idle_timer.start(50)
@@ -234,9 +264,8 @@ class TimelineList(QFrame):
                     scrubbed = True
         cursor_pos = self.container.mapFromGlobal(QCursor.pos())
         if not self.container.rect().contains(cursor_pos) and self.container.active_card is not None:
-            if not getattr(self.container.active_card, "is_editing", False):
-                self.container.deactivate_card()
-                scrubbed = True
+            self.container.deactivate_card()
+            scrubbed = True
         if scrubbed:
             self.container.update()
 
@@ -312,6 +341,8 @@ class TimelineList(QFrame):
         self.container.update()
 
     def paintEvent(self, event):
+        if self.width() <= 0 or self.height() <= 0:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         pal = ThemeManager.get_palette()
@@ -319,18 +350,19 @@ class TimelineList(QFrame):
         painter.setBrush(QColor(pal["surface"]))
         painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 8, 8)
 
-    def load_items(self, items: List[ScriptItem], doc_signature: str = "", link_colors: Dict[str, str] = None):
+    def load_items(self, items: List[ScriptItem], doc_signature: str = "", link_colors: Dict[str, str] = None, linked_footage: Dict[str, str] = None):
         if self.width() > 0:
             self._is_compact = self.width() < 400
+        self.linked_footage = linked_footage or getattr(self, "linked_footage", {})
+        self.container.deactivate_card()
         for card in self.card_widgets.values():
             card.deleteLater()
         self.card_widgets.clear()
         self.card_list.clear()
         self.filtered_cards.clear()
-        self.container.deactivate_card()
 
         for item in items:
-            card = TimelineCard(item, doc_signature, link_colors=link_colors, parent=self.container)
+            card = TimelineCard(item, doc_signature, link_colors=link_colors, linked_footage=self.linked_footage, parent=self.container)
             if self._is_compact:
                 card.set_compact_mode(True)
             card.item_checked_changed.connect(self._on_card_checked_changed)
@@ -343,6 +375,17 @@ class TimelineList(QFrame):
             self.card_list.append(card)
 
         self.apply_filter()
+
+    def set_linked_footage(self, linked_footage: Dict[str, str]):
+        self.linked_footage = linked_footage or {}
+        for card in self.card_list:
+            card.set_linked_footage(self.linked_footage)
+
+    def refresh_timecodes(self):
+        """Refreshes all card timecode labels between raw PTS and conformed SMPTE."""
+        for card in self.card_list:
+            card.update_displayed_timecodes()
+        self.container.update()
 
     def _on_filter_changed(self, text: str = ""):
         self.apply_filter()

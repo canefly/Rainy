@@ -87,7 +87,6 @@ class SidebarDock(QFrame):
     outline_clicked = Signal()
     notes_clicked = Signal()
     links_clicked = Signal()
-    focus_mode_clicked = Signal()
     vault_clicked = Signal()
     settings_clicked = Signal()
 
@@ -107,8 +106,8 @@ class SidebarDock(QFrame):
         self.home_btn.clicked.connect(self.home_clicked.emit)
         layout.addWidget(self.home_btn)
 
-        # Document Outline / Tabs
-        self.outline_btn = BadgedIconButton(FluentIcon.TILES, "Document Tabs / Outline", parent=self)
+        # Document Tabs
+        self.outline_btn = BadgedIconButton(FluentIcon.DICTIONARY, "Document Tabs", parent=self)
         self.outline_btn.clicked.connect(self.outline_clicked.emit)
         layout.addWidget(self.outline_btn)
 
@@ -133,11 +132,6 @@ class SidebarDock(QFrame):
         layout.addStretch(1)
 
         # 2. Bottom Section
-        # Focus Mode Toggle (Split / Single)
-        self.focus_btn = BadgedIconButton(FluentIcon.APPLICATION, "Split View / Focus Mode", parent=self)
-        self.focus_btn.clicked.connect(self.focus_mode_clicked.emit)
-        layout.addWidget(self.focus_btn)
-
         # Settings
         self.settings_btn = BadgedIconButton(FluentIcon.SETTING, "Settings", parent=self)
         self.settings_btn.clicked.connect(self.settings_clicked.emit)
@@ -150,5 +144,5 @@ class SidebarDock(QFrame):
         self.links_btn.set_badge_count(count)
 
     def apply_theme(self):
-        for btn in (self.home_btn, self.outline_btn, self.notes_btn, self.links_btn, self.focus_btn, self.settings_btn):
+        for btn in (self.home_btn, self.outline_btn, self.notes_btn, self.links_btn, self.settings_btn):
             btn.apply_theme()

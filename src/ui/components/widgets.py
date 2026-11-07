@@ -1,10 +1,35 @@
 import os
 import webbrowser
 from typing import Optional, Dict
-from PySide6.QtCore import Qt, Signal, QTimer, QRectF, QObject, QElapsedTimer, QEvent, QPointF, QPoint, QVariantAnimation, QEasingCurve
-from PySide6.QtGui import QPainter, QColor, QCursor, QFont, QPen, QBrush, QLinearGradient, QRadialGradient, QPixmap, QPolygonF
+from PySide6.QtCore import Qt, Signal, QTimer, QRectF, QObject, QElapsedTimer, QEvent, QPointF, QPoint, QVariantAnimation, QEasingCurve, QSize
+from PySide6.QtGui import QPainter, QColor, QCursor, QFont, QPen, QBrush, QLinearGradient, QRadialGradient, QPixmap, QPolygonF, QImage
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QAbstractScrollArea, QApplication, QSplitter, QSplitterHandle
-from qfluentwidgets import FluentIcon, IconWidget
+from qfluentwidgets import FluentIcon, IconWidget, CheckBox, setCustomStyleSheet
+
+class CompactCheckBox(CheckBox):
+    """Icon-only Fluent CheckBox with zero empty text padding and exact bounds.
+    
+    Prevents QFluentWidgets StyleSheetManager theme updates from resetting
+    the widget to 57px width (which caused huge checklist gaps).
+    """
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+        self.setFixedSize(22, 22)
+        self.setObjectName("CompactCheckBox")
+        qss = (
+            "CheckBox#CompactCheckBox, CheckBox { "
+            "min-width: 22px; max-width: 22px; "
+            "min-height: 22px; max-height: 22px; "
+            "width: 22px; height: 22px; "
+            "margin: 0px; spacing: 0px; padding: 0px; }"
+        )
+        setCustomStyleSheet(self, qss, qss)
+
+    def sizeHint(self) -> QSize:
+        return QSize(22, 22)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(22, 22)
 
 class StatusDot(QWidget):
     """Paints a clean vector online status dot with an animated breathing halo (no emojis)."""
@@ -20,6 +45,15 @@ class StatusDot(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._animate_pulse)
         self.timer.start(80)
+
+    def set_color(self, color, halo_color=None):
+        self._dot_color = QColor(color)
+        if halo_color:
+            self._halo_color = QColor(halo_color)
+        else:
+            c = QColor(color)
+            self._halo_color = QColor(c.red(), c.green(), c.blue(), 90)
+        self.update()
 
     def _animate_pulse(self):
         if self._expanding:
@@ -700,6 +734,8 @@ class GpuGlowSplitterHandle(QSplitterHandle):
     """
     drag_started = Signal()
     drag_finished = Signal()
+    handle_clicked = Signal()
+    handle_double_clicked = Signal()
 
     def __init__(self, orientation: Qt.Orientation, parent: QSplitter):
         super().__init__(orientation, parent)
@@ -711,6 +747,7 @@ class GpuGlowSplitterHandle(QSplitterHandle):
         self._dragging = False
         self._hover_t = 0.0  # 0.0 (idle) -> 1.0 (hovered)
         self._drag_t = 0.0   # 0.0 (not dragging) -> 1.0 (actively dragging)
+        self._press_pos = None
 
         self._clock = QElapsedTimer()
         self._clock.start()
@@ -730,6 +767,7 @@ class GpuGlowSplitterHandle(QSplitterHandle):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._press_pos = event.globalPosition().toPoint()
             self._dragging = True
             self._start_anim()
             self.drag_started.emit()
@@ -740,7 +778,18 @@ class GpuGlowSplitterHandle(QSplitterHandle):
             self._dragging = False
             self._start_anim()
             self.drag_finished.emit()
+            if self._press_pos is not None:
+                dist = (event.globalPosition().toPoint() - self._press_pos).manhattanLength()
+                if dist < 4:
+                    self.handle_clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.handle_double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _start_anim(self):
         self._clock.restart()
@@ -784,11 +833,13 @@ class GpuGlowSplitterHandle(QSplitterHandle):
 
         cx = w / 2.0
         cy = h / 2.0
-        glow = max(self._hover_t, self._drag_t)
+        # Hover is dimmed by 50% for a subtle, elegant feel; clicking/dragging powers up to 100% full brightness
+        line_glow = (0.50 * self._hover_t) + (0.50 * self._drag_t)
+        pill_glow = max(self._hover_t, self._drag_t)
 
         # 1. Subtle idle guide line (fades out at top and bottom edges)
         idle_grad = QLinearGradient(cx, 0, cx, h)
-        base_alpha = 26 if is_dark else 32
+        base_alpha = 24 if is_dark else 32
         idle_col = QColor(255, 255, 255, base_alpha) if is_dark else QColor(0, 0, 0, base_alpha)
         clear_col = QColor(idle_col.red(), idle_col.green(), idle_col.blue(), 0)
         idle_grad.setColorAt(0.0, clear_col)
@@ -798,56 +849,93 @@ class GpuGlowSplitterHandle(QSplitterHandle):
         painter.setBrush(QBrush(idle_grad))
         painter.drawRect(QRectF(cx - 0.5, 4.0, 1.0, max(0.0, h - 8.0)))
 
-        # 2. GPU-composited hover/drag multi-stage glow line & radial bloom
-        if glow > 0.005:
-            # Stage A: Wide soft vertical bloom across the handle gutter
-            bloom_w = min(float(w), 6.0 + 4.0 * glow + 2.0 * self._drag_t)
-            bloom_grad = QLinearGradient(cx, 0, cx, h)
-            bloom_alpha = int(round((52 + 38 * self._drag_t) * glow))
-            bloom_col = QColor(ar, ag, ab, bloom_alpha)
-            bloom_clear = QColor(ar, ag, ab, 0)
-            bloom_grad.setColorAt(0.0, bloom_clear)
-            bloom_grad.setColorAt(0.10, bloom_col)
-            bloom_grad.setColorAt(0.50, QColor(ar, ag, ab, min(255, int(round(bloom_alpha * 1.35)))))
-            bloom_grad.setColorAt(0.90, bloom_col)
-            bloom_grad.setColorAt(1.0, bloom_clear)
-            painter.setBrush(QBrush(bloom_grad))
-            painter.drawRoundedRect(QRectF(cx - bloom_w / 2.0, 2.0, bloom_w, max(0.0, h - 4.0)), bloom_w / 2.0, bloom_w / 2.0)
+        base_accent = QColor(ar, ag, ab)
+        core_c = base_accent.lighter(130) if is_dark else base_accent.darker(110)
+        pill_c = base_accent.lighter(120) if is_dark else base_accent
 
-            # Stage B: Center radial hotspot around the grip pill
-            hotspot_r = 48.0 + 24.0 * glow + 16.0 * self._drag_t
-            radial = QRadialGradient(QPointF(cx, cy), hotspot_r)
-            radial.setColorAt(0.0, QColor(ar, ag, ab, int(round((115 + 45 * self._drag_t) * glow))))
-            radial.setColorAt(0.5, QColor(ar, ag, ab, int(round(45 * glow))))
-            radial.setColorAt(1.0, QColor(ar, ag, ab, 0))
-            painter.setBrush(QBrush(radial))
-            painter.drawRect(QRectF(0.0, max(0.0, cy - hotspot_r), float(w), min(float(h), hotspot_r * 2.0)))
+        # 2. Photometric Gaussian Radiance & Luminance-Based Optical Bloom (Theme-True with Feathered Ends)
+        if line_glow > 0.005:
+            # Reusable stack buffer for 2D composite glow with feathered ends
+            buf = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            buf.fill(Qt.transparent)
 
-            # Stage C: Crisp luminous 2px core laser line
-            core_w = 1.6 + 0.6 * self._drag_t
-            core_grad = QLinearGradient(cx, 0, cx, h)
-            core_alpha = int(round((215 + 40 * self._drag_t) * glow))
-            core_col = QColor(ar, ag, ab, min(255, core_alpha))
-            core_grad.setColorAt(0.0, bloom_clear)
-            core_grad.setColorAt(0.08, core_col)
-            core_grad.setColorAt(0.50, QColor(min(255, ar + 35), min(255, ag + 35), min(255, ab + 35), min(255, core_alpha)))
-            core_grad.setColorAt(0.92, core_col)
-            core_grad.setColorAt(1.0, bloom_clear)
-            painter.setBrush(QBrush(core_grad))
-            painter.drawRoundedRect(QRectF(cx - core_w / 2.0, 4.0, core_w, max(0.0, h - 8.0)), core_w / 2.0, core_w / 2.0)
+            bp = QPainter(buf)
+            bp.setRenderHint(QPainter.Antialiasing)
+            bp.setPen(Qt.NoPen)
+            bcx = w / 2.0
+            bcy = h / 2.0
 
-        # 3. Always-visible tactile center grip capsule (expands and brightens on hover/drag)
-        pill_h = 34.0 + (22.0 * glow) + (18.0 * self._drag_t)
-        pill_w = 3.0 + (1.2 * glow) + (0.6 * self._drag_t)
-        idle_pill_alpha = 95 if is_dark else 110
-        pill_alpha = int(round(idle_pill_alpha + (255 - idle_pill_alpha) * glow))
-        pill_col = QColor(
-            int(round(ar + (255 - ar) * (0.28 * glow + 0.22 * self._drag_t))),
-            int(round(ag + (255 - ag) * (0.28 * glow + 0.22 * self._drag_t))),
-            int(round(ab + (255 - ab) * (0.28 * glow + 0.22 * self._drag_t))),
-            min(255, pill_alpha)
-        )
-        painter.setBrush(QBrush(pill_col))
+            # Layer 1: Wide ambient aura (smooth Gaussian decay reaching 0 at handle boundaries x = +-5.5)
+            a1 = int(round((38 + 22 * self._drag_t) * line_glow))
+            g1 = QLinearGradient(bcx - 5.5, 0, bcx + 5.5, 0)
+            g1.setColorAt(0.0, QColor(ar, ag, ab, 0))
+            g1.setColorAt(0.28, QColor(ar, ag, ab, int(a1 * 0.35)))
+            g1.setColorAt(0.50, QColor(ar, ag, ab, a1))
+            g1.setColorAt(0.72, QColor(ar, ag, ab, int(a1 * 0.35)))
+            g1.setColorAt(1.0, QColor(ar, ag, ab, 0))
+            bp.setBrush(QBrush(g1))
+            bp.drawRect(QRectF(bcx - 5.5, 0, 11.0, h))
+
+            # Layer 2: Core bloom beam (decaying to zero at x = +-3.2)
+            a2 = int(round((115 + 40 * self._drag_t) * line_glow))
+            g2 = QLinearGradient(bcx - 3.2, 0, bcx + 3.2, 0)
+            g2.setColorAt(0.0, QColor(ar, ag, ab, 0))
+            g2.setColorAt(0.28, QColor(ar, ag, ab, int(a2 * 0.42)))
+            g2.setColorAt(0.50, QColor(ar, ag, ab, a2))
+            g2.setColorAt(0.72, QColor(ar, ag, ab, int(a2 * 0.42)))
+            g2.setColorAt(1.0, QColor(ar, ag, ab, 0))
+            bp.setBrush(QBrush(g2))
+            bp.drawRect(QRectF(bcx - 3.2, 0, 6.4, h))
+
+            # Layer 3: High-density luminance core (decaying to zero at x = +-1.6)
+            a3 = int(round((195 + 45 * self._drag_t) * line_glow))
+            g3 = QLinearGradient(bcx - 1.6, 0, bcx + 1.6, 0)
+            g3.setColorAt(0.0, QColor(ar, ag, ab, 0))
+            g3.setColorAt(0.35, QColor(ar, ag, ab, int(a3 * 0.55)))
+            c3 = QColor(core_c.red(), core_c.green(), core_c.blue(), a3)
+            g3.setColorAt(0.50, c3)
+            g3.setColorAt(0.65, QColor(ar, ag, ab, int(a3 * 0.55)))
+            g3.setColorAt(1.0, QColor(ar, ag, ab, 0))
+            bp.setBrush(QBrush(g3))
+            bp.drawRect(QRectF(bcx - 1.6, 0, 3.2, h))
+
+            # Layer 4: Vertical filament core (1px)
+            f_a = int(round((225 + 30 * self._drag_t) * line_glow))
+            bp.setBrush(QColor(core_c.red(), core_c.green(), core_c.blue(), f_a))
+            bp.drawRect(QRectF(bcx - 0.5, 0, 1.0, h))
+
+            # Layer 5: Photometric radial lens flare hotspot centered over tactile grip
+            bp.save()
+            bp.translate(bcx, bcy)
+            bp.scale(1.0, 3.5)
+            spot = QRadialGradient(QPointF(0, 0), 5.5)
+            spot_a = int(round((165 + 50 * self._drag_t) * line_glow))
+            spot.setColorAt(0.0, QColor(core_c.red(), core_c.green(), core_c.blue(), spot_a))
+            spot.setColorAt(0.40, QColor(ar, ag, ab, int(spot_a * 0.5)))
+            spot.setColorAt(1.0, QColor(ar, ag, ab, 0))
+            bp.setBrush(QBrush(spot))
+            bp.drawEllipse(QPointF(0, 0), 5.5, 5.5)
+            bp.restore()
+
+            # Smooth vertical feathering at top and bottom ends (eliminates hard cut-offs)
+            feather_len = min(48.0, max(24.0, h * 0.10))
+            bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            feather_grad = QLinearGradient(0, 0, 0, h)
+            feather_grad.setColorAt(0.0, QColor(0, 0, 0, 0))
+            feather_grad.setColorAt(feather_len / h, QColor(0, 0, 0, 255))
+            feather_grad.setColorAt((h - feather_len) / h, QColor(0, 0, 0, 255))
+            feather_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+            bp.fillRect(0, 0, w, h, feather_grad)
+            bp.end()
+
+            painter.drawImage(0, 0, buf)
+
+        # 3. Tactile center grip capsule (expands and brightens on hover/drag in rich theme color)
+        pill_h = 32.0 + (14.0 * pill_glow) + (10.0 * self._drag_t)
+        pill_w = 2.4 + (0.6 * pill_glow)
+        pill_alpha = int(round(90 + (110 * self._hover_t) + (55 * self._drag_t)))
+        pill_draw_col = QColor(pill_c.red(), pill_c.green(), pill_c.blue(), min(255, pill_alpha))
+        painter.setBrush(QBrush(pill_draw_col))
         painter.drawRoundedRect(
             QRectF(cx - pill_w / 2.0, cy - pill_h / 2.0, pill_w, pill_h),
             pill_w / 2.0,
@@ -859,6 +947,8 @@ class GpuGlowSplitter(QSplitter):
     """Custom QSplitter with GPU-accelerated glowing hover/drag divider handle."""
     drag_started = Signal()
     drag_finished = Signal()
+    handle_clicked = Signal()
+    handle_double_clicked = Signal()
 
     def __init__(self, orientation: Qt.Orientation = Qt.Horizontal, parent: QWidget = None):
         super().__init__(orientation, parent)
@@ -868,6 +958,8 @@ class GpuGlowSplitter(QSplitter):
         handle = GpuGlowSplitterHandle(self.orientation(), self)
         handle.drag_started.connect(self.drag_started.emit)
         handle.drag_finished.connect(self.drag_finished.emit)
+        handle.handle_clicked.connect(self.handle_clicked.emit)
+        handle.handle_double_clicked.connect(self.handle_double_clicked.emit)
         return handle
 
 

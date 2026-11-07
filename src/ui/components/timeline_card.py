@@ -1,9 +1,10 @@
+import os
 import webbrowser
-from typing import Dict, Optional
-from PySide6.QtCore import Qt, Signal, QTimer, QElapsedTimer
+from typing import Dict, Optional, Tuple
+from PySide6.QtCore import Qt, Signal, QTimer, QElapsedTimer, QEvent, QRect
 from PySide6.QtGui import QCursor, QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QGridLayout, QStackedLayout, QLabel, QLineEdit, QWidget, QApplication
+    QFrame, QHBoxLayout, QGridLayout, QStackedLayout, QLabel, QWidget, QApplication
 )
 from qfluentwidgets import (
     CheckBox, FluentIcon, IconWidget, ToolButton, CardWidget, isDarkTheme
@@ -11,8 +12,10 @@ from qfluentwidgets import (
 
 from ...core.models import ScriptItem
 from ...core.database import db
+from ...core.unfurl_engine import unfurl_engine, LinkMetadata
 from ..theme import ThemeManager
-from .widgets import get_display_frame_interval_ms, safe_copy_to_clipboard
+from .widgets import get_display_frame_interval_ms, safe_copy_to_clipboard, CompactCheckBox
+from .link_embed_card import link_embed_controller
 
 # Subtle pastel palette for meta tags matching original React linkColors
 META_PALETTE = [
@@ -32,21 +35,19 @@ def get_meta_palette(meta_text: str):
 
 
 class InlineTimecodeLabel(QLabel):
-    """Click to copy timecode with instant feedback, double-click to edit inline."""
+    """Click to copy timecode with instant visual feedback."""
     copied = Signal(str)
-    edited = Signal(str)
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignCenter)
         self.setCursor(QCursor(Qt.PointingHandCursor))
-        self.setToolTip("Click to copy • Double-click to edit")
+        self.setToolTip("Click to copy timecode")
         self._restore_style()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             text_to_copy = self.text().strip()
-            safe_copy_to_clipboard(text_to_copy)
             self.copied.emit(text_to_copy)
             # Subtle flash feedback
             self.setStyleSheet("""
@@ -61,15 +62,10 @@ class InlineTimecodeLabel(QLabel):
                     border: none;
                 }
             """)
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(250, self._restore_style)
             event.accept()
             return
         super().mousePressEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._start_inline_edit()
 
     def _restore_style(self):
         pal = ThemeManager.get_palette()
@@ -94,64 +90,6 @@ class InlineTimecodeLabel(QLabel):
             }}
         """)
 
-    def _get_parent_card(self):
-        curr = self.parent()
-        while curr:
-            if hasattr(curr, "is_editing"):
-                return curr
-            curr = curr.parent()
-        return None
-
-    def _start_inline_edit(self):
-        parent_layout = self.parent().layout()
-        idx = parent_layout.indexOf(self)
-
-        parent_card = self._get_parent_card()
-        if parent_card:
-            parent_card.is_editing = True
-
-        self.editor = QLineEdit(self.text(), self.parent())
-        self.editor.setStyleSheet("""
-            background-color: #0b0f1a;
-            color: #38bdf8;
-            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
-            font-size: 12px;
-            font-weight: 600;
-            border: 1px solid #38bdf8;
-            border-radius: 4px;
-            padding: 0px 4px;
-        """)
-        self.editor.setFixedWidth(85)
-        self.editor.returnPressed.connect(self._finish_edit)
-        self.editor.editingFinished.connect(self._finish_edit)
-
-        self.hide()
-        if hasattr(parent_layout, "insertWidget"):
-            parent_layout.insertWidget(idx, self.editor)
-        elif hasattr(parent_layout, "getItemPosition"):
-            row, col, rspan, cspan = parent_layout.getItemPosition(idx)
-            parent_layout.addWidget(self.editor, row, col, rspan, cspan)
-        else:
-            parent_layout.addWidget(self.editor)
-        self.editor.setFocus()
-        self.editor.selectAll()
-
-    def _finish_edit(self):
-        parent_card = self._get_parent_card()
-        if hasattr(self, 'editor') and self.editor:
-            new_val = self.editor.text().strip()
-            if new_val:
-                self.setText(new_val)
-                self.edited.emit(new_val)
-            self.editor.deleteLater()
-            self.editor = None
-            self.show()
-        if parent_card:
-            parent_card.is_editing = False
-            parent_card.invalidate_cache()
-            if parent_card.parent():
-                parent_card.parent().update()
-
 
 class TimelineCueCard(QFrame):
     """Native Fluent card with automatic hover styling and 1px subtle stroke."""
@@ -160,11 +98,12 @@ class TimelineCueCard(QFrame):
     sync_script_requested = Signal(int, str)
     copy_feedback_requested = Signal(str)
 
-    def __init__(self, item: ScriptItem, doc_signature: str = "", link_colors: Dict[str, str] = None, parent=None):
+    def __init__(self, item: ScriptItem, doc_signature: str = "", link_colors: Dict[str, str] = None, linked_footage: Dict[str, str] = None, parent=None):
         super().__init__(parent)
         self.item = item
         self.doc_signature = doc_signature
         self.link_colors = link_colors or {}
+        self.linked_footage = linked_footage or {}
         self.is_highlighted = False
         self._highlight_alpha = 0.0
         self._hl_duration_ms = 1100.0
@@ -173,7 +112,6 @@ class TimelineCueCard(QFrame):
         self._surface_cache: Optional[QPixmap] = None
         self._surface_cache_key = None
         self.is_compact = False
-        self.is_editing = False
         self._cached_surface: Optional[QPixmap] = None
         self._cached_surface_key = None
         self.isHover = False
@@ -185,13 +123,11 @@ class TimelineCueCard(QFrame):
         self._update_card_style()
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(5)
 
         # 1. Custom Checkbox + Index Number (e.g. [x] 1.)
-        self.cb = CheckBox("", self)
-        self.cb.setStyleSheet("CheckBox { min-width: 18px; max-width: 18px; margin: 0px; spacing: 0px; padding: 0px; }")
-        self.cb.setFixedSize(18, 18)
+        self.cb = CompactCheckBox(self)
         self.cb.setChecked(item.is_checked)
         self.cb.stateChanged.connect(self._on_check_changed)
         layout.addWidget(self.cb)
@@ -234,16 +170,21 @@ class TimelineCueCard(QFrame):
         self.meta_pill.mousePressEvent = self._on_meta_clicked
         layout.addWidget(self.meta_pill)
 
-        # 3. Source Domain (e.g. DRIVE.GOOGLE.COM or WWW.YOUTUBE.COM)
+        # 3. Source Domain / Inline Unfurled Title Chip (e.g. DRIVE.GOOGLE.COM or Final_Cut_v3.mp4)
         first_link = item.links[0] if item.links else ""
-        if first_link and first_link != "#":
-            domain = first_link.split('/')[2].upper() if '/' in first_link else "LINK"
+        self.first_link = first_link if (first_link and first_link != "#") else ""
+        self._link_meta: Optional[LinkMetadata] = None
+        if self.first_link:
+            domain = self.first_link.split('/')[2].upper() if '/' in self.first_link else "LINK"
             self.domain_lbl = QLabel(domain, self)
             self.domain_lbl.setStyleSheet("color: #475569; font-size: 9px; font-weight: 700; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; letter-spacing: 0.5px;")
             self.domain_lbl.setCursor(QCursor(Qt.PointingHandCursor))
-            self.domain_lbl.setToolTip(first_link)
-            self.domain_lbl.mousePressEvent = lambda e: webbrowser.open(first_link)
+            self.domain_lbl.mousePressEvent = lambda e: webbrowser.open(self.first_link)
+            self.domain_lbl.installEventFilter(self)
             layout.addWidget(self.domain_lbl)
+            cached_init = unfurl_engine.get_cached(self.first_link)
+            if cached_init and not cached_init.loading and not cached_init.is_fallback and cached_init.title:
+                self.update_link_metadata(cached_init)
         layout.addStretch(1)
 
         # 4. Clean Single Timestamps Pill: [00:20:48:00 | DUR 2s | 00:20:50:00]
@@ -276,8 +217,7 @@ class TimelineCueCard(QFrame):
             self.start_btn = InlineTimecodeLabel(item.start_timecode, self.wide_widget)
             self.start_btn.setFixedWidth(86)
             self.start_btn.setAlignment(Qt.AlignCenter)
-            self.start_btn.copied.connect(self._on_timecode_copied)
-            self.start_btn.edited.connect(self._on_start_tc_edited)
+            self.start_btn.copied.connect(self._on_start_timecode_copied)
             wide_layout.addWidget(self.start_btn)
 
             dur_col = "#ef4444" if item.duration_seconds == 0 else "#38bdf8"
@@ -299,43 +239,40 @@ class TimelineCueCard(QFrame):
             self.end_btn = InlineTimecodeLabel(item.end_timecode, self.wide_widget)
             self.end_btn.setFixedWidth(86)
             self.end_btn.setAlignment(Qt.AlignCenter)
-            self.end_btn.copied.connect(self._on_timecode_copied)
-            self.end_btn.edited.connect(self._on_end_tc_edited)
+            self.end_btn.copied.connect(self._on_end_timecode_copied)
             wide_layout.addWidget(self.end_btn)
             self.tc_stack.addWidget(self.wide_widget)
 
             # Page 1: Compact 2-row layout
             self.compact_widget = QWidget(self.tc_container)
             compact_layout = QGridLayout(self.compact_widget)
-            compact_layout.setContentsMargins(8, 3, 8, 3)
-            compact_layout.setHorizontalSpacing(4)
-            compact_layout.setVerticalSpacing(1)
+            compact_layout.setContentsMargins(4, 1, 4, 1)
+            compact_layout.setHorizontalSpacing(3)
+            compact_layout.setVerticalSpacing(0)
 
             lbl_col = "#94a3b8" if pal["is_dark"] else "#64748b"
             self.in_lbl = QLabel("In", self.compact_widget)
-            self.in_lbl.setFixedWidth(24)
+            self.in_lbl.setFixedWidth(20)
             self.in_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.in_lbl.setStyleSheet(f"background: transparent; border: none; color: {lbl_col}; font-size: 11px; font-weight: 600; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;")
             compact_layout.addWidget(self.in_lbl, 0, 0)
 
             self.start_btn_c = InlineTimecodeLabel(item.start_timecode, self.compact_widget)
-            self.start_btn_c.setFixedWidth(84)
+            self.start_btn_c.setFixedWidth(82)
             self.start_btn_c.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            self.start_btn_c.copied.connect(self._on_timecode_copied)
-            self.start_btn_c.edited.connect(self._on_start_tc_edited)
+            self.start_btn_c.copied.connect(self._on_start_timecode_copied)
             compact_layout.addWidget(self.start_btn_c, 0, 1)
 
             self.out_lbl = QLabel("Out", self.compact_widget)
-            self.out_lbl.setFixedWidth(24)
+            self.out_lbl.setFixedWidth(20)
             self.out_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.out_lbl.setStyleSheet(f"background: transparent; border: none; color: {lbl_col}; font-size: 11px; font-weight: 600; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;")
             compact_layout.addWidget(self.out_lbl, 1, 0)
 
             self.end_btn_c = InlineTimecodeLabel(item.end_timecode, self.compact_widget)
-            self.end_btn_c.setFixedWidth(84)
+            self.end_btn_c.setFixedWidth(82)
             self.end_btn_c.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            self.end_btn_c.copied.connect(self._on_timecode_copied)
-            self.end_btn_c.edited.connect(self._on_end_tc_edited)
+            self.end_btn_c.copied.connect(self._on_end_timecode_copied)
             compact_layout.addWidget(self.end_btn_c, 1, 1)
 
             self.tc_stack.addWidget(self.compact_widget)
@@ -352,8 +289,7 @@ class TimelineCueCard(QFrame):
             self.start_btn = InlineTimecodeLabel(item.start_timecode, self.wide_widget)
             self.start_btn.setFixedWidth(86)
             self.start_btn.setAlignment(Qt.AlignCenter)
-            self.start_btn.copied.connect(self._on_timecode_copied)
-            self.start_btn.edited.connect(self._on_start_tc_edited)
+            self.start_btn.copied.connect(self._on_start_timecode_copied)
             wide_layout.addWidget(self.start_btn)
 
             still_icon = IconWidget(FluentIcon.INFO, self.wide_widget)
@@ -365,30 +301,166 @@ class TimelineCueCard(QFrame):
             self.tc_container.setFixedSize(115, 32)
             self.tc_stack.setCurrentIndex(0)
 
-        layout.addWidget(self.tc_container)
+        layout.addWidget(self.tc_container, 0, Qt.AlignVCenter)
 
         # 5. External Link Launch Button
-        if first_link and first_link != "#":
+        if self.first_link:
             self.ext_btn = ToolButton(FluentIcon.SHARE, self)
             self.ext_btn.setFixedSize(24, 24)
-            self.ext_btn.setToolTip("Open in browser")
-            self.ext_btn.clicked.connect(lambda: webbrowser.open(first_link))
-            layout.addWidget(self.ext_btn)
+            self.ext_btn.clicked.connect(lambda: webbrowser.open(self.first_link))
+            self.ext_btn.installEventFilter(self)
+            layout.addWidget(self.ext_btn, 0, Qt.AlignVCenter)
+            # Hydrate immediately if link metadata is already in RAM or SQLite cache
+            cached_meta = unfurl_engine.get_cached(self.first_link)
+            if cached_meta is not None:
+                self.update_link_metadata(cached_meta)
         else:
             spacer = QWidget(self)
             spacer.setFixedWidth(24)
-            layout.addWidget(spacer)
+            layout.addWidget(spacer, 0, Qt.AlignVCenter)
+
+        self.update_displayed_timecodes()
+
+    def get_linked_footage_path(self) -> str:
+        from ...core.parser import normalize_link
+        for lk in getattr(self.item, "links", []):
+            norm = normalize_link(lk)
+            p = self.linked_footage.get(norm) or self.linked_footage.get(lk)
+            if p and os.path.isfile(p):
+                return p
+        return ""
+
+    def has_linked_footage(self) -> bool:
+        return bool(self.get_linked_footage_path())
+
+    def is_auto_conform_active(self) -> bool:
+        return db.get_setting("auto_conform_smpte", "true").lower() == "true"
+
+    def set_linked_footage(self, linked_footage: Dict[str, str]):
+        self.linked_footage = linked_footage or {}
+        self.update_displayed_timecodes()
+
+    def update_displayed_timecodes(self):
+        """Updates the button labels and tooltips based on whether auto-conform is active and footage is linked."""
+        auto_on = self.is_auto_conform_active()
+        footage_linked = self.has_linked_footage()
+
+        if auto_on and footage_linked:
+            smpte_start, _ = self.get_conformed_timecode(self.item.start_timecode)
+            display_start = smpte_start
+        else:
+            display_start = self.item.start_timecode
+
+        if hasattr(self, 'start_btn') and self.start_btn:
+            self.start_btn.setText(display_start)
+        if hasattr(self, 'start_btn_c') and self.start_btn_c:
+            self.start_btn_c.setText(display_start)
+
+        if not self.item.is_single and self.item.end_timecode:
+            if auto_on and footage_linked:
+                smpte_end, _ = self.get_conformed_timecode(self.item.end_timecode)
+                display_end = smpte_end
+            else:
+                display_end = self.item.end_timecode
+
+            if hasattr(self, 'end_btn') and self.end_btn:
+                self.end_btn.setText(display_end)
+            if hasattr(self, 'end_btn_c') and self.end_btn_c:
+                self.end_btn_c.setText(display_end)
+
+        self.update_timecode_tooltips()
+        self.invalidate_cache()
+        self.update()
+
+    def update_timecode_tooltips(self):
+        if hasattr(self, 'item') and self.item:
+            auto_on = self.is_auto_conform_active()
+            footage_linked = self.has_linked_footage()
+            smpte_start, _ = self.get_conformed_timecode(self.item.start_timecode)
+
+            if footage_linked and auto_on:
+                tip_start = f"SMPTE Conformed: {smpte_start}\nRaw Script: {self.item.start_timecode}\nClick to copy for Premiere Pro"
+            elif footage_linked:
+                tip_start = f"Raw Script PTS: {self.item.start_timecode} (Footage bound, Conforming OFF)\nClick to copy"
+            else:
+                tip_start = f"Raw Script PTS: {self.item.start_timecode} (No footage linked)\nClick to copy"
+
+            if hasattr(self, 'start_btn') and self.start_btn:
+                self.start_btn.setToolTip(tip_start)
+            if hasattr(self, 'start_btn_c') and self.start_btn_c:
+                self.start_btn_c.setToolTip(tip_start)
+
+            if not self.item.is_single and self.item.end_timecode:
+                smpte_end, _ = self.get_conformed_timecode(self.item.end_timecode)
+                if footage_linked and auto_on:
+                    tip_end = f"SMPTE Conformed: {smpte_end}\nRaw Script: {self.item.end_timecode}\nClick to copy for Premiere Pro"
+                elif footage_linked:
+                    tip_end = f"Raw Script PTS: {self.item.end_timecode} (Footage bound, Conforming OFF)\nClick to copy"
+                else:
+                    tip_end = f"Raw Script PTS: {self.item.end_timecode} (No footage linked)\nClick to copy"
+
+                if hasattr(self, 'end_btn') and self.end_btn:
+                    self.end_btn.setToolTip(tip_end)
+                if hasattr(self, 'end_btn_c') and self.end_btn_c:
+                    self.end_btn_c.setToolTip(tip_end)
+
+    def get_conformed_timecode(self, raw_ts: str) -> Tuple[str, str]:
+        """
+        Conforms the given script timestamp to SMPTE timecode (HH:MM:SS:FF)
+        ONLY IF local footage is bound to this item's source link AND auto_conform_smpte is enabled.
+        Otherwise, returns the raw timestamp untouched.
+        """
+        if not raw_ts:
+            return "", "Copied"
+
+        auto_conform = self.is_auto_conform_active()
+        if not auto_conform:
+            return raw_ts, f"Copied: {raw_ts}"
+
+        linked_path = self.get_linked_footage_path()
+        if not linked_path:
+            # No footage bound: do NOT alter things, return raw PTS timestamp
+            return raw_ts, f"Copied: {raw_ts}"
+
+        # Local footage is linked: conform with probed properties
+        from ...core.timecode_engine import conform_timestamp_for_clip
+        from ...core.media_probe import probe_media_file
+
+        probed = probe_media_file(linked_path, use_cache=True)
+        if probed and probed.frame_rate > 0:
+            smpte, meta = conform_timestamp_for_clip(
+                raw_ts,
+                probed_fps=probed.frame_rate,
+                container_start_time=probed.start_time,
+                embedded_timecode=probed.start_timecode,
+                is_vfr=probed.is_vfr
+            )
+            feedback = f"Copied: {smpte} ({meta['nominal_fps']} FPS"
+            if abs(meta['start_time_offset']) > 0.05:
+                feedback += f", +{meta['start_time_offset']:.2f}s offset"
+            if meta['is_vfr']:
+                feedback += ", VFR alert"
+            feedback += ")"
+            return smpte, feedback
+
+        return raw_ts, f"Copied: {raw_ts}"
 
     def set_compact_mode(self, compact: bool):
         if self.is_compact == compact:
             return
         self.is_compact = compact
-        self.index_lbl.setVisible(not compact)
+        self.index_lbl.setVisible(True)
+        if hasattr(self, 'domain_lbl') and self.domain_lbl:
+            self.domain_lbl.setVisible(not compact and self.width() >= 560)
+        if hasattr(self, 'wide_widget') and self.wide_widget:
+            self.wide_widget.setVisible(not compact)
+        if hasattr(self, 'compact_widget') and self.compact_widget:
+            self.compact_widget.setVisible(compact)
 
         if not self.item.is_single and self.item.end_timecode:
             if compact:
-                self.setFixedHeight(50)
-                self.tc_container.setFixedSize(130, 40)
+                self.setFixedHeight(44)
+                self.tc_container.setFixedSize(110, 32)
                 self.tc_stack.setCurrentIndex(1)
                 if hasattr(self, 'dur_lbl'):
                     self.dur_lbl.hide()
@@ -407,14 +479,9 @@ class TimelineCueCard(QFrame):
                 if hasattr(self, 'out_lbl'):
                     self.out_lbl.hide()
         else:
-            if compact:
-                self.setFixedHeight(50)
-                self.tc_container.setFixedSize(130, 40)
-                self.tc_stack.setCurrentIndex(0)
-            else:
-                self.setFixedHeight(44)
-                self.tc_container.setFixedSize(115, 32)
-                self.tc_stack.setCurrentIndex(0)
+            self.setFixedHeight(44)
+            self.tc_container.setFixedSize(115, 32)
+            self.tc_stack.setCurrentIndex(0)
 
         self.updateGeometry()
         self.invalidate_cache()
@@ -424,7 +491,7 @@ class TimelineCueCard(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'domain_lbl') and self.domain_lbl:
-            self.domain_lbl.setVisible(self.width() >= 550)
+            self.domain_lbl.setVisible(not self.is_compact and self.width() >= 560)
         # Standalone check only when unparented (in unit tests) to avoid high-frequency drag overhead
         if self.parent() is None:
             self.set_compact_mode(self.width() < 420)
@@ -530,20 +597,74 @@ class TimelineCueCard(QFrame):
 
     def leaveEvent(self, event):
         self.isHover = False
+        if self.first_link:
+            link_embed_controller.schedule_hide()
         self.update()
         super().leaveEvent(event)
 
     def hideEvent(self, event):
         self.isHover = False
+        if self.first_link:
+            link_embed_controller.schedule_hide()
         super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if self.first_link and watched in (getattr(self, "domain_lbl", None), getattr(self, "ext_btn", None)):
+            if event.type() == QEvent.Enter:
+                top_left = watched.mapToGlobal(watched.rect().topLeft())
+                global_rect = QRect(top_left, watched.size())
+                link_embed_controller.schedule_show(self.first_link, global_rect)
+            elif event.type() == QEvent.Leave:
+                link_embed_controller.schedule_hide()
+        return super().eventFilter(watched, event)
+
+    def update_link_metadata(self, meta: LinkMetadata):
+        """Updates the inline domain/title chip when background link unfurl finishes."""
+        self._link_meta = meta
+        if not hasattr(self, "domain_lbl") or not self.domain_lbl:
+            return
+        if meta and not meta.loading and not meta.is_fallback and meta.title:
+            pal = ThemeManager.get_palette()
+            is_dark = pal.get("is_dark", True)
+            if meta.is_restricted:
+                self.domain_lbl.setText("RESTRICTED")
+                self.domain_lbl.setStyleSheet("""
+                    QLabel {
+                        background-color: rgba(245, 158, 11, 0.14);
+                        color: #fbbf24;
+                        border: 1px solid rgba(245, 158, 11, 0.30);
+                        border-radius: 4px;
+                        padding: 1px 6px;
+                        font-size: 10px;
+                        font-weight: 700;
+                        font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                    }
+                """)
+            else:
+                raw_t = meta.title.strip()
+                short_t = (raw_t[:24] + "…") if len(raw_t) > 25 else raw_t
+                self.domain_lbl.setText(short_t)
+                chip_bg = "rgba(255, 255, 255, 0.05)" if is_dark else "rgba(0, 0, 0, 0.05)"
+                chip_brd = "rgba(255, 255, 255, 0.10)" if is_dark else "rgba(0, 0, 0, 0.10)"
+                chip_col = "#cbd5e1" if is_dark else "#334155"
+                self.domain_lbl.setStyleSheet(f"""
+                    QLabel {{
+                        background-color: {chip_bg};
+                        color: {chip_col};
+                        border: 1px solid {chip_brd};
+                        border-radius: 4px;
+                        padding: 1px 6px;
+                        font-size: 10px;
+                        font-weight: 600;
+                        font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                    }}
+                """)
+            self.invalidate_cache()
+            self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            copy_text = self.item.start_timecode or self.item.meta
-            safe_copy_to_clipboard(copy_text)
-            self.copy_feedback_requested.emit(copy_text)
-            sync_target = self.item.raw_timestamp if self.item.raw_timestamp else (self.item.start_timecode or self.item.meta)
-            self.sync_script_requested.emit(self.item.sync_id, sync_target)
+            self._on_start_timecode_copied()
         super().mousePressEvent(event)
 
     def _update_card_style(self):
@@ -587,6 +708,8 @@ class TimelineCueCard(QFrame):
             self.end_btn._restore_style()
         if hasattr(self, 'end_btn_c') and hasattr(self.end_btn_c, '_restore_style'):
             self.end_btn_c._restore_style()
+        if getattr(self, '_link_meta', None) is not None:
+            self.update_link_metadata(self._link_meta)
 
     def set_checked(self, checked: bool):
         self.cb.setChecked(checked)
@@ -599,40 +722,29 @@ class TimelineCueCard(QFrame):
         self.invalidate_cache()
         self.item_checked_changed.emit(self.item.id, is_checked)
 
+    def _on_start_timecode_copied(self, _=None):
+        raw_val = self.item.start_timecode or self.item.raw_timestamp
+        conformed, feedback = self.get_conformed_timecode(raw_val)
+        safe_copy_to_clipboard(conformed)
+        self.copy_feedback_requested.emit(feedback)
+        sync_target = self.item.raw_timestamp if self.item.raw_timestamp else raw_val
+        self.sync_script_requested.emit(self.item.sync_id, sync_target)
+
+    def _on_end_timecode_copied(self, _=None):
+        raw_val = self.item.end_timecode
+        conformed, feedback = self.get_conformed_timecode(raw_val)
+        safe_copy_to_clipboard(conformed)
+        self.copy_feedback_requested.emit(feedback)
+        sync_target = self.item.raw_timestamp if self.item.raw_timestamp else raw_val
+        self.sync_script_requested.emit(self.item.sync_id, sync_target)
+
     def _on_meta_clicked(self, event):
         if event.button() == Qt.LeftButton:
-            safe_copy_to_clipboard(self.item.meta)
-            self.copy_feedback_requested.emit(self.item.meta)
-            sync_target = self.item.raw_timestamp if self.item.raw_timestamp else self.item.meta
-            self.sync_script_requested.emit(self.item.sync_id, sync_target)
+            self._on_start_timecode_copied()
             event.accept()
 
     def _on_timecode_copied(self, tc: str):
-        self.copy_feedback_requested.emit(tc)
-        sync_target = self.item.raw_timestamp if self.item.raw_timestamp else tc
-        self.sync_script_requested.emit(self.item.sync_id, sync_target)
-
-    def _on_start_tc_edited(self, new_tc: str):
-        self.item.start_timecode = new_tc
-        if hasattr(self, 'start_btn'):
-            self.start_btn.setText(new_tc)
-        if hasattr(self, 'start_btn_c'):
-            self.start_btn_c.setText(new_tc)
-        if self.doc_signature:
-            db.save_override(self.doc_signature, self.item.id, new_tc, self.item.end_timecode, self.item.text)
-        self.invalidate_cache()
-        self.item_timecode_changed.emit(self.item.id, new_tc)
-
-    def _on_end_tc_edited(self, new_tc: str):
-        self.item.end_timecode = new_tc
-        if hasattr(self, 'end_btn'):
-            self.end_btn.setText(new_tc)
-        if hasattr(self, 'end_btn_c'):
-            self.end_btn_c.setText(new_tc)
-        if self.doc_signature:
-            db.save_override(self.doc_signature, self.item.id, self.item.start_timecode, new_tc, self.item.text)
-        self.invalidate_cache()
-        self.item_timecode_changed.emit(self.item.id, new_tc)
+        self._on_start_timecode_copied()
 
     def isHidden(self) -> bool:
         if getattr(self, "_filter_hidden", False):
@@ -655,15 +767,21 @@ class TimelineCueCard(QFrame):
 
         cache_key = (w, h, int(round(dpr * 100)), bool(self.item.is_checked), bool(self.is_compact))
         if self._cached_surface is None or self._cached_surface_key != cache_key:
+            if getattr(self, "_is_rendering_surface", False):
+                return self._cached_surface or QPixmap()
+            self._is_rendering_surface = True
             pix = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
             pix.setDevicePixelRatio(dpr)
             pix.fill(Qt.transparent)
-            if self.width() != w or self.height() != h:
-                self.resize(w, h)
-            orig_hover = self.isHover
-            self.isHover = False
-            self.render(pix)
-            self.isHover = orig_hover
+            try:
+                if self.width() != w or self.height() != h:
+                    self.resize(w, h)
+                orig_hover = self.isHover
+                self.isHover = False
+                self.render(pix)
+                self.isHover = orig_hover
+            finally:
+                self._is_rendering_surface = False
             self._cached_surface = pix
             self._cached_surface_key = cache_key
         return self._cached_surface
