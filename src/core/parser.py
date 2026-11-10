@@ -86,6 +86,22 @@ def process_time_raw(raw: str) -> Tuple[str, int]:
     total_seconds = int(h) * 3600 + int(m) * 60 + int(s)
     return f"{h}:{m}:{s}:{f}", total_seconds
 
+def format_smpte(seconds: float, fps: float = 23.976) -> str:
+    """Formats floating-point seconds into SMPTE timecode string HH:MM:SS:FF."""
+    if seconds <= 0:
+        return "00:00:00:00"
+    if fps <= 0 or fps > 120.0:
+        fps = 23.976
+    base_fps = max(1, int(round(fps)))
+    total_frames = int(round(seconds * fps))
+    ff = total_frames % base_fps
+    total_sec = total_frames // base_fps
+    ss = total_sec % 60
+    total_min = total_sec // 60
+    mm = total_min % 60
+    hh = total_min // 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
 def parse_time_single(raw: str) -> Tuple[str, float, bool]:
     """Lenient parser for standalone timestamp string (supports ; and . typos)."""
     cleaned = re.sub(r'[()—–\-]', '', raw).strip()
@@ -325,10 +341,12 @@ def build_raw_html(
     blocks: List[Dict[str, Any]],
     link_colors: Dict[str, str],
     light_paper: bool = False,
-    view_mode: str = "reading"
+    view_mode: str = "reading",
+    vo_block_diffs: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """Builds styled HTML for ScriptViewer preserving DOCX font colors, highlights, formatting, and headings."""
     html_parts = []
+    diffs_map = vo_block_diffs or {}
     is_doc = (view_mode == "document")
     body_text_col = "#0f172a" if light_paper else "#f1f5f9"
 
@@ -417,8 +435,34 @@ def build_raw_html(
                     tag = f"<h4 id='block-{block_id}' style='margin: 10px 0 4px 0; font-size: 1.05em; font-weight: 700; color: {heading_col};'><a name='block-{block_id}'></a>{inner_content}</h4>"
                 html_parts.append(tag)
         else:
-            p_style = f"margin-top: 0px; margin-bottom: 7px; line-height: 1.15; color: {body_text_col};" if is_doc else f"margin: 4px 0; line-height: 1.4; color: {body_text_col};"
-            html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>{inner_content}</p>")
+            diff_entry = diffs_map.get(str(block_id)) or diffs_map.get(block_id)
+            vo_callout_html = ""
+            p_extra_border = ""
+            if diff_entry and isinstance(diff_entry, dict):
+                m_type = (diff_entry.get("match_type") or "EXACT").upper()
+                vo_txt = html.escape(str(diff_entry.get("vo_actual_text") or "").strip())
+                s_sec = float(diff_entry.get("vo_start_sec", 0.0) or 0.0)
+                e_sec = float(diff_entry.get("vo_end_sec", 0.0) or 0.0)
+                tc_badge = f"{int(s_sec)//60:02d}:{s_sec%60:04.1f} - {int(e_sec)//60:02d}:{e_sec%60:04.1f}" if e_sec > 0 else "VO"
+
+                if m_type in ("MODIFIED", "ADLIB", "RETAKE_CUT") and vo_txt:
+                    badge_col = "#c084fc" if m_type == "ADLIB" else ("#f87171" if m_type == "RETAKE_CUT" else "#fbbf24")
+                    badge_bg = "rgba(192, 132, 252, 0.14)" if m_type == "ADLIB" else ("rgba(248, 113, 113, 0.14)" if m_type == "RETAKE_CUT" else "rgba(251, 191, 36, 0.14)")
+                    p_extra_border = f"border-left: 3px solid {badge_col}; padding-left: 6px;"
+                    vo_callout_html = (
+                        f"<br/><span style='background-color: {badge_bg}; color: {badge_col}; "
+                        f"font-size: 0.88em; font-weight: 700; padding: 1px 6px; border-radius: 4px;'>"
+                        f"[VO {m_type} {tc_badge}]: &ldquo;{vo_txt}&rdquo;</span>"
+                    )
+                elif m_type == "EXACT":
+                    p_extra_border = "border-left: 3px solid #34d399; padding-left: 6px;"
+
+            p_style = (
+                f"margin-top: 0px; margin-bottom: 7px; line-height: 1.15; color: {body_text_col}; {p_extra_border}"
+                if is_doc
+                else f"margin: 4px 0; line-height: 1.4; color: {body_text_col}; {p_extra_border}"
+            )
+            html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>{inner_content}{vo_callout_html}</p>")
 
     return "".join(html_parts)
 
@@ -913,7 +957,9 @@ def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Option
     )
 
     db.save_document(new_doc_state)
-    db.add_recent_file(file_path, file_name)
+    from .project_manager import project_manager
+    proj_path = project_manager.get_auto_project_path(file_name)
+    db.add_recent_file(proj_path if os.path.exists(proj_path) else file_path, file_name)
 
     if progress_callback:
         progress_callback(100, "Done!")

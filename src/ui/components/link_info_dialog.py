@@ -331,16 +331,22 @@ class LinkMetadataDialog(MessageBoxBase):
                     if probed.duration_seconds > 0:
                         self.dur_row.setText(f"{probed.duration_display}  ({probed.duration_seconds:.1f}s)")
                     if probed.frame_rate > 0:
-                        vfr_str = " (VFR Alert)" if probed.is_vfr else " (CFR)"
-                        self.fps_row.setText(f"{probed.frame_rate} FPS{vfr_str}")
+                        if probed.is_vfr:
+                            self.fps_row.setText(f"{probed.frame_rate:.2f} FPS (VFR — Drift Risk)")
+                            self.fps_row.setStyleSheet("color: #fbbf24; font-weight: 600;")
+                        else:
+                            self.fps_row.setText(f"{probed.frame_rate:.3f} FPS (CFR — Constant Frame Rate)")
+                            self.fps_row.setStyleSheet("color: #38bdf8; font-weight: 600;")
                     else:
                         self.fps_row.setText("—")
+                        self.fps_row.setStyleSheet("")
                     if abs(probed.start_time) > 0.001:
                         self.offset_row.setText(f"+{probed.start_time:.3f}s (Compensated in Premiere)")
                     else:
                         self.offset_row.setText("0.000s (Aligned)")
                 else:
                     self.fps_row.setText("—")
+                    self.fps_row.setStyleSheet("")
                     self.offset_row.setText("—")
                 self.status_badge.setText("LINKED")
                 self.status_badge.setStyleSheet("""
@@ -357,6 +363,7 @@ class LinkMetadataDialog(MessageBoxBase):
             else:
                 self.local_row.setText("Not Linked (Remote)")
                 self.fps_row.setText("—")
+                self.fps_row.setStyleSheet("")
                 self.offset_row.setText("—")
 
         # Thumbnail

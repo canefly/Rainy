@@ -95,6 +95,16 @@ def test_analyze_framerate_vfr_detection():
     exact, nom, is_vfr, is_std = analyze_framerate(23.976, 23.978)
     assert is_vfr is False
 
+    # 50fps CFR clip after FFmpeg -c:a copy where 1-2s audio tail slightly lowers container avg_fps
+    exact, nom, is_vfr, is_std = analyze_framerate(50.0, 49.88, duration_sec=1200.0)
+    assert is_vfr is False
+    assert exact == 50.0
+    assert nom == 50
+
+    # True 50fps VFR surveillance clip with dropped frames
+    exact, nom, is_vfr, is_std = analyze_framerate(50.0, 46.2, duration_sec=1200.0)
+    assert is_vfr is True
+
 
 def test_seconds_to_frames_mathematical_precision():
     # Exactly 1 second at 24000/1001 (23.9760239...)

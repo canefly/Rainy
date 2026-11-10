@@ -70,20 +70,48 @@ def parse_timestamp_seconds(timestamp: str) -> float:
     return 0.0
 
 
-def analyze_framerate(r_fps: float, avg_fps: float = 0.0) -> Tuple[float, int, bool, bool]:
+def analyze_framerate(
+    r_fps: float,
+    avg_fps: float = 0.0,
+    duration_sec: float = 0.0,
+) -> Tuple[float, int, bool, bool]:
     """
     Analyzes probed frame rate streams to determine nominal FPS and detect VFR.
     
     Returns:
         (exact_fps, nominal_base_fps, is_vfr, is_standard)
     """
-    raw_fps = r_fps if r_fps > 0 else avg_fps
-    if raw_fps <= 0:
+    # Filter out container timebase artifacts (e.g. 40000/1, 90000/1, 1000/1)
+    is_vfr = False
+    if r_fps > 120.0:
+        if avg_fps > 0 and avg_fps <= 120.0:
+            raw_fps = avg_fps
+            is_vfr = True
+        else:
+            raw_fps = 29.97
+            is_vfr = True
+    else:
+        raw_fps = r_fps if r_fps > 0 else avg_fps
+
+    if raw_fps <= 0 or raw_fps > 120.0:
         return (23.976, 24, False, True)
 
-    is_vfr = False
-    if r_fps > 0 and avg_fps > 0:
-        if abs(r_fps - avg_fps) > 0.08:
+    if not is_vfr and r_fps > 0 and avg_fps > 0:
+        # Note on MP4/MOV audio-copy muxing:
+        # When FFmpeg re-encodes to CFR with `-c:a copy`, the container duration is the max of the
+        # video and audio stream durations. If the original audio track had a 1-3s pre-roll or tail
+        # overhang, ffprobe computes `avg_frame_rate = nb_frames / container_duration`, which can
+        # sit slightly below `r_frame_rate` even on a 100% constant-framerate video stream.
+        # Additionally, higher framerates (50/60fps) have proportionally larger absolute FPS deltas
+        # for the same 1-2s audio tail overhang than 24fps clips.
+        rel_diff = abs(r_fps - avg_fps) / r_fps
+        abs_diff = abs(r_fps - avg_fps)
+
+        # Allow up to ~3.5 seconds of audio-stream overhang without false-flagging CFR as VFR
+        overhang_tol = (3.5 * r_fps / duration_sec) if duration_sec > 10.0 else 0.0
+        effective_abs_tol = max(0.08, r_fps * 0.008, min(1.25, overhang_tol))
+
+        if abs_diff > effective_abs_tol and rel_diff > 0.015:
             is_vfr = True
 
     # Check for known standard NTSC / ATSC / PAL rates: find closest match

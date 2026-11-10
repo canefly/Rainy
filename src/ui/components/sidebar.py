@@ -42,8 +42,8 @@ class BadgedIconButton(QWidget):
         from ..theme import ThemeManager
         from PySide6.QtGui import QColor
         pal = ThemeManager.get_palette()
-        accent = pal.get("accent", "#fb7185")
-        rgb = pal.get("accent_rgb", "251, 113, 133")
+        accent = pal.get("accent", "#38bdf8")
+        rgb = pal.get("accent_rgb", "56, 189, 248")
 
         bg = self._custom_badge_bg if self._custom_badge_bg else accent
         if self._custom_badge_fg:
@@ -87,6 +87,7 @@ class SidebarDock(QFrame):
     outline_clicked = Signal()
     notes_clicked = Signal()
     links_clicked = Signal()
+    footage_clicked = Signal()
     vault_clicked = Signal()
     settings_clicked = Signal()
 
@@ -129,6 +130,15 @@ class SidebarDock(QFrame):
         self.links_btn.clicked.connect(self.links_clicked.emit)
         layout.addWidget(self.links_btn)
 
+        # Footage Manager with dynamic count / alert badge
+        self.footage_btn = BadgedIconButton(
+            FluentIcon.VIDEO,
+            "Footage Manager",
+            parent=self
+        )
+        self.footage_btn.clicked.connect(self.footage_clicked.emit)
+        layout.addWidget(self.footage_btn)
+
         layout.addStretch(1)
 
         # 2. Bottom Section
@@ -143,6 +153,9 @@ class SidebarDock(QFrame):
     def set_links_count(self, count: int):
         self.links_btn.set_badge_count(count)
 
+    def set_footage_count(self, count: int):
+        self.footage_btn.set_badge_count(count)
+
     def apply_theme(self):
-        for btn in (self.home_btn, self.outline_btn, self.notes_btn, self.links_btn, self.settings_btn):
+        for btn in (self.home_btn, self.outline_btn, self.notes_btn, self.links_btn, self.footage_btn, self.settings_btn):
             btn.apply_theme()

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Suppress harmless internal font fallback probing warnings (e.g. script 11 / Devanagari)
 QLoggingCategory.setFilterRules("qt.text.font.db=false")
 
+from src.ui.theme import disable_menu_animations
 from src.ui.window import MainWindow
 
 def main():
@@ -21,6 +22,7 @@ def main():
     
     app = QApplication(sys.argv)
     app.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
+    disable_menu_animations()
 
     font_families = [
         "Segoe UI Variable Text", "Segoe UI", "Nirmala UI", 

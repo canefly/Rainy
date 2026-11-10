@@ -6,6 +6,53 @@ from PySide6.QtGui import QColor, QPainter, QPixmap, QImage, QBrush, QRadialGrad
 from PySide6.QtWidgets import QWidget, QApplication
 from qfluentwidgets import setThemeColor, Theme as FluentTheme, setTheme
 
+def disable_menu_animations():
+    """
+    Globally disables sliding, masking, and fading animations for all QFluentWidgets menus:
+    - DropDown and PullUp menus (ComboBox, RoundMenu, CheckableMenu, etc.)
+    - Context menus (Right-click context menus across cards, dialogs, drawers)
+    - Titlebar navigation menus (File, Edit, Export, Help)
+
+    Preserves directional screen clamping (Drop Down vs Pull Up) while popping open
+    instantaneously with zero latency.
+    """
+    try:
+        from qfluentwidgets.components.widgets.menu import (
+            DropDownMenuAnimationManager,
+            PullUpMenuAnimationManager,
+            FadeInDropDownMenuAnimationManager,
+            FadeInPullUpMenuAnimationManager,
+        )
+
+        def _instant_drop_down_exec(self, pos):
+            self.menu.clearMask()
+            self.menu.move(self._endPosition(pos))
+
+        def _instant_pull_up_exec(self, pos):
+            self.menu.clearMask()
+            self.menu.move(self._endPosition(pos))
+
+        def _instant_fade_drop_exec(self, pos):
+            self.menu.setWindowOpacity(1.0)
+            self.menu.clearMask()
+            self.menu.move(self._endPosition(pos))
+
+        def _instant_fade_pull_exec(self, pos):
+            self.menu.setWindowOpacity(1.0)
+            self.menu.clearMask()
+            self.menu.move(self._endPosition(pos))
+
+        DropDownMenuAnimationManager.exec = _instant_drop_down_exec
+        PullUpMenuAnimationManager.exec = _instant_pull_up_exec
+        FadeInDropDownMenuAnimationManager.exec = _instant_fade_drop_exec
+        FadeInPullUpMenuAnimationManager.exec = _instant_fade_pull_exec
+    except Exception:
+        pass
+
+# Apply globally on module load
+disable_menu_animations()
+
+
 class ThemeVariant(Enum):
     PINK = "pink"
     BLUE = "blue"

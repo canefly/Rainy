@@ -6,7 +6,8 @@ import win32con
 from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QIcon, QColor, QPainter, QImage, QBrush, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QApplication, QFileDialog, QInputDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QApplication, QFileDialog, QInputDialog,
+    QSystemTrayIcon
 )
 from qfluentwidgets import (
     FluentWindow, FluentTitleBar, InfoBar, InfoBarPosition, isDarkTheme
@@ -117,6 +118,7 @@ class MainWindow(FluentWindow):
         # Wire title menu actions
         self.title_menu.open_doc_requested.connect(self._on_menu_open_doc)
         self.title_menu.open_project_requested.connect(self._on_menu_open_project)
+        self.title_menu.reimport_script_requested.connect(self._on_menu_reimport_script)
         self.title_menu.save_project_as_requested.connect(self._on_menu_save_project_as)
         self.title_menu.set_footage_requested.connect(self._on_menu_set_footage)
         self.title_menu.open_projects_folder_requested.connect(self._on_menu_open_projects_folder)
@@ -145,9 +147,21 @@ class MainWindow(FluentWindow):
         self.title_stats = TitleBarStatsWidget(self.titleBar)
         self.title_stats.setFixedHeight(32)
         self.title_stats.pin_toggled.connect(self._on_pin_toggled)
+        self.title_stats.render_queue_clicked.connect(self._on_menu_set_footage)
         insert_idx = max(1, self.titleBar.hBoxLayout.count() - 1)
         self.titleBar.hBoxLayout.insertWidget(insert_idx, self.title_stats, 0, Qt.AlignTop)
         self._apply_caption_button_theme()
+
+        # Global Render Queue wiring (persists & runs even when Footage modal is closed)
+        from ..core.render_queue import render_queue
+        render_queue.queue_changed.connect(self._sync_render_queue_indicator)
+        render_queue.job_progress.connect(lambda *_: self._sync_render_queue_indicator())
+        render_queue.job_finished.connect(self._on_global_render_job_finished)
+        render_queue.batch_finished.connect(self._on_global_render_batch_finished)
+        self._sync_render_queue_indicator()
+
+        # System Tray for Windows Toast Notifications
+        self._init_tray_notifications()
 
         # Remove default navigation interface and stackedWidget so TitleBar and MainBody start flush at x=0
         if hasattr(self, 'navigationInterface') and self.navigationInterface:
@@ -175,6 +189,7 @@ class MainWindow(FluentWindow):
         self.sidebar.outline_clicked.connect(self._on_outline_clicked)
         self.sidebar.notes_clicked.connect(self._on_notes_clicked)
         self.sidebar.links_clicked.connect(self._on_links_clicked)
+        self.sidebar.footage_clicked.connect(self._on_footage_clicked)
         self.sidebar.vault_clicked.connect(self.open_vault)
         self.sidebar.settings_clicked.connect(self.open_settings)
         self.sidebar.hide()
@@ -186,7 +201,7 @@ class MainWindow(FluentWindow):
             self.stack.layout().setContentsMargins(0, 0, 0, 0)
 
         self.home_view = HomeView(self.stack)
-        self.home_view.file_selected.connect(self.load_docx_file)
+        self.home_view.file_selected.connect(self.open_file)
         self.home_view.settings_requested.connect(self.open_settings)
         self.home_view.updates_requested.connect(self.open_about)
         self.home_view.copyright_requested.connect(lambda: self.open_settings(initial_tab=4))
@@ -197,7 +212,11 @@ class MainWindow(FluentWindow):
         self.workspace_view.copy_feedback_requested.connect(self.title_stats.trigger_copied)
         self.workspace_view.notes_count_changed.connect(self.sidebar.set_notes_count)
         self.workspace_view.links_count_changed.connect(self.sidebar.set_links_count)
+        self.workspace_view.footage_count_changed.connect(self.sidebar.set_footage_count)
+        self.workspace_view.set_footage_folder_requested.connect(self._on_menu_set_footage)
+        self.workspace_view.relink_requested.connect(self._on_menu_set_footage)
         self.workspace_view.links_drawer.relink_requested.connect(self._on_menu_set_footage)
+        self.workspace_view.open_settings_requested.connect(self.open_settings)
         self.stack.addWidget(self.workspace_view)
 
         body_layout.addWidget(self.stack, 1)
@@ -211,6 +230,24 @@ class MainWindow(FluentWindow):
 
         # 3. Asynchronous Licensing & Auth Verification
         self._init_auth()
+
+        # 4. Idle pre-warm settings window and hardware encoder probe (instant 0ms opening)
+        QTimer.singleShot(1000, self._idle_prewarm_services)
+
+    def _idle_prewarm_services(self):
+        """Pre-warms independent background services and windows during main thread idle."""
+        import threading
+        from ..core.ffmpeg_encoder import detect_available_encoders
+        threading.Thread(target=detect_available_encoders, daemon=True).start()
+
+        try:
+            if not hasattr(self, 'pref_window') or self.pref_window is None:
+                self.pref_window = PreferencesDialog(None, initial_tab=0)
+                self.pref_window.theme_changed.connect(self.apply_palette)
+                self.pref_window.document_opened.connect(self.load_docx_file)
+                self.pref_window.smpte_conforming_changed.connect(self._on_smpte_conforming_changed)
+        except Exception as e:
+            logger.warning(f"Could not pre-warm preferences dialog: {e}")
 
     def _init_noise_brush(self):
         try:
@@ -465,6 +502,11 @@ class MainWindow(FluentWindow):
             self.open_workspace()
         self.workspace_view.toggle_links_drawer()
 
+    def _on_footage_clicked(self):
+        if self.stack.currentWidget() != self.workspace_view:
+            self.open_workspace()
+        self._on_menu_set_footage()
+
     def _on_focus_mode_clicked(self):
         if self.stack.currentWidget() != self.workspace_view:
             self.open_workspace()
@@ -482,27 +524,12 @@ class MainWindow(FluentWindow):
             )
             return
 
-        self.loading_bar = InfoBar.info(
-            title="Parsing Script...",
-            content=f"Reading {os.path.basename(file_path)} with typo-tolerant normalizer...",
-            parent=self,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=-1
-        )
-
         worker = DocxParseWorker(file_path)
         worker.signals.finished.connect(self._on_parse_finished)
         worker.signals.error.connect(self._on_parse_error)
         self.thread_pool.start(worker)
 
     def _on_parse_finished(self, doc_state: DocumentState):
-        if hasattr(self, 'loading_bar') and self.loading_bar:
-            try:
-                self.loading_bar.close()
-            except RuntimeError:
-                pass
-            self.loading_bar = None
-
         self.current_doc = doc_state
         self.workspace_view.load_document(doc_state)
 
@@ -510,26 +537,12 @@ class MainWindow(FluentWindow):
         all_notes_count = len(doc_state.notes) + len(doc_state.custom_notes)
         self.sidebar.set_notes_count(all_notes_count)
         self.sidebar.set_links_count(len(doc_state.links))
+        self.sidebar.set_footage_count(len(getattr(self.workspace_view, "linked_footage", {})))
 
         # Switch to Workspace View
         self.open_workspace()
 
-        InfoBar.success(
-            title="Script Loaded!",
-            content=f"Parsed {len(doc_state.items)} checklist items & {len(doc_state.links)} links.",
-            parent=self,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=2500
-        )
-
     def _on_parse_error(self, err_msg: str):
-        if hasattr(self, 'loading_bar') and self.loading_bar:
-            try:
-                self.loading_bar.close()
-            except RuntimeError:
-                pass
-            self.loading_bar = None
-
         InfoBar.error(
             title="Parser Error",
             content=f"Failed to parse document: {err_msg}",
@@ -549,6 +562,44 @@ class MainWindow(FluentWindow):
         self.show()
         self._apply_backdrop_effect()
 
+    def open_file(self, file_path: str, force_reimport: bool = False):
+        """Unified intelligent file opener. Loads standalone .clickproj in <10ms if available,
+        falling back to parsing .docx only when no project exists or user requests an explicit re-import."""
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        # 1. Direct .clickproj file selection
+        if file_path.lower().endswith(".clickproj"):
+            self._load_clickproj_file(file_path)
+            return
+
+        # 2. DOCX file selection
+        if not force_reimport:
+            from ..core.project_manager import project_manager
+            auto_proj = project_manager.get_auto_project_path(os.path.basename(file_path))
+            if os.path.exists(auto_proj):
+                # Instant load from the self-contained project!
+                self._load_clickproj_file(auto_proj)
+                return
+
+        # 3. First-time import or explicit re-import of DOCX
+        self.load_docx_file(file_path)
+
+    def _on_menu_reimport_script(self):
+        """Re-imports script text from DOCX while preserving existing checklist, overrides, and footage links."""
+        if not self.current_doc:
+            return
+        target_docx = getattr(self.current_doc, "file_path", "") or ""
+        if not target_docx or not os.path.exists(target_docx):
+            target_docx, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Locate Updated Word Document for {self.current_doc.name}",
+                "",
+                "Word Documents (*.docx);;All Files (*.*)"
+            )
+        if target_docx and os.path.exists(target_docx):
+            self.load_docx_file(target_docx)
+
     def _on_menu_open_doc(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -558,10 +609,7 @@ class MainWindow(FluentWindow):
         )
         if not file_path:
             return
-        if file_path.lower().endswith(".clickproj"):
-            self._load_clickproj_file(file_path)
-        else:
-            self.load_docx_file(file_path)
+        self.open_file(file_path)
 
     def _on_menu_open_project(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -572,7 +620,7 @@ class MainWindow(FluentWindow):
         )
         if not file_path:
             return
-        self._load_clickproj_file(file_path)
+        self.open_file(file_path)
 
     def _load_clickproj_file(self, proj_path: str):
         from ..core.project_manager import project_manager
@@ -587,16 +635,58 @@ class MainWindow(FluentWindow):
             )
             return
 
-        target_docx = proj.docx_path
+        # 1. Instant load from self-contained project data (no DOCX required!)
+        if proj.has_embedded_document():
+            doc_state = proj.to_document_state()
+            self.current_doc = doc_state
+            from ..core.database import db
+            if proj.overrides and doc_state.file_signature:
+                for itm_id, ov in proj.overrides.items():
+                    db.save_override(
+                        doc_state.file_signature,
+                        itm_id,
+                        ov.get("start_tc") or ov.get("in_tc") or "",
+                        ov.get("end_tc") or ov.get("out_tc") or "",
+                        ov.get("text")
+                    )
+            self.workspace_view.load_document(doc_state, project_path=proj_path)
+
+            all_notes_count = len(doc_state.notes) + len(doc_state.custom_notes)
+            self.sidebar.set_notes_count(all_notes_count)
+            self.sidebar.set_links_count(len(doc_state.links))
+            self.sidebar.set_footage_count(len(getattr(self.workspace_view, "linked_footage", {})))
+            self.open_workspace()
+
+            db.add_recent_file(proj_path, proj.project_name or os.path.basename(proj_path))
+
+            InfoBar.success(
+                title="Project Loaded",
+                content=f"Opened standalone project: {proj.project_name or os.path.basename(proj_path)}",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500
+            )
+            return
+
+        # 2. Fallback for legacy v1 projects that only stored check state
+        target_docx = proj.docx_path or proj.script_file_name
         if not target_docx or not os.path.exists(target_docx):
             target_docx, _ = QFileDialog.getOpenFileName(
                 self,
-                f"Locate Associated Script (.docx) for {proj.doc_name}",
+                f"Locate Associated Script (.docx) for {proj.doc_name or os.path.basename(proj_path)}",
                 "",
                 "Word Documents (*.docx);;All Files (*.*)"
             )
         if target_docx and os.path.exists(target_docx):
             self.load_docx_file(target_docx)
+        else:
+            InfoBar.warning(
+                title="Associated Script Not Found",
+                content=f"Legacy project '{proj.doc_name or os.path.basename(proj_path)}' requires its original .docx script to open.",
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4000
+            )
 
     def _on_menu_save_project_as(self):
         if not self.current_doc:
@@ -624,12 +714,23 @@ class MainWindow(FluentWindow):
         from .components.footage_relink_dialog import FootageRelinkDialog
         curr_folder = getattr(self.workspace_view, "footage_folder", "")
         curr_linked = getattr(self.workspace_view, "linked_footage", {})
+        curr_vo = getattr(self.current_doc, "vo_file_path", "")
+        curr_vo_segs = getattr(self.current_doc, "vo_segments", [])
+        curr_vo_files = getattr(self.current_doc, "vo_files", []) or ([curr_vo] if curr_vo else [])
+        curr_vo_trans = getattr(self.current_doc, "vo_transcript_path", "")
+        proj_name = getattr(self.current_doc, "name", "") or "Voiceover"
 
         dlg = FootageRelinkDialog(
             links=self.current_doc.links,
             current_footage_dir=curr_folder,
             existing_linked=curr_linked,
-            parent=self
+            current_vo_path=curr_vo,
+            existing_vo_segments=curr_vo_segs,
+            doc_signature=getattr(self.current_doc, "file_signature", "") or getattr(self.current_doc, "id", ""),
+            parent=self,
+            project_name=proj_name,
+            vo_transcript_path=curr_vo_trans,
+            vo_files=curr_vo_files,
         )
 
         def _on_linked(folder: str, mapping: dict):
@@ -645,8 +746,101 @@ class MainWindow(FluentWindow):
                 duration=4000
             )
 
+        def _on_vo_linked(vo_path: str, vo_segments: list):
+            self.workspace_view.set_vo_data(vo_path, vo_segments)
+
+        def _on_vo_transcript_ready(json_path: str, vo_files: list, vo_segments: list):
+            primary = vo_files[0] if vo_files else curr_vo
+            self.workspace_view.set_vo_data(primary, vo_segments, vo_transcript_path=json_path, vo_files=vo_files)
+
         dlg.footage_linked.connect(_on_linked)
+        dlg.vo_linked.connect(_on_vo_linked)
+        dlg.vo_transcript_ready.connect(_on_vo_transcript_ready)
         dlg.exec()
+
+    def _sync_render_queue_indicator(self):
+        from ..core.render_queue import render_queue
+        counts = render_queue.get_summary_counts()
+        running_job = next((j for j in render_queue.jobs if j.status == "RUNNING"), None)
+        if running_job:
+            active_total = counts["done"] + 1 + counts["queued"]
+            idx_num = counts["done"] + 1
+            txt = f"Rendering {idx_num}/{active_total} · {running_job.progress:.0f}%"
+            self.title_stats.update_render_queue_indicator(True, txt)
+        elif counts["queued"] > 0:
+            self.title_stats.update_render_queue_indicator(True, f"Queue ({counts['queued']} waiting)")
+        else:
+            self.title_stats.update_render_queue_indicator(False, "")
+
+    def _init_tray_notifications(self):
+        """Initializes native Windows system tray notification bridge for background rendering."""
+        self.tray_icon: Optional[QSystemTrayIcon] = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"))
+            icon = QIcon(logo_path) if os.path.exists(logo_path) else self.windowIcon()
+            self.tray_icon = QSystemTrayIcon(icon, self)
+            self.tray_icon.setToolTip("Clickables Native Tools")
+            self.tray_icon.messageClicked.connect(self._on_tray_message_clicked)
+            self.tray_icon.show()
+
+    def _on_tray_message_clicked(self):
+        """Brings Clickables to the foreground when a Windows toast notification is clicked."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def show_system_notification(self, title: str, message: str, is_error: bool = False):
+        """Dispatches a native Windows 11 Action Center notification."""
+        if self.tray_icon and self.tray_icon.isVisible():
+            icon_type = QSystemTrayIcon.Warning if is_error else QSystemTrayIcon.Information
+            self.tray_icon.showMessage(title, message, icon_type, 6000)
+
+    def _on_global_render_job_finished(self, job, success: bool, final_path_or_err: str):
+        if not success and final_path_or_err != "Cancelled by user":
+            title = f"Render Failed: {os.path.basename(job.source_path)}"
+            err_msg = str(final_path_or_err)[:120]
+            if not self.isActiveWindow():
+                self.show_system_notification(title, err_msg, is_error=True)
+            InfoBar.error(
+                title=title,
+                content=err_msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4500,
+            )
+
+    def _on_global_render_batch_finished(self, done_count: int, fail_count: int):
+        if done_count > 0 and fail_count == 0:
+            title = "Render Queue Complete"
+            msg = f"Finished encoding {done_count} clip{'s' if done_count != 1 else ''}. Originals moved safely to Recycle Bin."
+            self.show_system_notification(title, msg, is_error=False)
+            if self.isActiveWindow():
+                InfoBar.success(
+                    title=title,
+                    content=msg,
+                    parent=self,
+                    position=InfoBarPosition.TOP_RIGHT,
+                    duration=4000,
+                )
+        elif done_count > 0 and fail_count > 0:
+            title = "Render Queue Finished with Warnings"
+            msg = f"{done_count} succeeded, {fail_count} failed. Open Footage Library to retry failed jobs."
+            self.show_system_notification(title, msg, is_error=True)
+            if self.isActiveWindow():
+                InfoBar.warning(
+                    title=title,
+                    content=msg,
+                    parent=self,
+                    position=InfoBarPosition.TOP_RIGHT,
+                    duration=4500,
+                )
+
+    def set_mcp_bridge_enabled(self, enabled: bool):
+        if hasattr(self, "workspace_view") and hasattr(self.workspace_view, "mcp_ipc_server"):
+            if enabled:
+                self.workspace_view.mcp_ipc_server.start()
+            else:
+                self.workspace_view.mcp_ipc_server.stop()
 
     def _on_menu_open_projects_folder(self):
         from ..core.project_manager import project_manager
@@ -713,9 +907,19 @@ class MainWindow(FluentWindow):
         )
         if not save_path:
             return
-        from ..core.xml_exporter import export_fcp_xml_file
+        from ..core.xml_exporter import export_fcp_xml_file, export_assembled_fcp_xml_file
         try:
-            export_fcp_xml_file(save_path, self.current_doc, footage_folder=footage, linked_footage=linked_map)
+            has_vo_locks = any(getattr(it, "vo_cut_after_sec", None) is not None for it in self.current_doc.items)
+            has_assembly = bool(getattr(self.current_doc, "timeline_assembly", None))
+            if has_vo_locks or has_assembly:
+                export_assembled_fcp_xml_file(
+                    save_path,
+                    self.current_doc,
+                    vo_file_path=getattr(self.current_doc, "vo_file_path", ""),
+                    linked_footage=linked_map,
+                )
+            else:
+                export_fcp_xml_file(save_path, self.current_doc, footage_folder=footage, linked_footage=linked_map)
             InfoBar.success(
                 title="XML Exported",
                 content=f"Saved Premiere Pro XML sequence to {os.path.basename(save_path)}",
@@ -777,15 +981,15 @@ class MainWindow(FluentWindow):
             )
 
     def _on_menu_shortcuts(self):
-        InfoBar.info(
-            title="Keyboard Shortcuts",
-            content="Ctrl+O: Open | Ctrl+Shift+S: Save Copy | Ctrl+E: Export XML | Ctrl+F: Find | F1: Shortcuts",
-            parent=self,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=6000
-        )
+        """Opens Preferences window directly to the Keyboard Navigation & Shortcuts reference tab."""
+        self.open_settings(initial_tab=5)
 
     def closeEvent(self, event):
+        if hasattr(self, 'tray_icon') and self.tray_icon:
+            try:
+                self.tray_icon.hide()
+            except Exception:
+                pass
         if hasattr(self, 'pref_window') and self.pref_window:
             self.pref_window.close()
         if hasattr(self, 'about_window') and self.about_window:
@@ -793,8 +997,23 @@ class MainWindow(FluentWindow):
         if hasattr(self, 'vault_window') and self.vault_window:
             self.vault_window.close()
         if hasattr(self, 'workspace_view') and self.workspace_view:
+            if hasattr(self.workspace_view, 'trimmer_window') and self.workspace_view.trimmer_window:
+                try:
+                    self.workspace_view.trimmer_window.destroy_window()
+                except Exception:
+                    pass
             if hasattr(self.workspace_view, 'notes_drawer') and self.workspace_view.notes_drawer:
                 self.workspace_view.notes_drawer.close()
             if hasattr(self.workspace_view, 'links_drawer') and self.workspace_view.links_drawer:
                 self.workspace_view.links_drawer.close()
+            if hasattr(self.workspace_view, 'mcp_ipc_server') and self.workspace_view.mcp_ipc_server:
+                try:
+                    self.workspace_view.mcp_ipc_server.stop()
+                except Exception:
+                    pass
+        try:
+            from ..core.waveform_engine import waveform_precache_manager
+            waveform_precache_manager.cancel_all()
+        except Exception:
+            pass
         super().closeEvent(event)

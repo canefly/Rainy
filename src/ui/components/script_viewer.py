@@ -2,7 +2,7 @@ import os
 import re
 import copy
 from typing import List, Dict, Any, Optional
-from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QTimer, QElapsedTimer, QRect, QRectF, QSizeF, QPoint, QPointF, QEvent
+from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QTimer, QElapsedTimer, QRect, QRectF, QSizeF, QPoint, QPointF, QEvent, QPropertyAnimation
 from PySide6.QtGui import (
     QDrag, QPixmap, QCursor, QColor, QPainter, QPen,
     QTextCursor, QTextFormat, QTextCharFormat, QTextBlockFormat,
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTextBrowser, QTextEdit, QAbstractScrollArea, QMenu, QApplication, QColorDialog
 )
-from qfluentwidgets import Slider, ComboBox, SmoothScrollDelegate
+from qfluentwidgets import Slider, ComboBox, SmoothScrollDelegate, SmoothScrollBar
 from ..theme import ThemeManager
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller, get_display_frame_interval_ms, safe_copy_to_clipboard
 from .link_embed_card import link_embed_controller
@@ -78,10 +78,82 @@ class DraggableImageLabel(QLabel):
 
 
 class ScriptSmoothScrollDelegate(SmoothScrollDelegate):
-    """Custom smooth scroll delegate preserving Ctrl+Wheel zoom in Document Mode."""
+    """Custom smooth scroll delegate preserving Ctrl+Wheel zoom in Document Mode
+    and fixing the QFluentWidgets track-click desync teleportation bug.
+    """
+    def __init__(self, parent: QAbstractScrollArea, useAni=True):
+        super().__init__(parent, useAni=useAni)
+        self._patch_scroll_bar(self.vScrollBar)
+        self._patch_scroll_bar(self.hScrollBar)
+
+        # Synchronize if parent scrollbars move by programmatic jumps or direct value changes
+        if parent.verticalScrollBar():
+            parent.verticalScrollBar().valueChanged.connect(self._on_parent_v_scrolled)
+        if parent.horizontalScrollBar():
+            parent.horizontalScrollBar().valueChanged.connect(self._on_parent_h_scrolled)
+
+    def _patch_scroll_bar(self, bar):
+        if not bar:
+            return
+        orig_release = bar.mouseReleaseEvent
+
+        def patched_mouse_press(e):
+            if hasattr(bar, "ani"):
+                bar.ani.stop()
+            # Call ScrollBar base implementation
+            super(SmoothScrollBar, bar).mousePressEvent(e)
+            if hasattr(bar, "ani") and bar.ani.state() == QPropertyAnimation.Running:
+                target = bar.ani.endValue()
+                if target is not None and hasattr(bar, "resetValue"):
+                    bar.resetValue(int(target))
+            elif hasattr(bar, "resetValue"):
+                bar.resetValue(bar.value())
+
+        def patched_mouse_release(e):
+            orig_release(e)
+            if hasattr(bar, "ani") and bar.ani.state() == QPropertyAnimation.Running:
+                target = bar.ani.endValue()
+                if target is not None and hasattr(bar, "resetValue"):
+                    bar.resetValue(int(target))
+            elif hasattr(bar, "resetValue"):
+                bar.resetValue(bar.value())
+
+        bar.mousePressEvent = patched_mouse_press
+        bar.mouseReleaseEvent = patched_mouse_release
+        if hasattr(bar, "ani"):
+            bar.ani.finished.connect(lambda: bar.resetValue(bar.value()) if hasattr(bar, "resetValue") else None)
+
+    def _on_parent_v_scrolled(self, val):
+        if hasattr(self, "vScrollBar") and hasattr(self.vScrollBar, "resetValue"):
+            if not (hasattr(self.vScrollBar, "ani") and self.vScrollBar.ani.state() == QPropertyAnimation.Running):
+                self.vScrollBar.resetValue(val)
+
+    def _on_parent_h_scrolled(self, val):
+        if hasattr(self, "hScrollBar") and hasattr(self.hScrollBar, "resetValue"):
+            if not (hasattr(self.hScrollBar, "ani") and self.hScrollBar.ani.state() == QPropertyAnimation.Running):
+                self.hScrollBar.resetValue(val)
+
     def eventFilter(self, obj, e: QEvent):
-        if e.type() == QEvent.Type.Wheel and (e.modifiers() & Qt.ControlModifier):
-            return False
+        if e.type() == QEvent.Type.Wheel:
+            if e.modifiers() & Qt.ControlModifier:
+                return False
+            # Always ensure internal __value matches actual or target position before wheel scroll is applied
+            if hasattr(self, "vScrollBar") and hasattr(self.vScrollBar, "resetValue"):
+                if hasattr(self.vScrollBar, "ani") and self.vScrollBar.ani.state() == QPropertyAnimation.Running:
+                    target = self.vScrollBar.ani.endValue()
+                    if target is not None:
+                        self.vScrollBar.resetValue(int(target))
+                else:
+                    self.vScrollBar.resetValue(self.vScrollBar.value())
+
+            if hasattr(self, "hScrollBar") and hasattr(self.hScrollBar, "resetValue"):
+                if hasattr(self.hScrollBar, "ani") and self.hScrollBar.ani.state() == QPropertyAnimation.Running:
+                    target = self.hScrollBar.ani.endValue()
+                    if target is not None:
+                        self.hScrollBar.resetValue(int(target))
+                else:
+                    self.hScrollBar.resetValue(self.hScrollBar.value())
+
         return super().eventFilter(obj, e)
 
 
@@ -1450,11 +1522,22 @@ class ScriptViewer(QFrame):
 
         self._blocks = copy.deepcopy(getattr(doc_state, "blocks", []) or [])
         self._link_colors = dict(getattr(doc_state, "link_colors", {}) or {})
+        self._vo_block_diffs = dict(getattr(doc_state, "vo_block_diffs", {}) or {})
         geom = getattr(doc_state, "page_geometry", None)
         if geom:
             self._page_geometry = dict(geom)
         self._raw_html = getattr(doc_state, "raw_html", "")
         self._update_display()
+
+    def apply_vo_block_diffs(self, diffs: Dict[str, Dict[str, Any]], scroll_to_last_block: Optional[int] = None):
+        """Updates VO alignment diff overlays on script paragraphs and refreshes the viewer."""
+        if not hasattr(self, "_vo_block_diffs"):
+            self._vo_block_diffs = {}
+        for k, v in (diffs or {}).items():
+            self._vo_block_diffs[str(k)] = v
+        self._update_display()
+        if scroll_to_last_block is not None:
+            self.scroll_to_anchor(f"block-{scroll_to_last_block}")
 
     def resolve_link_for_anchor(self, anchor: str) -> str:
         """Resolves an external URL or timestamp anchor to its associated external link."""
@@ -1791,7 +1874,8 @@ class ScriptViewer(QFrame):
                     self._blocks,
                     self._link_colors,
                     light_paper=use_light_surface,
-                    view_mode=self.view_mode
+                    view_mode=self.view_mode,
+                    vo_block_diffs=None if self.is_edit_mode else getattr(self, "_vo_block_diffs", None),
                 )
             else:
                 inner_html = self._raw_html
@@ -1872,20 +1956,24 @@ class ScriptViewer(QFrame):
         cursor = self.browser.textCursor()
         selected_text = cursor.selectedText().strip().replace('\u2029', ' ')
 
+        from ..theme import ThemeManager
+        pal = ThemeManager.get_palette()
+        accent = pal.get("accent", "#38bdf8")
+
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
+        menu.setStyleSheet(f"""
+            QMenu {{
                 background-color: #1e1b1e;
                 color: #ffffff;
                 border: 1px solid #4c3d4c;
                 border-radius: 8px;
                 padding: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #fb7185;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent};
                 color: #ffffff;
                 border-radius: 4px;
-            }
+            }}
         """)
 
         action_copy = menu.addAction("Copy (Ctrl+C)" if selected_text else "Copy Script (Ctrl+C)")

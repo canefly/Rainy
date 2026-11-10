@@ -182,8 +182,8 @@ class LinkEmbedHoverCard(QFrame):
         is_dark = pal.get("is_dark", True)
         text_col = pal.get("text", "#ffffff")
         muted = pal.get("muted", "#94a3b8")
-        accent = pal.get("accent", "#fb7185")
-        rgb = pal.get("accent_rgb", "251, 113, 133")
+        accent = pal.get("accent", "#38bdf8")
+        rgb = pal.get("accent_rgb", "56, 189, 248")
         surface_hover = pal.get("surface_hover", "#27272a")
         border = pal.get("border", "#3f3f46")
 

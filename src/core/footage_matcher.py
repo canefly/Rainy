@@ -24,6 +24,11 @@ class FootageMatchItem:
     duration_display: str = ""
     resolution: str = ""
     frame_rate: Optional[float] = None
+    is_vfr: bool = False
+    is_interlaced: bool = False
+    field_order: str = "progressive"
+    video_codec: str = ""
+    audio_codec: str = ""
 
 
 def sanitize_stem(filename: str) -> str:
@@ -235,7 +240,12 @@ class FootageMatcher:
                         item.duration_display = probed.duration_display
                         item.resolution = probed.resolution
                         item.frame_rate = probed.frame_rate
-                        if not item.file_size_display and probed.file_size > 0:
+                        item.is_vfr = probed.is_vfr
+                        item.is_interlaced = probed.is_interlaced
+                        item.field_order = probed.field_order or "progressive"
+                        item.video_codec = probed.video_codec or ""
+                        item.audio_codec = probed.audio_codec or ""
+                        if probed.file_size > 0:
                             item.file_size_bytes = probed.file_size
                             item.file_size_display = format_bytes_display(probed.file_size)
                 except Exception:
@@ -269,6 +279,12 @@ class FootageScanWorker(QRunnable):
             matcher = FootageMatcher(self.footage_dir)
             matcher.scan_directory()
             results = matcher.match_links(self.links, self.manual_overrides)
-            self.signals.finished.emit(results)
+            try:
+                self.signals.finished.emit(results)
+            except RuntimeError:
+                pass
         except Exception as e:
-            self.signals.error.emit(str(e))
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                pass

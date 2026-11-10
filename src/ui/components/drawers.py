@@ -12,7 +12,6 @@ from qfluentwidgets import (
     FluentTitleBar, MessageBoxBase, PushButton, PrimaryPushButton, ToolButton, FluentIcon, 
     IconWidget, LineEdit, CheckBox, ProgressBar, SmoothScrollArea, ComboBox
 )
-from qfluentwidgets.components.widgets.menu import MenuAnimationType
 from .widgets import MiddleClickAutoScroller, safe_copy_to_clipboard, CompactCheckBox, StatusDot
 from .titlebar import CaptionPinButton
 from .link_embed_card import link_embed_controller
@@ -384,13 +383,6 @@ class NotesDrawer(DrawerFrame):
         toolbar.setSpacing(8)
 
         self.filter_combo = ComboBox(self.widget)
-        orig_create_menu = self.filter_combo._createComboMenu
-        def _fast_menu():
-            menu = orig_create_menu()
-            orig_exec = menu.exec
-            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(pos, ani=False, aniType=MenuAnimationType.NONE)
-            return menu
-        self.filter_combo._createComboMenu = _fast_menu
         self.filter_combo.addItems(["All", "Done", "Pending"])
         self.filter_combo.setCurrentIndex(0)
         self.filter_combo.setFixedWidth(112)
@@ -816,13 +808,6 @@ class LinksDrawer(DrawerFrame):
         toolbar.setSpacing(8)
 
         self.filter_combo = ComboBox(self.widget)
-        orig_create_menu = self.filter_combo._createComboMenu
-        def _fast_menu():
-            menu = orig_create_menu()
-            orig_exec = menu.exec
-            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(pos, ani=False, aniType=MenuAnimationType.NONE)
-            return menu
-        self.filter_combo._createComboMenu = _fast_menu
         self.filter_combo.addItems(["All", "Done", "Pending"])
         self.filter_combo.setCurrentIndex(0)
         self.filter_combo.setFixedWidth(112)
@@ -1130,12 +1115,15 @@ class LinksDrawer(DrawerFrame):
                 if probed and probed.is_vfr:
                     vfr_badge = QLabel("VFR", card)
                     vfr_badge.setFixedHeight(18)
-                    vfr_badge.setToolTip(f"Variable Frame Rate ({probed.frame_rate} FPS avg)\nTimecode may drift in Premiere without CFR transcode.")
+                    vfr_badge.setToolTip(
+                        f"Variable Frame Rate ({probed.frame_rate:.2f} FPS avg)\n"
+                        "Audio/video timecode will drift in Premiere Pro without CFR transcode or PTS compensation."
+                    )
                     vfr_badge.setStyleSheet("""
                         QLabel {
                             background-color: rgba(245, 158, 11, 0.16);
                             color: #fbbf24;
-                            border: 1px solid rgba(245, 158, 11, 0.38);
+                            border: 1px solid rgba(245, 158, 11, 0.42);
                             border-radius: 4px;
                             font-size: 9px;
                             font-weight: 700;
@@ -1144,6 +1132,26 @@ class LinksDrawer(DrawerFrame):
                         }
                     """)
                     c_layout.addWidget(vfr_badge, 0, Qt.AlignVCenter)
+                elif probed and probed.frame_rate > 0:
+                    cfr_badge = QLabel("CFR", card)
+                    cfr_badge.setFixedHeight(18)
+                    cfr_badge.setToolTip(
+                        f"Constant Frame Rate ({probed.frame_rate:.3f} FPS)\n"
+                        "Standard broadcast framerate. Clean 1:1 timecode alignment in Premiere Pro."
+                    )
+                    cfr_badge.setStyleSheet("""
+                        QLabel {
+                            background-color: rgba(56, 189, 248, 0.12);
+                            color: #38bdf8;
+                            border: 1px solid rgba(56, 189, 248, 0.32);
+                            border-radius: 4px;
+                            font-size: 9px;
+                            font-weight: 700;
+                            padding: 0px 5px;
+                            font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+                        }
+                    """)
+                    c_layout.addWidget(cfr_badge, 0, Qt.AlignVCenter)
 
             # Metadata stat badge (shows 1080p, 142 MB, or FETCHED status)
             stat_badge = QLabel(card)
@@ -1343,4 +1351,5 @@ class LinksDrawer(DrawerFrame):
 
 EditorNotesWindow = NotesDrawer
 SourceLinksWindow = LinksDrawer
+
 
