@@ -18,6 +18,19 @@ def qapp():
         app = QApplication(sys.argv)
     yield app
 
+@pytest.fixture(autouse=True)
+def preserve_user_theme():
+    """Captures and guarantees restoration of the user's active theme setting."""
+    from src.ui.theme import ThemeManager, ThemeVariant
+    orig_variant_str = db.get_setting("theme_variant", "blue")
+    orig_variant = ThemeManager.current_variant
+    yield
+    db.set_setting("theme_variant", orig_variant_str)
+    try:
+        ThemeManager.current_variant = ThemeVariant(orig_variant_str)
+    except Exception:
+        ThemeManager.current_variant = orig_variant
+
 def test_mainwindow_initialization(qapp):
     window = MainWindow()
     assert window is not None

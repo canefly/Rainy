@@ -62,8 +62,8 @@ def init_logging(level: int = logging.INFO) -> None:
     except Exception as e:
         sys.stderr.write(f"Failed to initialize rotating file logger at {log_path}: {e}\n")
 
-    # 2. Console Handler (for dev terminal)
-    _console_handler = logging.StreamHandler(sys.stdout)
+    # 2. Console Handler (for dev terminal and safe MCP stdio operation)
+    _console_handler = logging.StreamHandler(sys.stderr)
     _console_handler.setFormatter(formatter)
     _console_handler.setLevel(level)
     root_logger.addHandler(_console_handler)

@@ -36,14 +36,17 @@ def test_settings_window_initialization(qapp):
     assert win.user_profile.sub_lbl.text() == "canefly@outlook.ph"
 
     # Nav list & categories
-    assert win.nav_list.count() == 7
+    assert win.nav_list.count() == 10
     categories = [win._categories[i][0] for i in range(win.nav_list.count())]
     assert "Home" in categories
     assert "Data Vault" in categories
+    assert "Media & Transcoding" in categories
+    assert "Core Engines" in categories
     assert "Personalization" in categories
     assert "Shortcuts" in categories
     assert "Copyright Helper" in categories
     assert "Cookies & Accounts" in categories
+    assert "AI & MCP" in categories
     assert "About & Updates" in categories
 
     win.close()
@@ -59,25 +62,37 @@ def test_settings_tab_switching_and_routing(qapp):
     assert win.nav_list.currentRow() == 1
     assert win.stack.currentIndex() == 1
 
-    win.switch_tab("appearance")
+    win.switch_tab("transcode")
     assert win.nav_list.currentRow() == 2
     assert win.stack.currentIndex() == 2
 
-    win.switch_tab("shortcuts")
+    win.switch_tab("engine")
     assert win.nav_list.currentRow() == 3
     assert win.stack.currentIndex() == 3
 
-    win.switch_tab("copyright")
+    win.switch_tab("appearance")
     assert win.nav_list.currentRow() == 4
     assert win.stack.currentIndex() == 4
 
-    win.switch_tab("cookies")
+    win.switch_tab("shortcuts")
     assert win.nav_list.currentRow() == 5
     assert win.stack.currentIndex() == 5
 
-    win.switch_tab("about")
+    win.switch_tab("copyright")
     assert win.nav_list.currentRow() == 6
     assert win.stack.currentIndex() == 6
+
+    win.switch_tab("cookies")
+    assert win.nav_list.currentRow() == 7
+    assert win.stack.currentIndex() == 7
+
+    win.switch_tab("ai")
+    assert win.nav_list.currentRow() == 8
+    assert win.stack.currentIndex() == 8
+
+    win.switch_tab("about")
+    assert win.nav_list.currentRow() == 9
+    assert win.stack.currentIndex() == 9
 
     win.switch_tab("home")
     assert win.nav_list.currentRow() == 0
@@ -85,13 +100,13 @@ def test_settings_tab_switching_and_routing(qapp):
 
     # Search bar routing
     win.search_box.setText("dark")
-    assert win.nav_list.currentRow() == 2  # Personalization
+    assert win.nav_list.currentRow() == 4  # Personalization
 
     win.search_box.setText("cookie")
-    assert win.nav_list.currentRow() == 5  # Cookies
+    assert win.nav_list.currentRow() == 7  # Cookies
 
-    win.search_box.setText("ffmpeg")
-    assert win.nav_list.currentRow() == 1  # Vault
+    win.search_box.setText("mpv")
+    assert win.nav_list.currentRow() == 3  # Core Engines
 
     win.close()
 
@@ -191,4 +206,29 @@ def test_settings_search_box_centering_and_neutral_gray_surfaces(qapp):
     assert len(cards) >= 3
 
     win.close()
+
+
+def test_settings_prewarm_and_instant_open(qapp):
+    import time
+    from src.ui.window import MainWindow
+    main_win = MainWindow()
+    qapp.processEvents()
+
+    # Pre-warm services during idle
+    main_win._idle_prewarm_services()
+    assert main_win.pref_window is not None
+
+    # Measure opening time when pre-warmed
+    t0 = time.perf_counter()
+    main_win.open_settings(initial_tab=0)
+    t1 = time.perf_counter()
+    open_ms = (t1 - t0) * 1000
+
+    assert main_win.pref_window.isVisible() is True
+    # Pre-warmed open must be fast (under 350ms, down from 7000ms cold probe)
+    assert open_ms < 350.0, f"Expected <350ms, got {open_ms:.1f}ms"
+
+    main_win.pref_window.close()
+    main_win.close()
+
 

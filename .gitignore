@@ -33,9 +33,13 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Native binary sidecars (packaged separately from git)
-bin/*.exe
-bin/*.dll
+# Native binary sidecars & downloaded engines (packaged separately, zero license/repo pollution)
+bin/*
+!bin/.gitkeep
+*.7z
+*.zip
+*.tar.*
+_temp_*
 
 # Nuitka & PyInstaller compilation artifacts
 *.build/

@@ -1,13 +1,14 @@
 import os
 import webbrowser
 from typing import Optional
-from PySide6.QtCore import Qt, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QThreadPool
 from PySide6.QtGui import QCursor, QColor, QIcon, QPainter, QLinearGradient, QFont
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
     QFrame, QStackedWidget, QListWidget, QListWidgetItem,
     QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QRadioButton, QButtonGroup, QAbstractItemView, QFileDialog, QTextEdit
+    QRadioButton, QButtonGroup, QAbstractItemView, QFileDialog, QTextEdit, QProgressBar,
+    QSizePolicy
 )
 from qframelesswindow import FramelessWindow, StandardTitleBar
 from qfluentwidgets import (
@@ -15,7 +16,6 @@ from qfluentwidgets import (
     FluentIcon, IconWidget, MessageBox, Dialog, Slider, Theme as FluentTheme,
     MessageBoxBase, SearchLineEdit, InfoBar, InfoBarPosition, SmoothScrollArea
 )
-from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
 from ..theme import ThemeManager, ThemeVariant
 from .widgets import MagneticDetentSlider, safe_copy_to_clipboard
@@ -27,6 +27,14 @@ from ...core.logger import (
     read_recent_logs, clear_logs, export_diagnostics_bundle, set_log_level
 )
 from ...core.media_probe import get_ffprobe_status
+from ...core.ffmpeg_encoder import (
+    get_ffmpeg_path,
+    get_ffmpeg_status,
+    detect_available_encoders,
+    get_recommended_encoder,
+    get_hardware_status_summary,
+    get_encoder_catalog,
+)
 
 
 def _set_qss_if_changed(widget: QWidget, qss: str):
@@ -187,6 +195,10 @@ class HomeHeroCard(PrefCardFrame):
             f"font-size: 11.5px; font-weight: 600; color: {stat_col};"
         )
         col.addWidget(self.status_lbl)
+
+        for lbl in (self.title_lbl, self.sub_lbl, self.status_lbl):
+            lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            lbl.setMinimumWidth(0)
 
         layout.addLayout(col, 1)
 
@@ -368,8 +380,19 @@ class PreferencesWindow(FramelessWindow):
         self.setObjectName("PreferencesDialog")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         self.setWindowTitle("Preferences — Rainy Tools")
-        self.resize(1000, 700)
-        self.setMinimumSize(860, 580)
+
+        # Responsive spawn dimensions with SQLite persistence
+        saved_w = db.get_setting("pref_window_width")
+        saved_h = db.get_setting("pref_window_height")
+        try:
+            w = int(saved_w) if saved_w else 1180
+            h = int(saved_h) if saved_h else 700
+        except (ValueError, TypeError):
+            w, h = 1180, 700
+        w = max(1120, min(1920, w))
+        h = max(640, min(1080, h))
+        self.resize(w, h)
+        self.setMinimumSize(1000, 580)
 
         # Set Window Icon
         logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "logo.png"))
@@ -420,10 +443,13 @@ class PreferencesWindow(FramelessWindow):
         self._categories = [
             ("Home", FluentIcon.HOME),
             ("Data Vault", FluentIcon.FOLDER),
+            ("Media & Transcoding", FluentIcon.MOVIE),
+            ("Core Engines", FluentIcon.DEVELOPER_TOOLS),
             ("Personalization", FluentIcon.PALETTE),
             ("Shortcuts", FluentIcon.COMMAND_PROMPT),
             ("Copyright Helper", FluentIcon.VIDEO),
             ("Cookies & Accounts", FluentIcon.GLOBE),
+            ("AI & MCP", FluentIcon.ROBOT),
             ("About & Updates", FluentIcon.INFO),
         ]
 
@@ -446,10 +472,13 @@ class PreferencesWindow(FramelessWindow):
         self.stack = QStackedWidget(self.content_frame)
         self.stack.addWidget(self._wrap_in_scroll(self._build_home_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_vault_tab()))
+        self.stack.addWidget(self._wrap_in_scroll(self._build_transcode_tab()))
+        self.stack.addWidget(self._wrap_in_scroll(self._build_core_engines_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_appearance_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_shortcuts_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_copyright_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_cookies_tab()))
+        self.stack.addWidget(self._wrap_in_scroll(self._build_ai_mcp_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_about_tab()))
 
         c_layout.addWidget(self.stack)
@@ -480,21 +509,37 @@ class PreferencesWindow(FramelessWindow):
             "vault": 1,
             "storage": 1,
             "system": 1,
-            "appearance": 2,
-            "personalization": 2,
-            "theme": 2,
-            "themes": 2,
-            "shortcuts": 3,
-            "keys": 3,
-            "keyboard": 3,
-            "copyright": 4,
-            "helper": 4,
-            "cookies": 5,
-            "auth": 5,
-            "accounts": 5,
-            "about": 6,
-            "updates": 6,
-            "license": 6,
+            "transcode": 2,
+            "transcoding": 2,
+            "media": 2,
+            "footage": 2,
+            "encoder": 2,
+            "ffmpeg": 2,
+            "engine": 3,
+            "engines": 3,
+            "core_engines": 3,
+            "libmpv": 3,
+            "mpv": 3,
+            "binaries": 3,
+            "bin": 3,
+            "appearance": 4,
+            "personalization": 4,
+            "theme": 4,
+            "themes": 4,
+            "shortcuts": 5,
+            "keys": 5,
+            "keyboard": 5,
+            "copyright": 6,
+            "helper": 6,
+            "cookies": 7,
+            "auth": 7,
+            "accounts": 7,
+            "ai": 8,
+            "mcp": 8,
+            "whisper": 8,
+            "about": 9,
+            "updates": 9,
+            "license": 9,
         }
         if isinstance(key_or_index, str):
             target = tab_map.get(key_or_index.lower().strip(), 0)
@@ -514,12 +559,15 @@ class PreferencesWindow(FramelessWindow):
 
         routes = [
             (["home", "quick", "recommended"], 0),
-            (["vault", "storage", "memory", "project", ".rainyproj", "stats", "telemetry", "log", "diagnostics", "ffmpeg", "probe", "ffprobe", "script", "scripts"], 1),
-            (["personalization", "appearance", "theme", "palette", "femboy", "pink", "blue", "green", "gray", "dark", "mode", "orb", "glow", "glass", "mica", "transparency", "dwm"], 2),
-            (["shortcut", "shortcuts", "keyboard", "key", "timecode", "double click", "space", "meta", "drag"], 3),
-            (["copyright", "helper", "broadcast", "pts", "smpte", "strike", "demonetization", "license", "licensing", "audio-visual"], 4),
-            (["cookie", "cookies", "auth", "session", "firefox", "profile", "cookies.txt", "netscape", "paste", "restricted", "drive", "youtube"], 5),
-            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 6),
+            (["vault", "storage", "memory", "project", ".rainyproj", "stats", "telemetry", "log", "diagnostics", "probe", "ffprobe", "script", "scripts"], 1),
+            (["media", "transcode", "transcoding", "encoder", "nvenc", "vfr", "cfr", "compress", "compression", "bodycam", "interrogation", "framerate", "crf", "interlace", "interlaced", "deinterlace", "decomb", "bwdif", "yadif"], 2),
+            (["engine", "engines", "libmpv", "mpv", "ffmpeg", "binaries", "binary", "dependencies", "shinchiro", "btbn", "download engine"], 3),
+            (["personalization", "appearance", "theme", "palette", "femboy", "pink", "blue", "green", "gray", "dark", "mode", "orb", "glow", "glass", "mica", "transparency", "dwm"], 4),
+            (["shortcut", "shortcuts", "keyboard", "key", "timecode", "double click", "space", "meta", "drag"], 5),
+            (["copyright", "helper", "broadcast", "pts", "smpte", "strike", "demonetization", "license", "licensing", "audio-visual"], 6),
+            (["cookie", "cookies", "auth", "session", "firefox", "profile", "cookies.txt", "netscape", "paste", "restricted", "drive", "youtube"], 7),
+            (["ai", "mcp", "whisper", "faster-whisper", "model", "models", "voiceover", "vo", "transcribe", "antigravity", "cuda"], 8),
+            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 9),
         ]
 
         for keywords, tab_idx in routes:
@@ -622,14 +670,23 @@ class PreferencesWindow(FramelessWindow):
         hero_row.addWidget(self.hero_vault, 1)
 
         is_avail, ver_label, _ = get_ffprobe_status()
+        ver_display = ver_label
+        if "version" in ver_label:
+            try:
+                parts = ver_label.split("version")
+                v_num = parts[1].strip().split("-")[0].strip().split(" ")[0].strip()
+                ver_display = f"ffprobe v{v_num}"
+            except Exception:
+                ver_display = "ffprobe active"
         self.hero_engine = HomeHeroCard(
             FluentIcon.SYNC,
             "Media Engine",
-            ver_label,
+            ver_display,
             "Engine Ready" if is_avail else "Fallback Mode",
             is_accent=False,
             parent=widget
         )
+        self.hero_engine.setToolTip(ver_label)
         hero_row.addWidget(self.hero_engine, 1)
 
         layout.addLayout(hero_row)
@@ -668,12 +725,16 @@ class PreferencesWindow(FramelessWindow):
         r1_title.setObjectName("PrefSectionTitle")
         self.r1_sub = QLabel(f"Current preset: {ThemeManager.current_variant.value.title()}")
         self.r1_sub.setObjectName("PrefCaption")
+        self.r1_sub.setWordWrap(True)
+        self.r1_sub.setMinimumWidth(0)
         r1_col.addWidget(r1_title)
         r1_col.addWidget(self.r1_sub)
         r1.addLayout(r1_col, 1)
 
         pal_btn = PushButton("Personalize", rec_card)
         pal_btn.setFixedHeight(32)
+        pal_btn.setMinimumWidth(115)
+        pal_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         pal_btn.setIcon(FluentIcon.CHEVRON_RIGHT)
         pal_btn.clicked.connect(lambda: self.switch_tab("appearance"))
         r1.addWidget(pal_btn, 0, Qt.AlignVCenter)
@@ -699,12 +760,15 @@ class PreferencesWindow(FramelessWindow):
         r2_title.setObjectName("PrefSectionTitle")
         r2_sub = QLabel("Use low-glare dark surfaces optimized for video editing environments")
         r2_sub.setObjectName("PrefCaption")
+        r2_sub.setWordWrap(True)
+        r2_sub.setMinimumWidth(0)
         r2_col.addWidget(r2_title)
         r2_col.addWidget(r2_sub)
         r2.addLayout(r2_col, 1)
 
         self.home_dark_switch = SwitchButton(rec_card)
         self.home_dark_switch.setChecked(ThemeManager.is_dark)
+        self.home_dark_switch.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.home_dark_switch.checkedChanged.connect(self._on_dark_mode_changed)
         r2.addWidget(self.home_dark_switch, 0, Qt.AlignVCenter)
         rc_layout.addLayout(r2)
@@ -729,12 +793,16 @@ class PreferencesWindow(FramelessWindow):
         r3_title.setObjectName("PrefSectionTitle")
         r3_sub = QLabel("Silently records atomic project saves, SQLite transactions, and system events")
         r3_sub.setObjectName("PrefCaption")
+        r3_sub.setWordWrap(True)
+        r3_sub.setMinimumWidth(0)
         r3_col.addWidget(r3_title)
         r3_col.addWidget(r3_sub)
         r3.addLayout(r3_col, 1)
 
         log_btn = PushButton("View Live Log...", rec_card)
         log_btn.setFixedHeight(32)
+        log_btn.setMinimumWidth(135)
+        log_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         log_btn.setIcon(FluentIcon.DOCUMENT)
         log_btn.clicked.connect(self._view_live_log_clicked)
         r3.addWidget(log_btn, 0, Qt.AlignVCenter)
@@ -760,12 +828,16 @@ class PreferencesWindow(FramelessWindow):
         r4_title.setObjectName("PrefSectionTitle")
         r4_sub = QLabel("Authenticate private Google Drive folders and restricted media links locally")
         r4_sub.setObjectName("PrefCaption")
+        r4_sub.setWordWrap(True)
+        r4_sub.setMinimumWidth(0)
         r4_col.addWidget(r4_title)
         r4_col.addWidget(r4_sub)
         r4.addLayout(r4_col, 1)
 
         cookie_btn = PushButton("Configure", rec_card)
         cookie_btn.setFixedHeight(32)
+        cookie_btn.setMinimumWidth(110)
+        cookie_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         cookie_btn.setIcon(FluentIcon.CHEVRON_RIGHT)
         cookie_btn.clicked.connect(lambda: self.switch_tab("cookies"))
         r4.addWidget(cookie_btn, 0, Qt.AlignVCenter)
@@ -783,6 +855,8 @@ class PreferencesWindow(FramelessWindow):
         tc_sub = QLabel("Eliminate Google Drive player drift and container start_time offsets for Premiere Pro")
         tc_sub.setObjectName("PrefTabSubtitle")
         tc_sub.setStyleSheet("font-size: 13px;")
+        tc_sub.setWordWrap(True)
+        tc_sub.setMinimumWidth(0)
         tc_header.addWidget(tc_title)
         tc_header.addWidget(tc_sub)
         layout.addLayout(tc_header)
@@ -806,6 +880,8 @@ class PreferencesWindow(FramelessWindow):
         tc1_title.setObjectName("PrefSectionTitle")
         tc1_sub = QLabel("Converts Google Drive PTS to exact frames (HH:MM:SS:FF) and compensates audio multiplex delay on copy")
         tc1_sub.setObjectName("PrefCaption")
+        tc1_sub.setWordWrap(True)
+        tc1_sub.setMinimumWidth(0)
         tc1_col.addWidget(tc1_title)
         tc1_col.addWidget(tc1_sub)
         tc1.addLayout(tc1_col, 1)
@@ -813,6 +889,7 @@ class PreferencesWindow(FramelessWindow):
         self.smpte_switch = SwitchButton(tc_card)
         is_auto = db.get_setting("auto_conform_smpte", "true").lower() == "true"
         self.smpte_switch.setChecked(is_auto)
+        self.smpte_switch.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.smpte_switch.checkedChanged.connect(self._on_smpte_toggle_changed)
         tc1.addWidget(self.smpte_switch, 0, Qt.AlignVCenter)
         tcc_layout.addLayout(tc1)
@@ -837,6 +914,8 @@ class PreferencesWindow(FramelessWindow):
         tc2_title.setObjectName("PrefSectionTitle")
         tc2_sub = QLabel("Sequence timebase for Premiere Pro XML sequence export (Ctrl+E) when media is unlinked")
         tc2_sub.setObjectName("PrefCaption")
+        tc2_sub.setWordWrap(True)
+        tc2_sub.setMinimumWidth(0)
         tc2_col.addWidget(tc2_title)
         tc2_col.addWidget(tc2_sub)
         tc2.addLayout(tc2_col, 1)
@@ -1350,10 +1429,17 @@ class PreferencesWindow(FramelessWindow):
     def moveEvent(self, e):
         super().moveEvent(e)
 
+    def _save_window_geometry(self):
+        if not self.isMaximized() and not self.isMinimized() and self.isVisible():
+            if self.width() >= 1000 and self.height() >= 580:
+                db.set_setting("pref_window_width", str(self.width()))
+                db.set_setting("pref_window_height", str(self.height()))
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if hasattr(self, "titleBar") and hasattr(self.titleBar, "_update_search_box_geometry"):
             self.titleBar._update_search_box_geometry()
+        self._save_window_geometry()
 
     def _apply_caption_button_theme(self):
         tb = getattr(self, "titleBar", None)
@@ -1958,7 +2044,637 @@ class PreferencesWindow(FramelessWindow):
             duration=2500
         )
 
-    # --- 3. Keyboard Shortcuts Tab ---
+    # --- Media & Transcoding Tab ---
+    def _build_transcode_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        is_avail, ver_label, bin_path = get_ffmpeg_status()
+        badge_txt = "FFmpeg Ready" if is_avail else "FFmpeg Missing"
+        layout.addLayout(self._create_tab_header(
+            "Media & Transcoding",
+            "High-throughput FFmpeg re-encoder for VFR sync correction and bodycam footage compression.",
+            badge_text=badge_txt
+        ))
+
+        # Card 1: Engine Status & Hardware Probes
+        engine_card = PrefCardFrame(widget)
+        ec_layout = QVBoxLayout(engine_card)
+        ec_layout.setContentsMargins(16, 12, 16, 12)
+        ec_layout.setSpacing(10)
+
+        r_eng = QHBoxLayout()
+        r_eng.setSpacing(12)
+        eng_icon = IconWidget(FluentIcon.MOVIE, engine_card)
+        eng_icon.setFixedSize(20, 20)
+        r_eng.addWidget(eng_icon, 0, Qt.AlignVCenter)
+
+        ec_col = QVBoxLayout()
+        ec_col.setSpacing(2)
+        ec_title = QLabel("FFmpeg Transcode Engine")
+        ec_title.setObjectName("PrefSectionTitle")
+        ec_sub = QLabel(f"Version: {ver_label}\nBinary: {bin_path or 'Not installed on system PATH'}")
+        ec_sub.setObjectName("PrefCaption")
+        ec_col.addWidget(ec_title)
+        ec_col.addWidget(ec_sub)
+        r_eng.addLayout(ec_col, 1)
+
+        # Hardware Probe Pill
+        status_headline, best_enc = get_hardware_status_summary()
+        hw_pill = QLabel(f"Hardware: {status_headline}")
+        is_dark = ThemeManager.is_dark
+        badge_bg = "rgba(96, 205, 255, 0.15)" if is_dark else "rgba(0, 120, 212, 0.12)"
+        badge_fg = "#60cdff" if is_dark else "#0078d4"
+        badge_bd = "rgba(96, 205, 255, 0.35)" if is_dark else "rgba(0, 120, 212, 0.25)"
+        hw_pill.setStyleSheet(f"""
+            background-color: {badge_bg};
+            color: {badge_fg};
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid {badge_bd};
+        """)
+        r_eng.addWidget(hw_pill, 0, Qt.AlignVCenter)
+        ec_layout.addLayout(r_eng)
+        layout.addWidget(engine_card)
+
+        # Card 2: Global Transcode & Compression Defaults
+        rules_card = PrefCardFrame(widget)
+        rc_layout = QVBoxLayout(rules_card)
+        rc_layout.setContentsMargins(16, 10, 16, 10)
+        rc_layout.setSpacing(8)
+
+        # Row 1: Hardware Video Encoder
+        row1 = QHBoxLayout()
+        row1.setSpacing(12)
+        ic1 = IconWidget(FluentIcon.DEVELOPER_TOOLS, rules_card)
+        ic1.setFixedSize(20, 20)
+        row1.addWidget(ic1, 0, Qt.AlignVCenter)
+        col1 = QVBoxLayout()
+        col1.setSpacing(1)
+        t1 = QLabel("Default Video Encoder")
+        t1.setObjectName("PrefSectionTitle")
+        s1 = QLabel("Hardware-accelerated codec used for high-speed rendering and timeline optimization")
+        s1.setObjectName("PrefCaption")
+        col1.addWidget(t1)
+        col1.addWidget(s1)
+        row1.addLayout(col1, 1)
+
+        self.enc_combo = ComboBox(rules_card)
+        best_display = {
+            "h264_nvenc": "NVIDIA NVENC H.264",
+            "hevc_nvenc": "NVIDIA NVENC HEVC",
+            "h264_amf": "AMD AMF H.264",
+            "hevc_amf": "AMD AMF HEVC",
+            "h264_qsv": "Intel QuickSync",
+            "libx264": "CPU Software",
+        }.get(best_enc, "CPU Software")
+
+        self.enc_combo.addItem(f"Auto-Detect Hardware ({best_display})", userData="auto")
+        for enc_id, name, is_avail, req in get_encoder_catalog():
+            tag = "Ready" if is_avail else req
+            self.enc_combo.addItem(f"{name} [{tag}]", userData=enc_id)
+
+        cur_enc = db.get_setting("transcode_encoder", "auto")
+        idx = self.enc_combo.findData(cur_enc)
+        if idx >= 0:
+            self.enc_combo.setCurrentIndex(idx)
+        self.enc_combo.currentIndexChanged.connect(self._on_transcode_encoder_changed)
+        self.enc_combo.setFixedWidth(300)
+        self.enc_combo.setFixedHeight(32)
+        row1.addWidget(self.enc_combo, 0, Qt.AlignVCenter)
+        rc_layout.addLayout(row1)
+
+        # Divider
+        d1 = QFrame(rules_card)
+        d1.setFixedHeight(1)
+        d1.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
+        rc_layout.addWidget(d1)
+
+        # Row 2: Default Quality & Compression Preset
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        ic2 = IconWidget(FluentIcon.TILES, rules_card)
+        ic2.setFixedSize(20, 20)
+        row2.addWidget(ic2, 0, Qt.AlignVCenter)
+        col2 = QVBoxLayout()
+        col2.setSpacing(1)
+        t2 = QLabel("Default Quality & Compression")
+        t2.setObjectName("PrefSectionTitle")
+        s2 = QLabel("Balancing visual fidelity against disk storage for bodycams and interrogation clips")
+        s2.setObjectName("PrefCaption")
+        col2.addWidget(t2)
+        col2.addWidget(s2)
+        row2.addLayout(col2, 1)
+
+        self.crf_combo = ComboBox(rules_card)
+        self.crf_combo.addItem("Near-Lossless (CRF 18) - Mobile & OBS VFR Fix", userData="18")
+        self.crf_combo.addItem("High Quality (CRF 20)", userData="20")
+        self.crf_combo.addItem("Footage Compressor (CRF 23) - Bodycams & Interrogations", userData="23")
+        self.crf_combo.addItem("Aggressive Compression (CRF 26)", userData="26")
+        self.crf_combo.addItem("Archival Master (CRF 14)", userData="14")
+
+        cur_crf = db.get_setting("transcode_crf", "18")
+        idx_crf = self.crf_combo.findData(cur_crf)
+        if idx_crf >= 0:
+            self.crf_combo.setCurrentIndex(idx_crf)
+        self.crf_combo.currentIndexChanged.connect(self._on_transcode_crf_changed)
+        self.crf_combo.setFixedWidth(240)
+        self.crf_combo.setFixedHeight(32)
+        row2.addWidget(self.crf_combo, 0, Qt.AlignVCenter)
+        rc_layout.addLayout(row2)
+
+        # Divider
+        d2 = QFrame(rules_card)
+        d2.setFixedHeight(1)
+        d2.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
+        rc_layout.addWidget(d2)
+
+        # Row 3: Target Framerate Policy (Auto-Snap CFR)
+        row3 = QHBoxLayout()
+        row3.setSpacing(12)
+        ic3 = IconWidget(FluentIcon.SPEED_HIGH, rules_card)
+        ic3.setFixedSize(20, 20)
+        row3.addWidget(ic3, 0, Qt.AlignVCenter)
+        col3 = QVBoxLayout()
+        col3.setSpacing(1)
+        t3 = QLabel("Target Framerate Normalization")
+        t3.setObjectName("PrefSectionTitle")
+        s3 = QLabel("Standardized constant framerate (CFR) target to eliminate audio and video drift")
+        s3.setObjectName("PrefCaption")
+        col3.addWidget(t3)
+        col3.addWidget(s3)
+        row3.addLayout(col3, 1)
+
+        self.fps_transcode_combo = ComboBox(rules_card)
+        self.fps_transcode_combo.addItem("Auto-Snap to Standard CFR", userData="0.0")
+        self.fps_transcode_combo.addItem("Force 23.976 fps", userData="23.976")
+        self.fps_transcode_combo.addItem("Force 24.0 fps", userData="24.0")
+        self.fps_transcode_combo.addItem("Force 25.0 fps", userData="25.0")
+        self.fps_transcode_combo.addItem("Force 29.97 fps", userData="29.97")
+        self.fps_transcode_combo.addItem("Force 30.0 fps", userData="30.0")
+        self.fps_transcode_combo.addItem("Force 59.94 fps", userData="59.94")
+        self.fps_transcode_combo.addItem("Force 60.0 fps", userData="60.0")
+
+        cur_fps = db.get_setting("transcode_framerate", "0.0")
+        idx_fps = self.fps_transcode_combo.findData(cur_fps)
+        if idx_fps >= 0:
+            self.fps_transcode_combo.setCurrentIndex(idx_fps)
+        self.fps_transcode_combo.currentIndexChanged.connect(self._on_transcode_fps_changed)
+        self.fps_transcode_combo.setFixedWidth(240)
+        self.fps_transcode_combo.setFixedHeight(32)
+        row3.addWidget(self.fps_transcode_combo, 0, Qt.AlignVCenter)
+        rc_layout.addLayout(row3)
+
+        # Divider
+        d3 = QFrame(rules_card)
+        d3.setFixedHeight(1)
+        d3.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
+        rc_layout.addWidget(d3)
+
+        # Row 4: Max Resolution Limit
+        row4 = QHBoxLayout()
+        row4.setSpacing(12)
+        ic4 = IconWidget(FluentIcon.ZOOM_IN, rules_card)
+        ic4.setFixedSize(20, 20)
+        row4.addWidget(ic4, 0, Qt.AlignVCenter)
+        col4 = QVBoxLayout()
+        col4.setSpacing(1)
+        t4 = QLabel("Resolution Filter")
+        t4.setObjectName("PrefSectionTitle")
+        s4 = QLabel("Optionally downscale 4K/UHD bodycam clips to 1080p to prevent timeline memory thrashing")
+        s4.setObjectName("PrefCaption")
+        col4.addWidget(t4)
+        col4.addWidget(s4)
+        row4.addLayout(col4, 1)
+
+        self.res_combo = ComboBox(rules_card)
+        self.res_combo.addItem("Keep Original Resolution (100% Native)", userData="none")
+        self.res_combo.addItem("Downscale 4K/UHD to 1080p (FHD)", userData="1080")
+        self.res_combo.addItem("Downscale to 720p (HD Proxy)", userData="720")
+
+        cur_res = db.get_setting("transcode_max_height", "none")
+        idx_res = self.res_combo.findData(cur_res)
+        if idx_res >= 0:
+            self.res_combo.setCurrentIndex(idx_res)
+        self.res_combo.currentIndexChanged.connect(self._on_transcode_res_changed)
+        self.res_combo.setFixedWidth(240)
+        self.res_combo.setFixedHeight(32)
+        row4.addWidget(self.res_combo, 0, Qt.AlignVCenter)
+        rc_layout.addLayout(row4)
+
+        # Divider
+        d4 = QFrame(rules_card)
+        d4.setFixedHeight(1)
+        d4.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
+        rc_layout.addWidget(d4)
+
+        # Row 5: Deinterlace / Decomb Filter Policy
+        row5 = QHBoxLayout()
+        row5.setSpacing(12)
+        ic5 = IconWidget(FluentIcon.ALIGNMENT, rules_card)
+        ic5.setFixedSize(20, 20)
+        row5.addWidget(ic5, 0, Qt.AlignVCenter)
+        col5 = QVBoxLayout()
+        col5.setSpacing(1)
+        t5 = QLabel("Deinterlace & Decomb Filter")
+        t5.setObjectName("PrefSectionTitle")
+        s5 = QLabel("Eliminates horizontal combing lines on interlaced broadcast, dashcam, and legacy CCTV footage")
+        s5.setObjectName("PrefCaption")
+        col5.addWidget(t5)
+        col5.addWidget(s5)
+        row5.addLayout(col5, 1)
+
+        self.deint_combo = ComboBox(rules_card)
+        self.deint_combo.addItem("Auto-Decomb Interlaced Clips (bwdif)", userData="auto")
+        self.deint_combo.addItem("Force Deinterlace All (bwdif)", userData="bwdif")
+        self.deint_combo.addItem("Standard Deinterlace (yadif)", userData="yadif")
+        self.deint_combo.addItem("Disabled (Off)", userData="off")
+
+        cur_deint = db.get_setting("transcode_deinterlace", "auto")
+        idx_deint = self.deint_combo.findData(cur_deint)
+        if idx_deint >= 0:
+            self.deint_combo.setCurrentIndex(idx_deint)
+        self.deint_combo.currentIndexChanged.connect(self._on_transcode_deint_changed)
+        self.deint_combo.setFixedWidth(240)
+        self.deint_combo.setFixedHeight(32)
+        row5.addWidget(self.deint_combo, 0, Qt.AlignVCenter)
+        rc_layout.addLayout(row5)
+
+        layout.addWidget(rules_card)
+
+        # Card 3: Storage Safety & Audio Track Policies (Locked Directives)
+        safety_card = PrefCardFrame(widget)
+        sc_layout = QVBoxLayout(safety_card)
+        sc_layout.setContentsMargins(16, 10, 16, 10)
+        sc_layout.setSpacing(8)
+
+        # Row S1: Windows Recycle Bin
+        s_row1 = QHBoxLayout()
+        s_row1.setSpacing(12)
+        s_ic1 = IconWidget(FluentIcon.DELETE, safety_card)
+        s_ic1.setFixedSize(20, 20)
+        s_row1.addWidget(s_ic1, 0, Qt.AlignVCenter)
+        s_col1 = QVBoxLayout()
+        s_col1.setSpacing(1)
+        st1 = QLabel("File Replacement Safety")
+        st1.setObjectName("PrefSectionTitle")
+        ss1 = QLabel("Original files are moved to the Windows Recycle Bin before in-place swap for immediate recovery")
+        ss1.setObjectName("PrefCaption")
+        s_col1.addWidget(st1)
+        s_col1.addWidget(ss1)
+        s_row1.addLayout(s_col1, 1)
+
+        rb_pill = QLabel("Recycle Bin (Active)")
+        rb_pill.setStyleSheet(f"""
+            background-color: {badge_bg};
+            color: {badge_fg};
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid {badge_bd};
+        """)
+        s_row1.addWidget(rb_pill, 0, Qt.AlignVCenter)
+        sc_layout.addLayout(s_row1)
+
+        # Divider
+        sd1 = QFrame(safety_card)
+        sd1.setFixedHeight(1)
+        sd1.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
+        sc_layout.addWidget(sd1)
+
+        # Row S2: Lossless Audio Pass-Through
+        s_row2 = QHBoxLayout()
+        s_row2.setSpacing(12)
+        s_ic2 = IconWidget(FluentIcon.VOLUME, safety_card)
+        s_ic2.setFixedSize(20, 20)
+        s_row2.addWidget(s_ic2, 0, Qt.AlignVCenter)
+        s_col2 = QVBoxLayout()
+        s_col2.setSpacing(1)
+        st2 = QLabel("Audio Pass-Through Policy")
+        st2.setObjectName("PrefSectionTitle")
+        ss2 = QLabel("Strictly bit-for-bit stream copy (-c:a copy). Re-encoding is bypassed to eliminate desync")
+        ss2.setObjectName("PrefCaption")
+        s_col2.addWidget(st2)
+        s_col2.addWidget(ss2)
+        s_row2.addLayout(s_col2, 1)
+
+        audio_pill = QLabel("Always Copy (-c:a copy)")
+        audio_pill.setStyleSheet(f"""
+            background-color: {badge_bg};
+            color: {badge_fg};
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid {badge_bd};
+        """)
+        s_row2.addWidget(audio_pill, 0, Qt.AlignVCenter)
+        sc_layout.addLayout(s_row2)
+
+        layout.addWidget(safety_card)
+        layout.addStretch(1)
+        return widget
+
+    def _on_transcode_encoder_changed(self, index: int):
+        val = self.enc_combo.itemData(index) or "auto"
+        db.set_setting("transcode_encoder", str(val))
+
+    def _on_transcode_crf_changed(self, index: int):
+        val = self.crf_combo.itemData(index) or "18"
+        db.set_setting("transcode_crf", str(val))
+
+    def _on_transcode_fps_changed(self, index: int):
+        val = self.fps_transcode_combo.itemData(index) or "0.0"
+        db.set_setting("transcode_framerate", str(val))
+
+    def _on_transcode_res_changed(self, index: int):
+        val = self.res_combo.itemData(index) or "none"
+        db.set_setting("transcode_max_height", str(val))
+
+    def _on_transcode_deint_changed(self, index: int):
+        val = self.deint_combo.itemData(index) or "auto"
+        db.set_setting("transcode_deinterlace", str(val))
+
+    # --- 3. Core Engines & Binaries Tab ---
+    def _build_core_engines_tab(self) -> QWidget:
+        from ...core.engine_manager import (
+            SUPPORTED_ENGINES, get_engine_status, get_writable_bin_dir,
+            EngineDownloadWorker
+        )
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        layout.addLayout(self._create_tab_header(
+            "Core Engines & Binaries",
+            "Inspect, verify upstream open-source repositories, and download media processing and AI speech engines. Binaries are self-contained and require no external system configuration.",
+            badge_text="STANDALONE ENGINES"
+        ))
+
+        # Top Control Action Bar
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+
+        refresh_btn = PushButton("Refresh Engine Status", widget)
+        refresh_btn.setIcon(FluentIcon.SYNC)
+        refresh_btn.setFixedHeight(30)
+        refresh_btn.clicked.connect(self._refresh_core_engines_tab)
+        top_bar.addWidget(refresh_btn)
+
+        open_bin_btn = PushButton("Open Bin Folder", widget)
+        open_bin_btn.setIcon(FluentIcon.FOLDER)
+        open_bin_btn.setFixedHeight(30)
+        open_bin_btn.clicked.connect(self._on_open_bin_folder)
+        top_bar.addWidget(open_bin_btn)
+
+        top_bar.addStretch(1)
+        layout.addLayout(top_bar)
+
+        self._engine_ui_map = {}
+        self._active_engine_workers = {}
+
+        # Render engine cards
+        for engine_id in ("libmpv", "ffmpeg", "whisper"):
+            spec = SUPPORTED_ENGINES[engine_id]
+            card = PrefCardFrame(widget)
+            c_layout = QVBoxLayout(card)
+            c_layout.setContentsMargins(16, 14, 16, 14)
+            c_layout.setSpacing(10)
+
+            # Top Header Row: Icon + Title + Status Badge + [Visit Upstream]
+            top_row = QHBoxLayout()
+            top_row.setSpacing(8)
+
+            icon_enum = FluentIcon.MOVIE if engine_id == "libmpv" else (
+                FluentIcon.VIDEO if engine_id == "ffmpeg" else FluentIcon.ROBOT
+            )
+            icon_w = IconWidget(icon_enum, card)
+            icon_w.setFixedSize(20, 20)
+            top_row.addWidget(icon_w)
+
+            title_lbl = QLabel(spec.name, card)
+            title_lbl.setObjectName("PrefSectionTitle")
+            top_row.addWidget(title_lbl)
+
+            status_badge = QLabel("Checking...", card)
+            top_row.addWidget(status_badge)
+            top_row.addStretch(1)
+
+            visit_btn = PushButton("Visit Upstream", card)
+            visit_btn.setIcon(FluentIcon.LINK)
+            visit_btn.setFixedHeight(28)
+            visit_btn.clicked.connect(lambda _, url=spec.repo_url: webbrowser.open(url))
+            top_row.addWidget(visit_btn)
+            c_layout.addLayout(top_row)
+
+            # Description
+            desc_lbl = QLabel(spec.description, card)
+            desc_lbl.setObjectName("PrefCaption")
+            desc_lbl.setWordWrap(True)
+            c_layout.addWidget(desc_lbl)
+
+            # Upstream Source & Metadata Box
+            meta_frame = QFrame(card)
+            meta_frame.setStyleSheet("""
+                QFrame {
+                    background-color: rgba(255, 255, 255, 0.03);
+                    border: 1px solid rgba(255, 255, 255, 0.07);
+                    border-radius: 6px;
+                    padding: 6px;
+                }
+            """)
+            meta_layout = QVBoxLayout(meta_frame)
+            meta_layout.setContentsMargins(10, 8, 10, 8)
+            meta_layout.setSpacing(4)
+
+            repo_lbl = QLabel(f"<b>Repository:</b> {spec.repo_name}  |  <b>Maintainer:</b> {spec.maintainer}", meta_frame)
+            repo_lbl.setObjectName("PrefCaption")
+            meta_layout.addWidget(repo_lbl)
+
+            lic_lbl = QLabel(f"<b>License:</b> {spec.license}", meta_frame)
+            lic_lbl.setObjectName("PrefCaption")
+            meta_layout.addWidget(lic_lbl)
+
+            hw_lbl = QLabel("", meta_frame)
+            hw_lbl.setObjectName("PrefCaption")
+            meta_layout.addWidget(hw_lbl)
+
+            path_lbl = QLabel("", meta_frame)
+            path_lbl.setObjectName("PrefCaption")
+            path_lbl.setWordWrap(True)
+            meta_layout.addWidget(path_lbl)
+
+            c_layout.addWidget(meta_frame)
+
+            # Action / Download Button Row
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+
+            dl_btn = PrimaryPushButton(f"Download {spec.name.split()[0]}", card)
+            dl_btn.setIcon(FluentIcon.DOWNLOAD)
+            dl_btn.setFixedHeight(30)
+            dl_btn.clicked.connect(lambda _, eid=engine_id: self._on_download_engine(eid))
+            btn_row.addWidget(dl_btn)
+
+            if engine_id == "whisper":
+                models_btn = PushButton("Manage Speech Models", card)
+                models_btn.setIcon(FluentIcon.FOLDER)
+                models_btn.setFixedHeight(30)
+                models_btn.clicked.connect(lambda: self.switch_tab("ai"))
+                btn_row.addWidget(models_btn)
+
+            btn_row.addStretch(1)
+            c_layout.addLayout(btn_row)
+
+            # Progress Row (Hidden until download starts)
+            p_row = QVBoxLayout()
+            p_row.setSpacing(4)
+
+            progress_bar = QProgressBar(card)
+            progress_bar.setFixedHeight(6)
+            progress_bar.setTextVisible(False)
+            progress_bar.hide()
+            p_row.addWidget(progress_bar)
+
+            p_info_row = QHBoxLayout()
+            p_status_lbl = QLabel("", card)
+            p_status_lbl.setObjectName("PrefCaption")
+            p_status_lbl.hide()
+            p_info_row.addWidget(p_status_lbl)
+            p_info_row.addStretch(1)
+
+            cancel_btn = PushButton("Cancel", card)
+            cancel_btn.setFixedHeight(24)
+            cancel_btn.hide()
+            cancel_btn.clicked.connect(lambda _, eid=engine_id: self._on_cancel_engine_download(eid))
+            p_info_row.addWidget(cancel_btn)
+
+            p_row.addLayout(p_info_row)
+            c_layout.addLayout(p_row)
+
+            layout.addWidget(card)
+
+            self._engine_ui_map[engine_id] = {
+                "badge": status_badge,
+                "hw_lbl": hw_lbl,
+                "path_lbl": path_lbl,
+                "dl_btn": dl_btn,
+                "progress_bar": progress_bar,
+                "status_lbl": p_status_lbl,
+                "cancel_btn": cancel_btn
+            }
+
+        layout.addStretch(1)
+        self._refresh_core_engines_tab()
+        return widget
+
+    def _refresh_core_engines_tab(self):
+        from ...core.engine_manager import get_engine_status
+        for engine_id, ui in getattr(self, "_engine_ui_map", {}).items():
+            st = get_engine_status(engine_id)
+            if not st:
+                continue
+            installed = st.get("installed", False)
+            lbl = st.get("status_label", "Unknown")
+            hw = st.get("hw_info", "")
+            path = st.get("path", "")
+
+            # Style the badge
+            if installed:
+                ui["badge"].setText(f"  {lbl}  ")
+                ui["badge"].setStyleSheet(
+                    "background-color: rgba(16, 185, 129, 0.14); color: #34d399; "
+                    "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
+                    "border: 1px solid rgba(16, 185, 129, 0.35);"
+                )
+                ui["dl_btn"].setText("Reinstall / Update")
+            else:
+                ui["badge"].setText("  Not Installed  ")
+                ui["badge"].setStyleSheet(
+                    "background-color: rgba(245, 158, 11, 0.14); color: #fbbf24; "
+                    "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
+                    "border: 1px solid rgba(245, 158, 11, 0.35);"
+                )
+                name_short = st["spec"].name.split()[0]
+                ui["dl_btn"].setText(f"Download {name_short}")
+
+            ui["hw_lbl"].setText(f"<b>Hardware Capabilities:</b> {hw}")
+            ui["path_lbl"].setText(f"<b>Location:</b> {path or 'Not Installed'}")
+
+    def _on_download_engine(self, engine_id: str):
+        from ...core.engine_manager import EngineDownloadWorker
+        ui = self._engine_ui_map.get(engine_id)
+        if not ui:
+            return
+
+        ui["dl_btn"].setEnabled(False)
+        ui["progress_bar"].setValue(0)
+        ui["progress_bar"].show()
+        ui["status_lbl"].setText("Connecting to upstream repository...")
+        ui["status_lbl"].show()
+        ui["cancel_btn"].show()
+
+        worker = EngineDownloadWorker(engine_id, self)
+        worker.progress.connect(self._on_engine_download_progress)
+        worker.finished.connect(self._on_engine_download_finished)
+        self._active_engine_workers[engine_id] = worker
+        worker.start()
+
+    def _on_cancel_engine_download(self, engine_id: str):
+        worker = self._active_engine_workers.get(engine_id)
+        if worker:
+            worker.cancel()
+
+    def _on_engine_download_progress(self, engine_id: str, pct: int, status_str: str):
+        ui = self._engine_ui_map.get(engine_id)
+        if ui:
+            ui["progress_bar"].setValue(pct)
+            ui["status_lbl"].setText(status_str)
+
+    def _on_engine_download_finished(self, engine_id: str, success: bool, msg: str):
+        ui = self._engine_ui_map.get(engine_id)
+        if ui:
+            ui["progress_bar"].hide()
+            ui["status_lbl"].hide()
+            ui["cancel_btn"].hide()
+            ui["dl_btn"].setEnabled(True)
+
+        if engine_id in self._active_engine_workers:
+            del self._active_engine_workers[engine_id]
+
+        self._refresh_core_engines_tab()
+
+        if success:
+            InfoBar.success(
+                "Engine Ready",
+                msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4000
+            )
+        else:
+            InfoBar.error(
+                "Engine Error",
+                msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=5000
+            )
+
+    def _on_open_bin_folder(self):
+        from ...core.engine_manager import get_writable_bin_dir
+        bin_dir = get_writable_bin_dir()
+        if os.path.exists(bin_dir) and sys.platform == "win32":
+            os.startfile(bin_dir)
+
+    # --- 4. Keyboard Shortcuts Tab ---
     def _build_shortcuts_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -2047,15 +2763,7 @@ class PreferencesWindow(FramelessWindow):
     # --- 5. Cookies & Auth Tab ---
     @staticmethod
     def _configure_fast_combo(combo: ComboBox):
-        orig_create_menu = combo._createComboMenu
-        def _fast_menu():
-            menu = orig_create_menu()
-            orig_exec = menu.exec
-            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(
-                pos, ani=False, aniType=MenuAnimationType.NONE
-            )
-            return menu
-        combo._createComboMenu = _fast_menu
+        pass
 
     def _build_cookies_tab(self) -> QWidget:
         widget = QWidget()
@@ -2395,7 +3103,7 @@ class PreferencesWindow(FramelessWindow):
         muted = pal.get("muted", "#94a3b8")
         surface = pal.get("surface", "#18181b")
         border = pal.get("border", "#27272a")
-        accent = pal.get("accent", "#fb7185")
+        accent = pal.get("accent", "#38bdf8")
 
         summary = cookie_manager.get_status_summary(force_reload=force_reload)
         state = summary.get("state", "disabled")
@@ -2470,7 +3178,387 @@ class PreferencesWindow(FramelessWindow):
                 }}
             """)
 
-    # --- 6. About & License Tab ---
+    # --- 6. AI & MCP Tab (Faster-Whisper Engine, Model Download Manager & Live GUI MCP Bridge) ---
+    def _build_ai_mcp_tab(self) -> QWidget:
+        from ...core.vo_engine import (
+            WhisperModelManager, ModelDownloadWorker, EngineUpdateWorker
+        )
+        from ...core.gui_ipc_server import PIPE_NAME
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        layout.addLayout(self._create_tab_header(
+            "AI & MCP Integration",
+            "Configure the built-in Faster-Whisper voiceover transcription engine, manage local speech models, and control the Antigravity Live GUI MCP Bridge.",
+            "VOICEOVER ENGINE"
+        ))
+
+        # --- Card 1: Faster-Whisper Engine & Compute Hardware ---
+        engine_card = PrefCardFrame()
+        ec_layout = QVBoxLayout(engine_card)
+        ec_layout.setContentsMargins(16, 14, 16, 14)
+        ec_layout.setSpacing(10)
+
+        ec_top = QHBoxLayout()
+        ec_title = QLabel("Faster-Whisper Transcription Engine")
+        ec_title.setObjectName("PrefSectionTitle")
+        ec_top.addWidget(ec_title)
+
+        self.whisper_engine_badge = QLabel("Checking...", engine_card)
+        self.whisper_engine_badge.setObjectName("WhisperEngineBadge")
+        ec_top.addWidget(self.whisper_engine_badge)
+        ec_top.addStretch(1)
+
+        self.update_engine_btn = PushButton("Check / Update Engine", engine_card)
+        self.update_engine_btn.setIcon(FluentIcon.SYNC)
+        self.update_engine_btn.setFixedHeight(30)
+        self.update_engine_btn.clicked.connect(self._on_update_whisper_engine)
+        ec_top.addWidget(self.update_engine_btn)
+        ec_layout.addLayout(ec_top)
+
+        self.whisper_hw_lbl = QLabel("", engine_card)
+        self.whisper_hw_lbl.setObjectName("PrefCaption")
+        self.whisper_hw_lbl.setWordWrap(True)
+        ec_layout.addWidget(self.whisper_hw_lbl)
+
+        # Compute Backend + Active Model Dropdown Row
+        cfg_row = QHBoxLayout()
+        cfg_row.setSpacing(12)
+
+        backend_lbl = QLabel("Compute Backend:", engine_card)
+        backend_lbl.setObjectName("PrefBodyText")
+        cfg_row.addWidget(backend_lbl)
+
+        self.whisper_backend_combo = ComboBox(engine_card)
+        self.whisper_backend_combo.addItems([
+            "Auto (CUDA FP16 / CPU INT8)",
+            "CUDA FP16 (NVIDIA GPU)",
+            "CPU INT8 (Universal)",
+        ])
+        curr_backend = WhisperModelManager.get_compute_backend()
+        backend_map = {"auto": 0, "cuda_fp16": 1, "cpu_int8": 2}
+        self.whisper_backend_combo.setCurrentIndex(backend_map.get(curr_backend, 0))
+        self.whisper_backend_combo.setFixedWidth(215)
+        self.whisper_backend_combo.currentIndexChanged.connect(self._on_whisper_backend_changed)
+        cfg_row.addWidget(self.whisper_backend_combo)
+
+        cfg_row.addSpacing(12)
+
+        active_lbl = QLabel("Active VO Model:", engine_card)
+        active_lbl.setObjectName("PrefBodyText")
+        cfg_row.addWidget(active_lbl)
+
+        self.whisper_model_combo = ComboBox(engine_card)
+        self._whisper_catalog = WhisperModelManager.get_catalog()
+        active_id = WhisperModelManager.get_active_model_id()
+        active_idx = 0
+        for idx, spec in enumerate(self._whisper_catalog):
+            self.whisper_model_combo.addItem(f"{spec.name} ({spec.size_display})")
+            if spec.id == active_id:
+                active_idx = idx
+        self.whisper_model_combo.setCurrentIndex(active_idx)
+        self.whisper_model_combo.setFixedWidth(240)
+        self.whisper_model_combo.currentIndexChanged.connect(self._on_active_whisper_model_changed)
+        cfg_row.addWidget(self.whisper_model_combo)
+        cfg_row.addStretch(1)
+
+        ec_layout.addLayout(cfg_row)
+        layout.addWidget(engine_card)
+
+        # --- Card 2: Whisper Model Download Manager ---
+        models_card = PrefCardFrame()
+        mc_layout = QVBoxLayout(models_card)
+        mc_layout.setContentsMargins(16, 14, 16, 14)
+        mc_layout.setSpacing(8)
+
+        mc_header = QHBoxLayout()
+        mc_title = QLabel("Whisper Model Download Manager")
+        mc_title.setObjectName("PrefSectionTitle")
+        mc_header.addWidget(mc_title)
+        mc_header.addStretch(1)
+
+        open_models_btn = PushButton("Open Models Folder", models_card)
+        open_models_btn.setIcon(FluentIcon.FOLDER)
+        open_models_btn.setFixedHeight(28)
+        open_models_btn.clicked.connect(self._on_open_whisper_models_dir)
+        mc_header.addWidget(open_models_btn)
+        mc_layout.addLayout(mc_header)
+
+        mc_sub = QLabel(
+            "Pre-download speech models locally for instant offline voiceover segment transcription."
+        )
+        mc_sub.setObjectName("PrefCaption")
+        mc_layout.addWidget(mc_sub)
+
+        self._model_row_widgets = {}
+        for spec in self._whisper_catalog:
+            row_frame = QFrame(models_card)
+            row_frame.setObjectName("WhisperModelRow")
+            r_layout = QHBoxLayout(row_frame)
+            r_layout.setContentsMargins(10, 8, 10, 8)
+            r_layout.setSpacing(10)
+
+            info_col = QVBoxLayout()
+            info_col.setContentsMargins(0, 0, 0, 0)
+            info_col.setSpacing(2)
+
+            name_lbl = QLabel(f"{spec.name}  •  {spec.size_display}  •  {spec.speed_badge}", row_frame)
+            name_lbl.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+            info_col.addWidget(name_lbl)
+
+            desc_lbl = QLabel(spec.description, row_frame)
+            desc_lbl.setObjectName("PrefCaption")
+            desc_lbl.setWordWrap(True)
+            info_col.addWidget(desc_lbl)
+            r_layout.addLayout(info_col, 1)
+
+            status_lbl = QLabel("", row_frame)
+            status_lbl.setFixedWidth(130)
+            status_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            r_layout.addWidget(status_lbl)
+
+            dl_btn = PushButton("Download", row_frame)
+            dl_btn.setIcon(FluentIcon.DOWNLOAD)
+            dl_btn.setFixedWidth(106)
+            dl_btn.setFixedHeight(28)
+            dl_btn.clicked.connect(lambda _, mid=spec.id: self._on_download_whisper_model(mid))
+            r_layout.addWidget(dl_btn)
+
+            del_btn = ToolButton(FluentIcon.DELETE, row_frame)
+            del_btn.setFixedSize(28, 28)
+            del_btn.setToolTip(f"Delete cached {spec.name} model")
+            del_btn.clicked.connect(lambda _, mid=spec.id: self._on_delete_whisper_model(mid))
+            r_layout.addWidget(del_btn)
+
+            self._model_row_widgets[spec.id] = {
+                "frame": row_frame,
+                "status_lbl": status_lbl,
+                "dl_btn": dl_btn,
+                "del_btn": del_btn,
+            }
+            mc_layout.addWidget(row_frame)
+
+        # Shared Download Progress Bar
+        self.whisper_dl_progress = QProgressBar(models_card)
+        self.whisper_dl_progress.setRange(0, 100)
+        self.whisper_dl_progress.setValue(0)
+        self.whisper_dl_progress.setFixedHeight(6)
+        self.whisper_dl_progress.setTextVisible(False)
+        self.whisper_dl_progress.hide()
+        mc_layout.addWidget(self.whisper_dl_progress)
+
+        self.whisper_dl_status_lbl = QLabel("", models_card)
+        self.whisper_dl_status_lbl.setObjectName("PrefCaption")
+        self.whisper_dl_status_lbl.hide()
+        mc_layout.addWidget(self.whisper_dl_status_lbl)
+
+        layout.addWidget(models_card)
+
+        # --- Card 3: Antigravity Live GUI MCP Bridge ---
+        mcp_card = PrefCardFrame()
+        mcp_layout = QVBoxLayout(mcp_card)
+        mcp_layout.setContentsMargins(16, 14, 16, 14)
+        mcp_layout.setSpacing(8)
+
+        mcp_top = QHBoxLayout()
+        mcp_title = QLabel("Antigravity Live GUI MCP Bridge")
+        mcp_title.setObjectName("PrefSectionTitle")
+        mcp_top.addWidget(mcp_title)
+
+        self.mcp_pipe_badge = QLabel(f"Pipe: \\\\.\\pipe\\{PIPE_NAME}", mcp_card)
+        self.mcp_pipe_badge.setStyleSheet(
+            "background-color: rgba(16, 185, 129, 0.14); color: #34d399; "
+            "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
+            "border: 1px solid rgba(16, 185, 129, 0.35); font-family: 'Cascadia Mono', 'Consolas', monospace;"
+        )
+        mcp_top.addWidget(self.mcp_pipe_badge)
+        mcp_top.addStretch(1)
+
+        self.mcp_enable_switch = SwitchButton(mcp_card)
+        self.mcp_enable_switch.setOnText("Enabled")
+        self.mcp_enable_switch.setOffText("Disabled")
+        mcp_enabled = db.get_setting("mcp_bridge_enabled", "true") != "false"
+        self.mcp_enable_switch.setChecked(mcp_enabled)
+        self.mcp_enable_switch.checkedChanged.connect(self._on_mcp_bridge_toggled)
+        mcp_top.addWidget(self.mcp_enable_switch)
+        mcp_layout.addLayout(mcp_top)
+
+        mcp_desc = QLabel(
+            "Routes Antigravity AI tool calls directly into the running Rainy GUI thread. "
+            "Simulates native A-Roll card checkbox locks, highlights modified/ad-libbed VO lines on the script, "
+            "and triggers Multi-Track XML export (V1/A2 = A-Roll, A1 = Voiceover) without external database writes."
+        )
+        mcp_desc.setObjectName("PrefBodyText")
+        mcp_desc.setWordWrap(True)
+        mcp_layout.addWidget(mcp_desc)
+
+        mcp_btn_row = QHBoxLayout()
+        copy_mcp_btn = PushButton("Copy Antigravity MCP Config JSON", mcp_card)
+        copy_mcp_btn.setIcon(FluentIcon.COPY)
+        copy_mcp_btn.setFixedHeight(30)
+        copy_mcp_btn.clicked.connect(self._on_copy_mcp_config_json)
+        mcp_btn_row.addWidget(copy_mcp_btn)
+        mcp_btn_row.addStretch(1)
+        mcp_layout.addLayout(mcp_btn_row)
+
+        layout.addWidget(mcp_card)
+        layout.addStretch(1)
+
+        self._refresh_whisper_tab_state()
+        return widget
+
+    def _refresh_whisper_tab_state(self):
+        from ...core.vo_engine import WhisperModelManager
+        status = WhisperModelManager.get_engine_status()
+        if hasattr(self, "whisper_engine_badge"):
+            if status["installed"]:
+                ver = status["faster_whisper_version"]
+                hw = "CUDA GPU" if status["cuda_available"] else "CPU INT8"
+                self.whisper_engine_badge.setText(f"Faster-Whisper v{ver}  •  {hw}")
+                self.whisper_engine_badge.setStyleSheet(
+                    "background-color: rgba(16, 185, 129, 0.14); color: #34d399; "
+                    "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
+                    "border: 1px solid rgba(16, 185, 129, 0.35);"
+                )
+            else:
+                self.whisper_engine_badge.setText("Engine Not Installed — Click Check / Update")
+                self.whisper_engine_badge.setStyleSheet(
+                    "background-color: rgba(245, 158, 11, 0.14); color: #fbbf24; "
+                    "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
+                    "border: 1px solid rgba(245, 158, 11, 0.35);"
+                )
+
+        if hasattr(self, "whisper_hw_lbl"):
+            ct2_v = status["ctranslate2_version"]
+            cuda_txt = f"CUDA Available ({status['cuda_device_count']} GPU)" if status["cuda_available"] else "CPU Mode (INT8 Quantized)"
+            self.whisper_hw_lbl.setText(
+                f"CTranslate2 Runtime: {ct2_v}  |  Hardware Acceleration: {cuda_txt}  |  "
+                f"Models Directory: {WhisperModelManager.ensure_models_dir()}"
+            )
+
+        for model_id, widgets in getattr(self, "_model_row_widgets", {}).items():
+            downloaded = WhisperModelManager.is_model_downloaded(model_id)
+            size_txt = WhisperModelManager.get_downloaded_size_display(model_id)
+            if downloaded:
+                widgets["status_lbl"].setText(size_txt)
+                widgets["status_lbl"].setStyleSheet("color: #34d399; font-size: 11px; font-weight: 700;")
+                widgets["dl_btn"].setText("Downloaded")
+                widgets["dl_btn"].setEnabled(False)
+                widgets["del_btn"].setEnabled(True)
+            else:
+                widgets["status_lbl"].setText("Not Downloaded")
+                widgets["status_lbl"].setStyleSheet("color: #71717a; font-size: 11px; font-weight: 600;")
+                widgets["dl_btn"].setText("Download")
+                widgets["dl_btn"].setEnabled(True)
+                widgets["del_btn"].setEnabled(False)
+
+    def _on_whisper_backend_changed(self, idx: int):
+        from ...core.vo_engine import WhisperModelManager
+        codes = ["auto", "cuda_fp16", "cpu_int8"]
+        if 0 <= idx < len(codes):
+            WhisperModelManager.set_compute_backend(codes[idx])
+
+    def _on_active_whisper_model_changed(self, idx: int):
+        from ...core.vo_engine import WhisperModelManager
+        if hasattr(self, "_whisper_catalog") and 0 <= idx < len(self._whisper_catalog):
+            WhisperModelManager.set_active_model_id(self._whisper_catalog[idx].id)
+
+    def _on_open_whisper_models_dir(self):
+        import sys
+        from ...core.vo_engine import WhisperModelManager
+        folder = WhisperModelManager.ensure_models_dir()
+        if sys.platform == "win32":
+            os.startfile(folder)
+
+    def _on_download_whisper_model(self, model_id: str):
+        from ...core.vo_engine import ModelDownloadWorker
+        widgets = self._model_row_widgets.get(model_id)
+        if widgets:
+            widgets["dl_btn"].setEnabled(False)
+            widgets["dl_btn"].setText("Downloading...")
+        self.whisper_dl_progress.setValue(0)
+        self.whisper_dl_progress.show()
+        self.whisper_dl_status_lbl.setText(f"Starting download for {model_id}...")
+        self.whisper_dl_status_lbl.show()
+
+        worker = ModelDownloadWorker(model_id)
+        worker.setAutoDelete(False)
+        self._active_model_dl_worker = worker
+        worker.signals.progress.connect(self._on_model_dl_progress, Qt.QueuedConnection)
+        worker.signals.finished.connect(self._on_model_dl_finished, Qt.QueuedConnection)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_model_dl_progress(self, model_id: str, pct: int, status_text: str):
+        self.whisper_dl_progress.setValue(pct)
+        self.whisper_dl_status_lbl.setText(status_text)
+
+    def _on_model_dl_finished(self, model_id: str, success: bool, msg: str):
+        self._active_model_dl_worker = None
+        self.whisper_dl_progress.hide()
+        self.whisper_dl_status_lbl.hide()
+        self._refresh_whisper_tab_state()
+        if success:
+            InfoBar.success("Model Downloaded", msg, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=3500)
+        else:
+            InfoBar.error("Download Failed", msg, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=5000)
+
+    def _on_delete_whisper_model(self, model_id: str):
+        from ...core.vo_engine import WhisperModelManager
+        if WhisperModelManager.delete_model(model_id):
+            self._refresh_whisper_tab_state()
+            InfoBar.info("Model Removed", f"Deleted cached files for {model_id}.", parent=self, position=InfoBarPosition.TOP_RIGHT, duration=2500)
+
+    def _on_update_whisper_engine(self):
+        from ...core.vo_engine import EngineUpdateWorker
+        self.update_engine_btn.setEnabled(False)
+        self.update_engine_btn.setText("Updating Engine...")
+        worker = EngineUpdateWorker()
+        worker.setAutoDelete(False)
+        self._active_engine_update_worker = worker
+        worker.signals.finished.connect(self._on_engine_update_finished, Qt.QueuedConnection)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_engine_update_finished(self, ok: bool, msg: str):
+        self._active_engine_update_worker = None
+        self.update_engine_btn.setEnabled(True)
+        self.update_engine_btn.setText("Check / Update Engine")
+        self._refresh_whisper_tab_state()
+        if ok:
+            InfoBar.success("Engine Ready", msg, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=3500)
+        else:
+            InfoBar.error("Update Error", msg, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=5000)
+
+    def _on_mcp_bridge_toggled(self, enabled: bool):
+        db.set_setting("mcp_bridge_enabled", "true" if enabled else "false")
+        parent_win = self.parent()
+        if parent_win and hasattr(parent_win, "set_mcp_bridge_enabled"):
+            parent_win.set_mcp_bridge_enabled(enabled)
+
+    def _on_copy_mcp_config_json(self):
+        import sys
+        import json
+        mcp_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "core", "mcp_server.py"))
+        cfg = {
+            "mcpServers": {
+                "knot": {
+                    "command": sys.executable,
+                    "args": [mcp_script]
+                }
+            }
+        }
+        safe_copy_to_clipboard(json.dumps(cfg, indent=2))
+        InfoBar.success(
+            "MCP Config Copied",
+            "Copied Rainy MCP configuration JSON to clipboard.",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3000
+        )
+
+    # --- 7. About & License Tab ---
     def _build_about_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -2559,8 +3647,14 @@ class PreferencesWindow(FramelessWindow):
         self.activateWindow()
 
     def closeEvent(self, event):
+        self._save_window_geometry()
         db.flush_settings()
         self.hide()
         event.ignore()
+
+    def hideEvent(self, event):
+        self._save_window_geometry()
+        db.flush_settings()
+        super().hideEvent(event)
 
 PreferencesDialog = PreferencesWindow

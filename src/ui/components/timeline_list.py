@@ -1,12 +1,13 @@
 import re
 from typing import List, Dict, Optional
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QRect
 from PySide6.QtGui import QPainter, QColor, QCursor
 from PySide6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QWidget
 )
-from qfluentwidgets import ComboBox, SmoothScrollArea
-from qfluentwidgets.components.widgets.menu import MenuAnimationType
+from qfluentwidgets import (
+    ComboBox, SmoothScrollArea, PushButton, FluentIcon, TransparentToolButton
+)
 from .timeline_card import TimelineCard
 from .link_embed_card import link_embed_controller
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller
@@ -102,28 +103,42 @@ class TimelineCanvas(QWidget):
         if self.width() <= 0 or self.height() <= 0:
             return
         painter = QPainter(self)
-        rect = event.rect()
-        slot_h = self.timeline.slot_height
-        card_h = self.timeline.card_height
-        w = max(100, self.width() - 8)
-        dpr = self.devicePixelRatioF() or 1.0
+        try:
+            rect = event.rect()
+            slot_h = self.timeline.slot_height
+            card_h = self.timeline.card_height
+            w = max(100, self.width() - 8)
+            dpr = self.devicePixelRatioF() or 1.0
 
-        f_idx = max(0, rect.top() // slot_h)
-        l_idx = min(len(self.timeline.filtered_cards) - 1, rect.bottom() // slot_h)
-        is_held = getattr(self.timeline, "is_resizing_held", False)
+            f_idx = max(0, rect.top() // slot_h)
+            l_idx = min(len(self.timeline.filtered_cards) - 1, rect.bottom() // slot_h)
+            is_held = getattr(self.timeline, "is_resizing_held", False)
 
-        for i in range(f_idx, l_idx + 1):
-            if i == self.active_idx:
-                try:
-                    if self.active_card is not None and self.active_card.isVisible():
-                        continue
-                except (RuntimeError, ReferenceError):
-                    self.active_card = None
-                    self.active_idx = -1
-            card = self.timeline.filtered_cards[i]
-            pix = card.get_cached_surface(w, card_h, dpr, hold_cache=is_held)
-            if pix is not None and not pix.isNull():
-                painter.drawPixmap(0, i * slot_h, pix)
+            for i in range(f_idx, l_idx + 1):
+                if i == self.active_idx:
+                    try:
+                        if self.active_card is not None and self.active_card.isVisible():
+                            continue
+                    except (RuntimeError, ReferenceError):
+                        self.active_card = None
+                        self.active_idx = -1
+                card = self.timeline.filtered_cards[i]
+                pix = card.get_cached_surface(w, card_h, dpr, hold_cache=is_held)
+                if pix is not None and not pix.isNull():
+                    painter.drawPixmap(0, i * slot_h, pix)
+                # Composite animated highlight pulse even when card is not the hovered active widget
+                if getattr(card, "is_highlighted", False) and getattr(card, "_highlight_alpha", 0.0) > 0.005:
+                    pal = ThemeManager.get_palette()
+                    rgb_parts = [int(x.strip()) for x in pal.get("accent_rgb", "251, 113, 133").split(",")]
+                    alpha_fill = max(1, int(round(65 * card._highlight_alpha)))
+                    alpha_pen = max(1, int(round(230 * card._highlight_alpha)))
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    painter.setBrush(QColor(rgb_parts[0], rgb_parts[1], rgb_parts[2], alpha_fill))
+                    painter.setPen(QColor(rgb_parts[0], rgb_parts[1], rgb_parts[2], alpha_pen))
+                    r = getattr(card, "borderRadius", 8)
+                    painter.drawRoundedRect(QRect(1, i * slot_h + 1, w - 2, card_h - 2), r, r)
+        finally:
+            painter.end()
 
 
 class TimelineList(QFrame):
@@ -132,6 +147,9 @@ class TimelineList(QFrame):
     item_timecode_changed = Signal(str, str)
     sync_script_requested = Signal(int, str)
     copy_feedback_requested = Signal(str)
+    open_settings_requested = Signal(str)
+    card_target_clicked = Signal(str, object)
+    play_requested = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -143,39 +161,65 @@ class TimelineList(QFrame):
         self._compact_timer = QTimer(self)
         self._compact_timer.setSingleShot(True)
         self._compact_timer.timeout.connect(self._apply_pending_compact)
+        self._is_aroll_active = False
         self.card_widgets: Dict[str, TimelineCard] = {}
         self.card_list: List[TimelineCard] = []
         self.filtered_cards: List[TimelineCard] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 2, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 2, 8)
+        layout.setSpacing(6)
 
         # Header toolbar: Title + Status Dropdown Filter (All | Done | Pending)
         header = QHBoxLayout()
-        header.setContentsMargins(4, 0, 10, 0)
-        title = QLabel("TIMESTAMPS")
-        title.setObjectName("PaneTitle")
-        header.addWidget(title)
+        header.setContentsMargins(4, 0, 4, 0)
+        header.setSpacing(4)
+        self.header_title = QLabel("TIMESTAMPS")
+        self.header_title.setObjectName("PaneTitle")
+        header.addWidget(self.header_title)
         header.addStretch(1)
 
         self.filter_combo = ComboBox(self)
-        # Instant zero-lag popup (disables QFluentWidgets 250ms QGraphicsDropShadow per-frame slide recalculation)
-        orig_create_menu = self.filter_combo._createComboMenu
-        def _fast_menu():
-            menu = orig_create_menu()
-            orig_exec = menu.exec
-            menu.exec = lambda pos, ani=True, aniType=MenuAnimationType.DROP_DOWN: orig_exec(pos, ani=False, aniType=MenuAnimationType.NONE)
-            return menu
-        self.filter_combo._createComboMenu = _fast_menu
         self.filter_combo.addItems(["All", "Done", "Pending"])
         self.filter_combo.setCurrentIndex(0)
-        self.filter_combo.setFixedWidth(112)
+        self.filter_combo.setFixedWidth(78)
         self.filter_combo.setFixedHeight(28)
         self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
         header.addWidget(self.filter_combo)
 
         layout.addLayout(header)
+
+        # 1. Missing libmpv Engine Notice Banner
+        self.missing_mpv_banner = QFrame(self)
+        self.missing_mpv_banner.setStyleSheet("""
+            QFrame {
+                background-color: rgba(245, 158, 11, 0.12);
+                border: 1px solid rgba(245, 158, 11, 0.35);
+                border-radius: 6px;
+                padding: 4px 8px;
+            }
+        """)
+        mb_layout = QHBoxLayout(self.missing_mpv_banner)
+        mb_layout.setContentsMargins(6, 4, 6, 4)
+        mb_layout.setSpacing(8)
+
+        mb_lbl = QLabel("libmpv Engine is not installed.", self.missing_mpv_banner)
+        mb_lbl.setStyleSheet("color: #fbbf24; font-size: 11px; font-weight: 600;")
+        mb_layout.addWidget(mb_lbl)
+        mb_layout.addStretch(1)
+
+        inst_btn = PushButton("Install in Settings", self.missing_mpv_banner)
+        inst_btn.setFixedHeight(24)
+        inst_btn.clicked.connect(lambda: self.open_settings_requested.emit("engine"))
+        mb_layout.addWidget(inst_btn)
+
+        mb_dismiss = TransparentToolButton(FluentIcon.CLOSE, self.missing_mpv_banner)
+        mb_dismiss.setFixedSize(20, 20)
+        mb_dismiss.clicked.connect(self.missing_mpv_banner.hide)
+        mb_layout.addWidget(mb_dismiss)
+
+        self.missing_mpv_banner.hide()
+        layout.addWidget(self.missing_mpv_banner)
 
         # Smooth Kinetic Scroll Area for cards
         self.scroll_area = SmoothScrollArea(self)
@@ -302,15 +346,28 @@ class TimelineList(QFrame):
         if hasattr(self, 'container'):
             self.container.update()
 
+    def _update_header_responsive(self, w: int):
+        if w < 320:
+            if hasattr(self, 'header_title'):
+                self.header_title.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
+            if hasattr(self, 'filter_combo'):
+                self.filter_combo.setFixedWidth(70)
+        else:
+            if hasattr(self, 'header_title'):
+                self.header_title.setStyleSheet("")
+            if hasattr(self, 'filter_combo'):
+                self.filter_combo.setFixedWidth(78)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Hysteresis buffer to eliminate stutter/jitter near the responsive threshold
         w = self.width()
-        if not self._is_compact and w < 390:
+        self._update_header_responsive(w)
+        # Hysteresis buffer to eliminate stutter/jitter near the responsive threshold
+        if not self._is_compact and w < 450:
             self._pending_compact = True
             if not self._compact_timer.isActive():
                 self._compact_timer.start(16)
-        elif self._is_compact and w >= 415:
+        elif self._is_compact and w >= 475:
             self._pending_compact = False
             if not self._compact_timer.isActive():
                 self._compact_timer.start(16)
@@ -344,15 +401,19 @@ class TimelineList(QFrame):
         if self.width() <= 0 or self.height() <= 0:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pal = ThemeManager.get_palette()
-        painter.setPen(QColor(pal["border"]))
-        painter.setBrush(QColor(pal["surface"]))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 8, 8)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            pal = ThemeManager.get_palette()
+            painter.setPen(QColor(pal["border"]))
+            painter.setBrush(QColor(pal["surface"]))
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 8, 8)
+        finally:
+            painter.end()
 
     def load_items(self, items: List[ScriptItem], doc_signature: str = "", link_colors: Dict[str, str] = None, linked_footage: Dict[str, str] = None):
         if self.width() > 0:
-            self._is_compact = self.width() < 400
+            self._is_compact = self.width() < 450
+            self._update_header_responsive(self.width())
         self.linked_footage = linked_footage or getattr(self, "linked_footage", {})
         self.container.deactivate_card()
         for card in self.card_widgets.values():
@@ -369,6 +430,8 @@ class TimelineList(QFrame):
             card.item_timecode_changed.connect(self.item_timecode_changed.emit)
             card.sync_script_requested.connect(self.sync_script_requested.emit)
             card.copy_feedback_requested.connect(self.copy_feedback_requested.emit)
+            card.card_target_clicked.connect(self.card_target_clicked.emit)
+            card.play_requested.connect(self.play_requested.emit)
             card.hide()
             
             self.card_widgets[item.id] = card
@@ -518,3 +581,107 @@ class TimelineList(QFrame):
             self._active_highlighted_card = target_card
             self.container.activate_card(target_idx)
             target_card.pulse_highlight(1200)
+
+    def scroll_to_card_by_id(self, item_id: str):
+        """Smoothly scrolls the virtual timeline list to center on the specified card ID."""
+        target_card = self.card_widgets.get(item_id)
+        if target_card is not None:
+            if target_card not in self.filtered_cards:
+                if self.filter_combo.currentText() != "All":
+                    self.filter_combo.setCurrentText("All")
+                self.apply_filter()
+
+            target_idx = self.filtered_cards.index(target_card) if target_card in self.filtered_cards else 0
+            slot_h = self.slot_height
+            card_h = self.card_height
+            card_y = target_idx * slot_h
+            viewport_h = self.scroll_area.viewport().height()
+            sb = self.scroll_area.verticalScrollBar()
+            if sb:
+                target_scroll = max(0, min(sb.maximum(), card_y - (viewport_h // 2) + (card_h // 2)))
+                self.smooth_scroller.scroll_to(target_scroll)
+            self.container.activate_card(target_idx)
+
+    def lock_aroll_card(
+        self,
+        row_index: Optional[int] = None,
+        item_id: Optional[str] = None,
+        vo_cut_after_sec: Optional[float] = None,
+        vo_resume_sec: Optional[float] = None,
+        vo_lead_in_text: str = "",
+        vo_has_adlib: bool = False,
+        vo_adlib_note: str = "",
+        vo_status: str = "LOCKED",
+        scroll_into_view: bool = True,
+    ) -> Optional[ScriptItem]:
+        """Finds a TimelineCueCard by item_id or row_index, simulates checking it off, and pulses highlight."""
+        target_card: Optional[TimelineCard] = None
+        if item_id and item_id in self.card_widgets:
+            target_card = self.card_widgets[item_id]
+        elif row_index is not None:
+            for c in self.card_list:
+                if c.item.row_index == int(row_index):
+                    target_card = c
+                    break
+
+        if target_card is None:
+            return None
+
+        target_card.apply_vo_lock(
+            vo_cut_after_sec=vo_cut_after_sec,
+            vo_resume_sec=vo_resume_sec,
+            vo_lead_in_text=vo_lead_in_text,
+            vo_has_adlib=vo_has_adlib,
+            vo_adlib_note=vo_adlib_note,
+            vo_status=vo_status,
+            simulate_click=True,
+        )
+
+        if scroll_into_view and target_card in self.filtered_cards:
+            target_idx = self.filtered_cards.index(target_card)
+            slot_h = self.slot_height
+            card_h = self.card_height
+            card_y = target_idx * slot_h
+            viewport_h = self.scroll_area.viewport().height()
+            sb = self.scroll_area.verticalScrollBar()
+            if sb:
+                target_scroll = max(0, min(sb.maximum(), card_y - (viewport_h // 2) + (card_h // 2)))
+                self.smooth_scroller.scroll_to(target_scroll)
+            self.container.activate_card(target_idx)
+            target_card.pulse_highlight(1000)
+
+        self.container.update()
+        return target_card.item
+
+    def show_missing_mpv_banner(self, show: bool = True):
+        if show:
+            self.missing_mpv_banner.show()
+        else:
+            self.missing_mpv_banner.hide()
+
+    def set_player_target(self, item_id: Optional[str]):
+        """Outlines the card loaded in the shared clip player (None clears all)."""
+        for card in self.card_list:
+            card.set_player_target(item_id is not None and card.item.id == item_id)
+        self.container.update()
+
+    def pulse_card(self, item_id: str, duration_ms: int = 1100):
+        """Scrolls to a card and fires its eased glow pulse (e.g. after an edit is applied)."""
+        target_card = self.card_widgets.get(item_id)
+        if target_card is None:
+            return
+        self.scroll_to_card_by_id(item_id)
+        target_card.pulse_highlight(duration_ms)
+        self.container.update()
+
+    def set_aroll_edit_mode(self, active: bool):
+        self._is_aroll_active = active
+        if active:
+            self.missing_mpv_banner.hide()
+
+        # Apply edit mode styling to all cards
+        for card in self.card_list:
+            if hasattr(card, "set_aroll_edit_mode"):
+                card.set_aroll_edit_mode(active)
+        self.update()
+        self.container.update()

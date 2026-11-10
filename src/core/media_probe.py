@@ -40,6 +40,8 @@ class ProbedMediaItem:
     start_timecode: str = ""
     is_vfr: bool = False
     avg_frame_rate: float = 0.0
+    is_interlaced: bool = False
+    field_order: str = "progressive"
 
 
 def _parse_fraction(val: Any) -> float:
@@ -167,7 +169,7 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                 width=int(cached.get("width") or 0),
                 height=int(cached.get("height") or 0),
                 resolution=cached.get("resolution") or "",
-                frame_rate=float(cached.get("frame_rate") or 0.0),
+                frame_rate=float(cached.get("avg_frame_rate") or 23.976) if float(cached.get("frame_rate") or 0.0) > 120.0 else float(cached.get("frame_rate") or 0.0),
                 audio_channels=int(cached.get("audio_channels") or 0),
                 sample_rate=int(cached.get("sample_rate") or 0),
                 video_codec=cached.get("video_codec") or "",
@@ -178,6 +180,8 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                 start_timecode=str(cached.get("start_timecode") or ""),
                 is_vfr=bool(cached.get("is_vfr", 0)),
                 avg_frame_rate=float(cached.get("avg_frame_rate") or 0.0),
+                is_interlaced=bool(cached.get("is_interlaced", 0)),
+                field_order=str(cached.get("field_order") or "progressive"),
             )
 
     # 2. ffprobe Extraction
@@ -189,7 +193,7 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
             ffprobe_bin,
             "-v", "error",
             "-show_entries",
-            "format=duration,size,bit_rate,start_time:stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,start_time,sample_rate,channels,channel_layout:stream_tags:format_tags",
+            "format=duration,size,bit_rate,start_time:stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,field_order,duration,nb_frames,start_time,sample_rate,channels,channel_layout:stream_tags:format_tags",
             "-of", "json",
             norm_path
         ]
@@ -227,6 +231,8 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                 start_timecode = _extract_timecode_tag(fmt.get("tags"))
                 is_vfr = False
                 avg_frame_rate = 0.0
+                is_interlaced = False
+                field_order = "progressive"
 
                 width = 0
                 height = 0
@@ -246,6 +252,14 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                         height = int(st.get("height") or 0)
                         video_codec = st.get("codec_name") or ""
 
+                        # Detect interlaced scan order (tt, bb, tb, bt vs progressive/unknown)
+                        raw_fo = str(st.get("field_order") or "").strip().lower()
+                        if raw_fo in ("tt", "bb", "tb", "bt"):
+                            is_interlaced = True
+                            field_order = raw_fo
+                        elif raw_fo:
+                            field_order = raw_fo
+
                         # Check stream start_time offset if non-zero
                         st_start = st.get("start_time")
                         if st_start is not None:
@@ -264,9 +278,27 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                         # Parse exact and average frame rates to detect VFR and conform
                         r_fps = _parse_fraction(st.get("r_frame_rate", ""))
                         avg_fps = _parse_fraction(st.get("avg_frame_rate", ""))
+
+                        # If the video stream carries its own exact duration and nb_frames,
+                        # check true video-stream average FPS (immune to `-c:a copy` audio track overhang)
+                        st_dur = 0.0
+                        st_frames = 0
+                        try:
+                            st_dur = float(st.get("duration") or 0.0)
+                            st_frames = int(st.get("nb_frames") or 0)
+                        except (ValueError, TypeError):
+                            pass
+                        if st_dur > 0.5 and st_frames > 10:
+                            true_video_avg_fps = round(st_frames / st_dur, 3)
+                            # If r_fps and true_video_avg_fps match closely, use true_video_avg_fps
+                            if r_fps <= 120.0 and abs(r_fps - true_video_avg_fps) <= 0.08:
+                                avg_fps = true_video_avg_fps
+
                         avg_frame_rate = avg_fps
 
-                        exact_fps, nominal_base, detected_vfr, is_std = analyze_framerate(r_fps, avg_fps)
+                        exact_fps, nominal_base, detected_vfr, is_std = analyze_framerate(
+                            r_fps, avg_fps, duration_sec=st_dur if st_dur > 0 else duration_sec
+                        )
                         frame_rate = exact_fps
                         is_vfr = detected_vfr
 
@@ -298,11 +330,13 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                     start_time=start_time,
                     start_timecode=start_timecode,
                     is_vfr=is_vfr,
-                    avg_frame_rate=avg_frame_rate
+                    avg_frame_rate=avg_frame_rate,
+                    is_interlaced=is_interlaced,
+                    field_order=field_order,
                 )
 
                 logger.info(
-                    "Probed '%s' via ffprobe in %.1f ms -> Dur: %s (%.1fs), Res: %s, FPS: %.2f%s, Offset: %.3fs, Audio: %d ch",
+                    "Probed '%s' via ffprobe in %.1f ms -> Dur: %s (%.1fs), Res: %s, FPS: %.2f%s%s, Offset: %.3fs, Audio: %d ch",
                     os.path.basename(norm_path),
                     elapsed_ms,
                     dur_disp or "Unknown",
@@ -310,6 +344,7 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                     resolution or "None",
                     frame_rate,
                     " (VFR)" if is_vfr else "",
+                    f" (Interlaced:{field_order})" if is_interlaced else "",
                     start_time,
                     audio_channels
                 )
@@ -333,7 +368,9 @@ def probe_media_file(file_path: str, use_cache: bool = True) -> Optional[ProbedM
                     start_time=start_time,
                     start_timecode=start_timecode,
                     is_vfr=is_vfr,
-                    avg_frame_rate=avg_frame_rate
+                    avg_frame_rate=avg_frame_rate,
+                    is_interlaced=is_interlaced,
+                    field_order=field_order,
                 )
             else:
                 logger.warning("ffprobe error on '%s': %s", os.path.basename(norm_path), proc.stderr.strip()[:100])

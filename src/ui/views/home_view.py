@@ -202,7 +202,7 @@ class ScriptParserDropCard(CardWidget):
         self.sub_lbl.setAlignment(Qt.AlignCenter)
         text_box.addWidget(self.sub_lbl)
 
-        self.hint_lbl = QLabel("Drop .docx anywhere or click to browse", self)
+        self.hint_lbl = QLabel("Drop .docx or .rainyproj anywhere or click to browse", self)
         self.hint_lbl.setAlignment(Qt.AlignCenter)
         text_box.addWidget(self.hint_lbl)
 
@@ -249,7 +249,12 @@ class ScriptParserDropCard(CardWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            path, _ = QFileDialog.getOpenFileName(self, "Open Script", "", "Word Documents (*.docx)")
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open Script or Project",
+                "",
+                "Supported Files (*.docx *.rainyproj);;Rainy Projects (*.rainyproj);;Word Documents (*.docx);;All Files (*.*)"
+            )
             if path:
                 self.file_selected.emit(path)
         super().mousePressEvent(event)
@@ -257,7 +262,8 @@ class ScriptParserDropCard(CardWidget):
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith('.docx'):
+                lf = url.toLocalFile().lower()
+                if lf.endswith('.docx') or lf.endswith('.rainyproj'):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -265,7 +271,8 @@ class ScriptParserDropCard(CardWidget):
     def dropEvent(self, event: QDropEvent):
         for url in event.mimeData().urls():
             local_path = url.toLocalFile()
-            if local_path.lower().endswith('.docx'):
+            lf = local_path.lower()
+            if lf.endswith('.docx') or lf.endswith('.rainyproj'):
                 self.file_selected.emit(local_path)
                 event.acceptProposedAction()
                 return
@@ -467,8 +474,8 @@ class HomeActionCard(CardWidget):
     def update_accent(self):
         from ..theme import ThemeManager
         pal = ThemeManager.get_palette()
-        rgb = pal.get("accent_rgb", "251, 113, 133")
-        accent = pal.get("accent", "#fb7185")
+        rgb = pal.get("accent_rgb", "56, 189, 248")
+        accent = pal.get("accent", "#38bdf8")
         text_col = pal.get("text", "#ffffff")
         muted_col = pal.get("muted", "#64748b")
         self.icon_box.setStyleSheet(f"""

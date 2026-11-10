@@ -9,7 +9,7 @@ from .logger import get_logger
 logger = get_logger("Database")
 
 DB_DIR = os.path.expanduser("~/.knot")
-DB_PATH = os.path.join(DB_DIR, "knot.db")
+DB_PATH = os.environ.get("KNOT_DB_PATH") or os.path.join(DB_DIR, "knot.db")
 
 class Database:
     _instance = None
@@ -187,6 +187,43 @@ class Database:
                 conn.commit()
                 logger.info("Migrated SQLite schema to version 6 (added start_time, start_timecode, is_vfr, avg_frame_rate to local_media_probe)")
 
+            if version < 7:
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS render_queue (
+                    id TEXT PRIMARY KEY,
+                    source_path TEXT,
+                    config_json TEXT,
+                    status TEXT,
+                    progress REAL DEFAULT 0.0,
+                    speed REAL DEFAULT 0.0,
+                    eta_seconds REAL DEFAULT 0.0,
+                    size_before INTEGER DEFAULT 0,
+                    size_after INTEGER DEFAULT 0,
+                    output_path TEXT DEFAULT '',
+                    error_msg TEXT DEFAULT '',
+                    summary_msg TEXT DEFAULT '',
+                    created_at REAL,
+                    updated_at REAL,
+                    sort_order INTEGER DEFAULT 0
+                )
+                """)
+                cursor.execute("PRAGMA user_version = 7")
+                conn.commit()
+                logger.info("Migrated SQLite schema to version 7 (added render_queue)")
+
+            if version < 8:
+                cols = {row[1] for row in cursor.execute("PRAGMA table_info(local_media_probe)").fetchall()}
+                new_cols = [
+                    ("is_interlaced", "INTEGER DEFAULT 0"),
+                    ("field_order", "TEXT DEFAULT 'progressive'"),
+                ]
+                for col_name, col_def in new_cols:
+                    if col_name not in cols:
+                        cursor.execute(f"ALTER TABLE local_media_probe ADD COLUMN {col_name} {col_def}")
+                cursor.execute("PRAGMA user_version = 8")
+                conn.commit()
+                logger.info("Migrated SQLite schema to version 8 (added is_interlaced, field_order to local_media_probe)")
+
     def verify_integrity(self) -> bool:
         """Verifies database integrity using PRAGMA quick_check; restores from latest backup if corrupt."""
         try:
@@ -298,121 +335,46 @@ class Database:
             ).fetchall()
             return [{"path": r["path"], "name": r["name"], "updated_at": r["updated_at"]} for r in rows]
 
-    # Delta Overrides (Non-destructive edits)
+    # Delta Overrides (Non-destructive in-memory edits, persisted inside .rainyproj savefiles)
     def save_override(self, doc_signature: str, item_id: str, start_tc: str, end_tc: str, text: Optional[str] = None):
-        with self._get_connection() as conn:
-            conn.execute("""
-            INSERT OR REPLACE INTO delta_overrides (doc_signature, item_id, start_tc, end_tc, text_override)
-            VALUES (?, ?, ?, ?, ?)
-            """, (doc_signature, item_id, start_tc, end_tc, text))
-            conn.commit()
+        if not hasattr(self, "_in_memory_overrides"):
+            self._in_memory_overrides = {}
+        self._in_memory_overrides.setdefault(doc_signature, {})[item_id] = {
+            "start_tc": start_tc,
+            "end_tc": end_tc,
+            "text": text
+        }
 
     def get_overrides(self, doc_signature: str) -> Dict[str, Dict[str, Any]]:
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT item_id, start_tc, end_tc, text_override FROM delta_overrides WHERE doc_signature = ?",
-                (doc_signature,)
-            ).fetchall()
-            return {
-                r["item_id"]: {
-                    "start_tc": r["start_tc"],
-                    "end_tc": r["end_tc"],
-                    "text": r["text_override"]
-                } for r in rows
-            }
+        if not hasattr(self, "_in_memory_overrides"):
+            self._in_memory_overrides = {}
+        return dict(self._in_memory_overrides.get(doc_signature, {}))
 
-    # Document State Management (Active & DataVault)
+    # Document State Management (Demoted from SQLite; projects are isolated self-contained .rainyproj files)
     def save_document(self, doc: DocumentState):
-        doc.updated_at = time.time()
-        
-        # Serialize to JSON dictionary
-        payload = {
-            "id": doc.id,
-            "file_signature": doc.file_signature,
-            "name": doc.name,
-            "file_path": doc.file_path,
-            "raw_html": doc.raw_html,
-            "items": [item.__dict__ for item in doc.items],
-            "notes": [n.__dict__ for n in doc.notes],
-            "custom_notes": [cn.__dict__ for cn in doc.custom_notes],
-            "headings": doc.headings,
-            "links": doc.links,
-            "checked_links": doc.checked_links,
-            "checked_notes": doc.checked_notes,
-            "link_colors": doc.link_colors,
-            "page_geometry": doc.page_geometry,
-            "blocks": doc.blocks,
-            "created_at": doc.created_at,
-            "updated_at": doc.updated_at,
-            "is_deleted": doc.is_deleted
-        }
-        
-        with self._get_connection() as conn:
-            conn.execute("""
-            INSERT OR REPLACE INTO documents (id, file_signature, name, file_path, data_json, is_deleted, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                doc.id, doc.file_signature, doc.name, doc.file_path, 
-                json.dumps(payload), 1 if doc.is_deleted else 0,
-                doc.created_at, doc.updated_at
-            ))
-            conn.commit()
+        """Deprecated: SQLite no longer stores massive document JSON dumps. State is saved in .rainyproj files."""
+        pass
 
     def get_document_by_signature(self, signature: str) -> Optional[DocumentState]:
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT data_json FROM documents WHERE file_signature = ?", (signature,)).fetchone()
-            if not row:
-                return None
-            return self._deserialize_doc(json.loads(row["data_json"]))
+        return None
 
     def get_active_documents(self) -> List[Dict[str, Any]]:
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT id, file_signature, name, file_path, updated_at FROM documents WHERE is_deleted = 0 ORDER BY updated_at DESC"
-            ).fetchall()
-            return [dict(r) for r in rows]
+        return []
 
     def get_deleted_documents(self) -> List[Dict[str, Any]]:
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT id, file_signature, name, file_path, updated_at FROM documents WHERE is_deleted = 1 ORDER BY updated_at DESC"
-            ).fetchall()
-            return [dict(r) for r in rows]
+        return []
 
     def soft_delete_document(self, doc_id: str):
-        with self._get_connection() as conn:
-            conn.execute("UPDATE documents SET is_deleted = 1, updated_at = ? WHERE id = ?", (time.time(), doc_id))
-            conn.commit()
+        pass
 
     def restore_document(self, doc_id: str):
-        with self._get_connection() as conn:
-            conn.execute("UPDATE documents SET is_deleted = 0, updated_at = ? WHERE id = ?", (time.time(), doc_id))
-            conn.commit()
+        pass
 
     def migrate_document_signature(self, old_signature: str, new_signature: str):
-        """Migrates document state and overrides in-place when a .docx file is saved and its SHA256 changes."""
-        if not old_signature or not new_signature or old_signature == new_signature:
-            return
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT id, data_json FROM documents WHERE file_signature = ?", (old_signature,)).fetchone()
-            conn.execute("DELETE FROM documents WHERE file_signature = ? AND file_signature != ?", (new_signature, old_signature))
-            if row:
-                try:
-                    payload = json.loads(row["data_json"])
-                    payload["file_signature"] = new_signature
-                    new_json = json.dumps(payload)
-                except Exception:
-                    new_json = row["data_json"]
-                conn.execute(
-                    "UPDATE documents SET file_signature = ?, data_json = ?, updated_at = ? WHERE id = ?",
-                    (new_signature, new_json, time.time(), row["id"])
-                )
-            conn.execute("DELETE FROM delta_overrides WHERE doc_signature = ? AND doc_signature != ?", (new_signature, old_signature))
-            conn.execute(
-                "UPDATE delta_overrides SET doc_signature = ? WHERE doc_signature = ?",
-                (new_signature, old_signature)
-            )
-            conn.commit()
+        if not hasattr(self, "_in_memory_overrides"):
+            self._in_memory_overrides = {}
+        if old_signature in self._in_memory_overrides:
+            self._in_memory_overrides[new_signature] = self._in_memory_overrides.pop(old_signature)
 
     def _deserialize_doc(self, data: Dict[str, Any]) -> DocumentState:
         items = [ScriptItem(**i) for i in data.get("items", [])]
@@ -443,6 +405,10 @@ class Database:
             link_colors=data.get("link_colors", {}),
             page_geometry=data.get("page_geometry", default_geom),
             blocks=data.get("blocks", []),
+            vo_file_path=data.get("vo_file_path", ""),
+            vo_segments=data.get("vo_segments", []),
+            vo_block_diffs=data.get("vo_block_diffs", {}),
+            timeline_assembly=data.get("timeline_assembly", []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             is_deleted=bool(data.get("is_deleted", False))
@@ -591,7 +557,9 @@ class Database:
         start_time: float = 0.0,
         start_timecode: str = "",
         is_vfr: bool = False,
-        avg_frame_rate: float = 0.0
+        avg_frame_rate: float = 0.0,
+        is_interlaced: bool = False,
+        field_order: str = "progressive"
     ):
         """Persists probed media stream properties into SQLite."""
         norm_path = os.path.normpath(file_path)
@@ -601,15 +569,26 @@ class Database:
                 file_path, file_size, mtime, duration_seconds, duration_display,
                 width, height, resolution, frame_rate, audio_channels,
                 sample_rate, video_codec, audio_codec, start_time,
-                start_timecode, is_vfr, avg_frame_rate, probed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                start_timecode, is_vfr, avg_frame_rate, is_interlaced, field_order, probed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 norm_path, file_size, mtime, duration_seconds, duration_display,
                 width, height, resolution, frame_rate, audio_channels,
                 sample_rate, video_codec, audio_codec, float(start_time or 0.0),
-                str(start_timecode or ""), 1 if is_vfr else 0, float(avg_frame_rate or 0.0), time.time()
+                str(start_timecode or ""), 1 if is_vfr else 0, float(avg_frame_rate or 0.0),
+                1 if is_interlaced else 0, str(field_order or "progressive"), time.time()
             ))
             conn.commit()
+
+    def delete_local_media_probe(self, file_path: str) -> bool:
+        """Deletes a specific cached media probe record."""
+        norm_path = os.path.normpath(file_path)
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM local_media_probe WHERE file_path = ?", (norm_path,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    delete_media_probe = delete_local_media_probe
 
     def get_probed_media_count(self) -> int:
         """Returns total number of cached media probe records."""
@@ -625,5 +604,52 @@ class Database:
             conn.commit()
             logger.info("Cleared %d cached local media probe records", count)
             return count
+
+    # Render Queue Persistence
+    def save_render_job(self, job_dict: Dict[str, Any]):
+        with self._get_connection() as conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO render_queue (
+                id, source_path, config_json, status, progress, speed, eta_seconds,
+                size_before, size_after, output_path, error_msg, summary_msg,
+                created_at, updated_at, sort_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                job_dict["id"],
+                job_dict["source_path"],
+                job_dict.get("config_json", "{}"),
+                job_dict.get("status", "QUEUED"),
+                float(job_dict.get("progress", 0.0)),
+                float(job_dict.get("speed", 0.0)),
+                float(job_dict.get("eta_seconds", 0.0)),
+                int(job_dict.get("size_before", 0)),
+                int(job_dict.get("size_after", 0)),
+                job_dict.get("output_path", ""),
+                job_dict.get("error_msg", ""),
+                job_dict.get("summary_msg", ""),
+                float(job_dict.get("created_at", time.time())),
+                float(job_dict.get("updated_at", time.time())),
+                int(job_dict.get("sort_order", 0)),
+            ))
+            conn.commit()
+
+    def get_render_jobs(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_queue ORDER BY sort_order ASC, created_at ASC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_render_job(self, job_id: str):
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM render_queue WHERE id = ?", (job_id,))
+            conn.commit()
+
+    def clear_finished_render_jobs(self):
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM render_queue WHERE status IN ('DONE', 'CANCELLED', 'FAILED', 'INTERRUPTED')"
+            )
+            conn.commit()
 
 db = Database()

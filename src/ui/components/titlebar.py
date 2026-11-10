@@ -133,6 +133,7 @@ class TitleBarMenuWidget(QWidget):
     # File actions
     open_doc_requested = Signal()
     open_project_requested = Signal()
+    reimport_script_requested = Signal()
     save_project_as_requested = Signal()
     set_footage_requested = Signal()
     open_projects_folder_requested = Signal()
@@ -196,6 +197,11 @@ class TitleBarMenuWidget(QWidget):
         open_proj_act.triggered.connect(self.open_project_requested.emit)
         menu.addAction(open_proj_act)
 
+        reimport_act = Action(FluentIcon.SYNC, "Re-import / Refresh Script from DOCX...", self)
+        reimport_act.setEnabled(self._has_document)
+        reimport_act.triggered.connect(self.reimport_script_requested.emit)
+        menu.addAction(reimport_act)
+
         save_proj_act = Action(FluentIcon.SAVE_AS, "Save Project Copy As...", self)
         save_proj_act.setShortcut("Ctrl+Shift+S")
         save_proj_act.setEnabled(self._has_document)
@@ -203,11 +209,6 @@ class TitleBarMenuWidget(QWidget):
         menu.addAction(save_proj_act)
 
         menu.addSeparator()
-
-        footage_act = Action(FluentIcon.FOLDER_ADD, "Set Footage Directory...", self)
-        footage_act.setEnabled(self._has_document)
-        footage_act.triggered.connect(self.set_footage_requested.emit)
-        menu.addAction(footage_act)
 
         folder_act = Action(FluentIcon.ZIP_FOLDER, "Open Projects Folder (Explorer)", self)
         folder_act.triggered.connect(self.open_projects_folder_requested.emit)
@@ -294,6 +295,7 @@ class TitleBarMenuWidget(QWidget):
 class TitleBarStatsWidget(QWidget):
     """Contextual header stats on the right side of the title bar without redundant box borders."""
     pin_toggled = Signal(bool)
+    render_queue_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -360,6 +362,16 @@ class TitleBarStatsWidget(QWidget):
         s_layout.addWidget(self.workspace_stats)
         self.workspace_stats.hide() # Hidden by default until document is loaded
 
+        # 2b. Background Render Queue Indicator Pill (Hidden when idle)
+        self.render_pill = QPushButton("Render 0/0", self.status_container)
+        self.render_pill.setObjectName("TitleBarRenderPill")
+        self.render_pill.setCursor(QCursor(Qt.PointingHandCursor))
+        self.render_pill.setFixedHeight(22)
+        self.render_pill.setToolTip("Background Render Queue Active — Click to open Footage Library")
+        self.render_pill.clicked.connect(self.render_queue_clicked.emit)
+        self.render_pill.hide()
+        s_layout.addWidget(self.render_pill)
+
         self.main_layout.addWidget(self.status_container)
 
         # 3. Pin Window Button (clean, borderless transparent tool button)
@@ -387,6 +399,30 @@ class TitleBarStatsWidget(QWidget):
         self.set_editor_identity(self._last_editor_name, self._last_is_offline, self._last_time_left)
         self.update_stats(self._last_total, self._last_checked, self._last_seconds)
         self.pin_btn.set_pinned(self.is_pinned)
+        if hasattr(self, "render_pill"):
+            self.render_pill.setStyleSheet("""
+                QPushButton#TitleBarRenderPill {
+                    background-color: rgba(56, 189, 248, 0.16);
+                    color: #38bdf8;
+                    border: 1px solid rgba(56, 189, 248, 0.38);
+                    border-radius: 4px;
+                    font-size: 10.5px;
+                    font-weight: 700;
+                    padding: 0px 8px;
+                }
+                QPushButton#TitleBarRenderPill:hover {
+                    background-color: rgba(56, 189, 248, 0.26);
+                }
+            """)
+
+    def update_render_queue_indicator(self, active: bool, text: str = ""):
+        if not hasattr(self, "render_pill"):
+            return
+        if active and text:
+            self.render_pill.setText(text)
+            self.render_pill.show()
+        else:
+            self.render_pill.hide()
 
     def set_has_document(self, has_doc: bool):
         self._has_document = has_doc

@@ -21,6 +21,25 @@ class EditorNote:
     timestamp: float = field(default_factory=time.time)
 
 @dataclass
+class VOSegment:
+    id: int
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class BlockVODiff:
+    block_id: int
+    vo_segment_ids: List[int] = field(default_factory=list)
+    vo_start_sec: float = 0.0
+    vo_end_sec: float = 0.0
+    vo_actual_text: str = ""
+    match_type: str = "EXACT"  # EXACT | MODIFIED | ADLIB | RETAKE_CUT
+    adlib_note: str = ""
+
+
+@dataclass
 class ScriptItem:
     id: str
     row_index: int
@@ -41,6 +60,14 @@ class ScriptItem:
     is_checked: bool = False
     has_warning: bool = False
     warning_reason: str = ""
+    # Voiceover (VO) AI Assembly Lock state
+    vo_locked: bool = False
+    vo_cut_after_sec: Optional[float] = None
+    vo_resume_sec: Optional[float] = None
+    vo_lead_in_text: str = ""
+    vo_has_adlib: bool = False
+    vo_adlib_note: str = ""
+    vo_status: str = "PENDING"    # PENDING | LOCKED | NEEDS_REVIEW
 
     def __post_init__(self):
         if not self.meta:
@@ -79,6 +106,12 @@ class DocumentState:
         "margin_right_pt": 72.0,
     })
     blocks: List[Dict[str, Any]] = field(default_factory=list)
+    vo_file_path: str = ""
+    vo_files: List[str] = field(default_factory=list)
+    vo_transcript_path: str = ""
+    vo_segments: List[Dict[str, Any]] = field(default_factory=list)
+    vo_block_diffs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    timeline_assembly: List[Dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     is_deleted: bool = False
