@@ -846,11 +846,18 @@ class WorkspaceView(QWidget):
         if not self.current_doc:
             raise RuntimeError("No script document is currently loaded in Clickables.")
 
-        fps_str = db.get_setting("timeline_framerate", "23.976")
-        try:
-            fps = float(fps_str)
-        except Exception:
-            fps = 23.976
+        fps_param = params.get("fps")
+        if fps_param is not None:
+            try:
+                fps = float(fps_param)
+            except Exception:
+                fps = 30.0
+        else:
+            fps_str = db.get_setting("timeline_framerate", "23.976")
+            try:
+                fps = float(fps_str)
+            except Exception:
+                fps = 23.976
 
         linked_map = getattr(self, "linked_footage", {}) or {}
 
@@ -1177,3 +1184,23 @@ class WorkspaceView(QWidget):
         next_idx = (cur_idx + 1) % len(arolls)
         target = arolls[next_idx]
         self._on_aroll_card_targeted(target.id, target)
+
+    def replace_linked_footage_path(self, old_path: str, new_path: str):
+        """
+        Updates internal linked footage mapping when a video file is transcoded/renamed (e.g. .avi -> .mp4).
+        Updates linked_footage, refreshes thumbnails/cards, and refreshes the trimmer player if the active file changed.
+        """
+        if not getattr(self, "linked_footage", None):
+            return
+        norm_old = os.path.normcase(os.path.abspath(old_path))
+        changed = False
+        for k, v in list(self.linked_footage.items()):
+            if v and os.path.normcase(os.path.abspath(v)) == norm_old:
+                self.linked_footage[k] = new_path
+                changed = True
+        if changed:
+            self.set_footage_folder(getattr(self, "footage_folder", ""), self.linked_footage)
+            if hasattr(self, "trimmer_window") and self.trimmer_window and self.trimmer_window.isVisible():
+                if self.trimmer_window.current_file and os.path.normcase(os.path.abspath(self.trimmer_window.current_file)) == norm_old:
+                    self.trimmer_window.refresh_probed_metadata(new_path)
+

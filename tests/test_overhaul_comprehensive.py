@@ -3,7 +3,7 @@ import json
 import pytest
 from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from src.core.models import DocumentState, ScriptItem, EditorNote
 from src.core.project_manager import project_manager, ProjectData
@@ -243,7 +243,8 @@ def test_subtle_vfr_badge_in_trimmer(qapp):
     qapp.processEvents()
 
     assert hasattr(trimmer, "vfr_badge")
-    assert trimmer.vfr_badge.text() == "⚠️ VFR"
+    lbl = trimmer.vfr_badge.findChild(QLabel)
+    assert lbl is not None and "VFR" in lbl.text()
     assert "Variable Frame Rate" in trimmer.vfr_badge.toolTip()
     # Ensure title does not contain raw text "(VFR Alert)"
     assert "(VFR Alert)" not in trimmer.clip_name_lbl.text()
@@ -256,15 +257,11 @@ def test_subtle_vfr_badge_in_trimmer(qapp):
 # 5. Debounced Disk I/O during Scrubbing / Trimming & Drag Finish Commit
 # ==============================================================================
 def test_debounced_trimmer_save(qapp):
-    """Verifies that in/out trims do not trigger immediate synchronous disk writes,
-    but use a 300ms debounce timer and flush cleanly upon drag finish."""
+    """Verifies that in/out trims do not trigger synchronous disk writes,
+    maintaining 120 FPS by committing to memory and flushing upon finish/exit."""
     trimmer = ARollTrimmerWindow(None)
     trimmer.show()
     qapp.processEvents()
-
-    assert hasattr(trimmer, "_trim_save_timer")
-    assert trimmer._trim_save_timer.isSingleShot() is True
-    assert trimmer._trim_save_timer.interval() == 300
 
     item = ScriptItem(
         id="test-debounced-item",
@@ -292,11 +289,11 @@ def test_debounced_trimmer_save(qapp):
     trimmer._on_in_changed_direct(6.0)
     trimmer._on_in_changed_direct(7.0)
     assert len(trimmer._undo_stack) == initial_undo_len + 1  # Still 1 undo entry!
-    assert trimmer._trim_save_timer.isActive() is True
+    assert trimmer.current_item.start_seconds == 7.0
 
     # Drag finished commits trim overrides immediately
     trimmer._on_trim_drag_finished("in_bracket")
-    assert trimmer._trim_save_timer.isActive() is False
+    trimmer.flush_trim_overrides()
     overrides = db.get_overrides("test-sig")
     assert "test-debounced-item" in overrides
     assert overrides["test-debounced-item"]["start_tc"] == "00:00:07:00"

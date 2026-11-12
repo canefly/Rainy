@@ -796,6 +796,11 @@ class MainWindow(FluentWindow):
             self.tray_icon.showMessage(title, message, icon_type, 6000)
 
     def _on_global_render_job_finished(self, job, success: bool, final_path_or_err: str):
+        if success and final_path_or_err and os.path.isfile(final_path_or_err):
+            # If the file path changed (e.g. .avi -> .mp4), update linked footage in workspace
+            if hasattr(self, "workspace_view") and self.workspace_view:
+                self.workspace_view.replace_linked_footage_path(job.source_path, final_path_or_err)
+
         if not success and final_path_or_err != "Cancelled by user":
             title = f"Render Failed: {os.path.basename(job.source_path)}"
             err_msg = str(final_path_or_err)[:120]

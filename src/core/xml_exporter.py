@@ -689,8 +689,9 @@ def generate_assembled_fcp_xml(
 
             # 1. V1 Track ClipItem (A-Roll Video) - placed ONLY if asset has video
             v1_item = None
+            v1_id = f"v1-aroll-{aroll_clip_counter}"
             if has_v:
-                v1_item = ET.SubElement(v1_track, "clipitem", id=f"v1-aroll-{aroll_clip_counter}")
+                v1_item = ET.SubElement(v1_track, "clipitem", id=v1_id)
                 ET.SubElement(v1_item, "name").text = f"[A-ROLL] {clip_title} {clip_text[:28]}".strip()
                 ET.SubElement(v1_item, "duration").text = str(dur_frames)
                 v_rate = ET.SubElement(v1_item, "rate")
@@ -704,6 +705,10 @@ def generate_assembled_fcp_xml(
                 if f_info:
                     _attach_assembled_file(v1_item, f_info, needed_dur)
 
+                v_src = ET.SubElement(v1_item, "sourcetrack")
+                ET.SubElement(v_src, "mediatype").text = "video"
+                ET.SubElement(v_src, "trackindex").text = "1"
+
                 if include_clip_markers:
                     v_marker = ET.SubElement(v1_item, "marker")
                     ET.SubElement(v_marker, "name").text = clip_title
@@ -712,8 +717,10 @@ def generate_assembled_fcp_xml(
                     ET.SubElement(v_marker, "out").text = str(out_frame)
 
             # 2. A2 Track ClipItem (A-Roll Native Audio) - placed ONLY if asset has native audio
+            a2_item = None
+            a2_id = f"a2-aroll-{aroll_clip_counter}"
             if has_a:
-                a2_item = ET.SubElement(a2_aroll_track, "clipitem", id=f"a2-aroll-{aroll_clip_counter}")
+                a2_item = ET.SubElement(a2_aroll_track, "clipitem", id=a2_id)
                 ET.SubElement(a2_item, "name").text = f"[A-ROLL AUDIO] {clip_title}"
                 ET.SubElement(a2_item, "duration").text = str(dur_frames)
                 a_rate = ET.SubElement(a2_item, "rate")
@@ -727,12 +734,50 @@ def generate_assembled_fcp_xml(
                 if f_info:
                     _attach_assembled_file(a2_item, f_info, needed_dur)
 
+                a_src = ET.SubElement(a2_item, "sourcetrack")
+                ET.SubElement(a_src, "mediatype").text = "audio"
+                ET.SubElement(a_src, "trackindex").text = "1"
+
                 if include_clip_markers and not v1_item:
                     a_marker = ET.SubElement(a2_item, "marker")
                     ET.SubElement(a_marker, "name").text = clip_title
                     ET.SubElement(a_marker, "comment").text = clip_text
                     ET.SubElement(a_marker, "in").text = str(in_frame)
                     ET.SubElement(a_marker, "out").text = str(out_frame)
+
+            # 3. Synchronized Link Definition between V1 and A2
+            # Explicitly links the video and audio clipitems so Premiere Pro treats them as connected clips
+            if v1_item is not None and a2_item is not None:
+                v1_clip_idx = len(v1_track.findall("clipitem"))
+                a2_clip_idx = len(a2_aroll_track.findall("clipitem"))
+
+                # Link definitions inside V1 clipitem
+                v_link1 = ET.SubElement(v1_item, "link")
+                ET.SubElement(v_link1, "linkclipref").text = v1_id
+                ET.SubElement(v_link1, "mediatype").text = "video"
+                ET.SubElement(v_link1, "trackindex").text = "1"
+                ET.SubElement(v_link1, "clipindex").text = str(v1_clip_idx)
+
+                v_link2 = ET.SubElement(v1_item, "link")
+                ET.SubElement(v_link2, "linkclipref").text = a2_id
+                ET.SubElement(v_link2, "mediatype").text = "audio"
+                ET.SubElement(v_link2, "trackindex").text = "2"
+                ET.SubElement(v_link2, "clipindex").text = str(a2_clip_idx)
+                ET.SubElement(v_link2, "groupindex").text = "1"
+
+                # Link definitions inside A2 clipitem
+                a_link1 = ET.SubElement(a2_item, "link")
+                ET.SubElement(a_link1, "linkclipref").text = v1_id
+                ET.SubElement(a_link1, "mediatype").text = "video"
+                ET.SubElement(a_link1, "trackindex").text = "1"
+                ET.SubElement(a_link1, "clipindex").text = str(v1_clip_idx)
+
+                a_link2 = ET.SubElement(a2_item, "link")
+                ET.SubElement(a_link2, "linkclipref").text = a2_id
+                ET.SubElement(a_link2, "mediatype").text = "audio"
+                ET.SubElement(a_link2, "trackindex").text = "2"
+                ET.SubElement(a_link2, "clipindex").text = str(a2_clip_idx)
+                ET.SubElement(a_link2, "groupindex").text = "1"
 
     ET.SubElement(seq, "duration").text = str(curr_timeline_frame)
     xml_str = ET.tostring(xmeml, encoding="utf-8")
