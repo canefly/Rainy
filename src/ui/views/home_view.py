@@ -589,10 +589,12 @@ class HomeView(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(20)
 
+        from ...core.updater import APP_VERSION
         self.updates_card = HomeActionCard(
             FluentIcon.INFO, 
             "Check for Updates", 
             "About this app & Canefly", 
+            badge_text=f"v{APP_VERSION}",
             parent=self
         )
         self.updates_card.clicked.connect(self.updates_requested.emit)

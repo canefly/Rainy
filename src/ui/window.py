@@ -148,6 +148,7 @@ class MainWindow(FluentWindow):
         self.title_stats.setFixedHeight(32)
         self.title_stats.pin_toggled.connect(self._on_pin_toggled)
         self.title_stats.render_queue_clicked.connect(self._on_menu_set_footage)
+        self.title_stats.update_requested.connect(self.open_about)
         insert_idx = max(1, self.titleBar.hBoxLayout.count() - 1)
         self.titleBar.hBoxLayout.insertWidget(insert_idx, self.title_stats, 0, Qt.AlignTop)
         self._apply_caption_button_theme()
@@ -346,6 +347,19 @@ class MainWindow(FluentWindow):
             on_verified=self._on_auth_verified,
             on_failed=self._on_auth_failed
         )
+        # Asynchronously check for application updates (No-OTA Policy)
+        self._init_updater()
+
+    def _init_updater(self):
+        try:
+            from ..core.updater import UpdateService
+            updater = UpdateService.instance()
+            updater.check_for_updates(on_available=self._on_update_available)
+        except Exception:
+            pass
+
+    def _on_update_available(self, version: str, url: str, changelog: list):
+        self.title_stats.set_update_available(version)
 
     def _on_auth_verified(self, name: str, is_offline: bool, time_left: str):
         self.title_stats.set_editor_identity(name, is_offline, time_left)
