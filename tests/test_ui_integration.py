@@ -500,8 +500,8 @@ def test_fluent_smooth_scrolling_and_micro_interactions(qapp):
     img = QImage(600, 44, QImage.Format_ARGB32)
     img.fill(Qt.transparent)
     card.render(img)
-    # Check green tint pixel in checked state
-    center_col = img.pixelColor(300, 22)
+    # Check green tint pixel in checked state (sample card surface margin)
+    center_col = img.pixelColor(4, 22)
     assert center_col.green() > center_col.red()  # Confirms emerald tint
 
     # Test highlight state with Pink theme
@@ -510,7 +510,7 @@ def test_fluent_smooth_scrolling_and_micro_interactions(qapp):
     card.set_highlighted(True)
     img.fill(Qt.transparent)
     card.render(img)
-    hl_col = img.pixelColor(300, 22)
+    hl_col = img.pixelColor(4, 22)
     assert hl_col.red() > hl_col.green()  # Theme accent highlight (red dominant for pink/accent)
 
     card.close()
