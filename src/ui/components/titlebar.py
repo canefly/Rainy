@@ -296,6 +296,7 @@ class TitleBarStatsWidget(QWidget):
     """Contextual header stats on the right side of the title bar without redundant box borders."""
     pin_toggled = Signal(bool)
     render_queue_clicked = Signal()
+    update_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -333,6 +334,16 @@ class TitleBarStatsWidget(QWidget):
 
         self.user_name_lbl = QLabel("CANEEE", self.status_container)
         s_layout.addWidget(self.user_name_lbl)
+
+        # 1b. Update Available Pill (Hidden by default, shown when newer version detected)
+        self.update_pill = QPushButton("Update Available", self.status_container)
+        self.update_pill.setObjectName("TitleBarUpdatePill")
+        self.update_pill.setCursor(QCursor(Qt.PointingHandCursor))
+        self.update_pill.setFixedHeight(22)
+        self.update_pill.setToolTip("Click to view release notes and download update")
+        self.update_pill.clicked.connect(self.update_requested.emit)
+        self.update_pill.hide()
+        s_layout.addWidget(self.update_pill)
 
         # 2. Workspace Contextual Stats (Hidden on Home Screen)
         self.workspace_stats = QWidget(self.status_container)
@@ -399,21 +410,28 @@ class TitleBarStatsWidget(QWidget):
         self.set_editor_identity(self._last_editor_name, self._last_is_offline, self._last_time_left)
         self.update_stats(self._last_total, self._last_checked, self._last_seconds)
         self.pin_btn.set_pinned(self.is_pinned)
-        if hasattr(self, "render_pill"):
-            self.render_pill.setStyleSheet("""
-                QPushButton#TitleBarRenderPill {
-                    background-color: rgba(56, 189, 248, 0.16);
-                    color: #38bdf8;
-                    border: 1px solid rgba(56, 189, 248, 0.38);
+        if hasattr(self, "update_pill"):
+            rgb = pal.get("accent_rgb", "56, 189, 248")
+            accent = pal.get("accent", "#38bdf8")
+            self.update_pill.setStyleSheet(f"""
+                QPushButton#TitleBarUpdatePill {{
+                    background-color: rgba({rgb}, 0.16);
+                    color: {accent};
+                    border: 1px solid rgba({rgb}, 0.38);
                     border-radius: 4px;
                     font-size: 10.5px;
                     font-weight: 700;
                     padding: 0px 8px;
-                }
-                QPushButton#TitleBarRenderPill:hover {
-                    background-color: rgba(56, 189, 248, 0.26);
-                }
+                }}
+                QPushButton#TitleBarUpdatePill:hover {{
+                    background-color: rgba({rgb}, 0.28);
+                }}
             """)
+
+    def set_update_available(self, version: str):
+        if hasattr(self, "update_pill"):
+            self.update_pill.setText(f"Update: v{version}")
+            self.update_pill.show()
 
     def update_render_queue_indicator(self, active: bool, text: str = ""):
         if not hasattr(self, "render_pill"):
