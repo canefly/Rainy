@@ -62,11 +62,27 @@ $IssPath = Join-Path $ProjectRoot "installer\setup.iss"
 Write-Host ">>> Compiling installer via $IssPath..." -ForegroundColor Cyan
 & "$IsccPath" "$IssPath"
 
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "=================================================================" -ForegroundColor Green
-    Write-Host " SUCCESS: Inno Setup installer compiled successfully!" -ForegroundColor Green
-    Write-Host " Directory: $DistDir" -ForegroundColor White
-    Write-Host "=================================================================" -ForegroundColor Green
-} else {
+if ($LASTEXITCODE -ne 0) {
     Write-Error "ISCC.exe failed with exit code $LASTEXITCODE"
 }
+
+# 5. Build Portable ZIP Release Archive
+$ZipPath = Join-Path $DistDir "RainyTools_v1.2.0_Portable.zip"
+Write-Host ">>> Packaging portable release archive: $ZipPath..." -ForegroundColor Cyan
+if (Test-Path $ZipPath) {
+    Remove-Item -Path $ZipPath -Force
+}
+$TarCmd = Get-Command "tar.exe" -ErrorAction SilentlyContinue
+if ($TarCmd) {
+    & $TarCmd.Source -a -c -f "$ZipPath" -C "$ProjectRoot\dist_nuitka\main.dist" .
+} else {
+    Compress-Archive -Path "$ProjectRoot\dist_nuitka\main.dist\*" -DestinationPath "$ZipPath" -Force
+}
+
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host " SUCCESS: Release packaging pipeline completed successfully!" -ForegroundColor Green
+Write-Host " Outputs:" -ForegroundColor White
+Get-ChildItem -Path $DistDir | ForEach-Object {
+    Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)" -ForegroundColor White
+}
+Write-Host "=================================================================" -ForegroundColor Green

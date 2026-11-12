@@ -55,8 +55,8 @@ if (Test-Path $MetaReader) {
     }
 }
 
-# 3. Clean any orphaned compiler instances
-Get-Process -Name "cl" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# 3. Clean any orphaned compiler or running application instances
+Get-Process -Name "RainyParser", "cl" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 # 4. Run Nuitka Compilation
 Write-Host ">>> Invoking Nuitka compiler..." -ForegroundColor Green
@@ -84,7 +84,10 @@ $SourceBin = Join-Path $ProjectRoot "bin"
 $DestBin = Join-Path $ProjectRoot "dist_nuitka\main.dist\bin"
 if (Test-Path $SourceBin) {
     Write-Host ">>> Bundling native binaries from bin/ to main.dist/bin/..." -ForegroundColor Cyan
-    Copy-Item -Path $SourceBin -Destination $DestBin -Recurse -Force
+    if (-not (Test-Path $DestBin)) {
+        New-Item -ItemType Directory -Path $DestBin -Force | Out-Null
+    }
+    Copy-Item -Path "$SourceBin\*" -Destination $DestBin -Recurse -Force
 }
 
 $ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\RainyParser.exe"
