@@ -169,6 +169,14 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                     "type": "string",
                     "description": "Destination .xml path. Leave empty to save alongside the active script.",
                 },
+                "fps": {
+                    "type": "number",
+                    "description": "Timeline sequence framerate (e.g. 23.976, 24, 25, 29.97, 30.0, 59.94, 60). Default 30.0.",
+                },
+                "include_clip_markers": {
+                    "type": "boolean",
+                    "description": "Whether to inject descriptive timeline clip markers with script text and links. Default False.",
+                },
                 "assembly_segments": {
                     "type": "array",
                     "description": "Optional explicit list of NARRATION_PACK and AROLL_CLIP segments. If omitted, Rainy builds them automatically from the locked A-Roll cards.",
@@ -180,27 +188,83 @@ MCP_TOOLS: List[Dict[str, Any]] = [
 ]
 
 
+def load_instructions() -> str:
+    """Loads the bundled SOP instructions markdown file shipped alongside this MCP server."""
+    inst_path = os.path.join(os.path.dirname(__file__), "instructions.md")
+    if os.path.isfile(inst_path):
+        try:
+            with open(inst_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
+    return ""
+
+
 def handle_mcp_request(req: Dict[str, Any], pipe_name: str = PIPE_NAME) -> Optional[Dict[str, Any]]:
     method = req.get("method", "")
     req_id = req.get("id")
     params = req.get("params") or {}
 
     if method == "initialize":
+        instructions_text = load_instructions()
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
+                "capabilities": {
+                    "tools": {},
+                    "resources": {},
+                    "prompts": {},
+                },
                 "serverInfo": {
                     "name": "knot-native-mcp",
                     "version": "1.0.0",
                 },
+                "instructions": instructions_text,
             },
         }
 
     if method.startswith("notifications/"):
         return None
+
+    if method == "resources/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "resources": [
+                    {
+                        "uri": "knot://instructions/vo-assembly",
+                        "name": "Rainy VO & A-Roll Assembly SOP",
+                        "description": "Standard operating procedure for voiceover alignment, ad-lib detection, and timeline assembly in Rainy.",
+                        "mimeType": "text/markdown",
+                    }
+                ]
+            },
+        }
+
+    if method == "resources/read":
+        uri = params.get("uri", "")
+        if uri == "knot://instructions/vo-assembly":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "text/markdown",
+                            "text": load_instructions(),
+                        }
+                    ]
+                },
+            }
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": f"Resource not found: {uri}"},
+        }
 
     if method == "tools/list":
         return {

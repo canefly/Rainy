@@ -34,11 +34,11 @@ def test_encoder_probe():
     assert "libx264" in encoders
     assert encoders["libx264"] is True
 
-    rec = get_recommended_encoder(prefer_hevc=False)
+    rec = get_recommended_encoder()
     assert rec in ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
-
+    # Even when prefer_hevc is passed, we strictly enforce H.264
     rec_hevc = get_recommended_encoder(prefer_hevc=True)
-    assert rec_hevc in ["hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265", "libx264"]
+    assert rec_hevc in ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
 
 
 def test_transcode_config_defaults():
@@ -84,13 +84,14 @@ def test_atomic_replace_protocol():
         assert os.path.exists(src_path)
         assert os.path.exists(tmp_path)
 
-        success, msg = perform_atomic_replace(src_path, tmp_path)
+        success, target_path = perform_atomic_replace(src_path, tmp_path)
         assert success is True
-        assert os.path.exists(src_path)
+        assert target_path == src_path
+        assert os.path.exists(target_path)
         assert not os.path.exists(tmp_path)
 
         # Check content is the new content
-        with open(src_path, "rb") as f_res:
+        with open(target_path, "rb") as f_res:
             assert f_res.read() == b"transcoded_cfr_data_987654321"
 
     finally:
@@ -103,22 +104,57 @@ def test_atomic_replace_protocol():
                 pass
 
 
+def test_atomic_replace_avi_to_mp4():
+    """Verifies that an .avi source file is replaced with a clean .mp4 output container."""
+    tmp_dir = tempfile.gettempdir()
+    avi_path = os.path.join(tmp_dir, f"test_footage_{os.getpid()}.avi")
+    mp4_target_expected = os.path.join(tmp_dir, f"test_footage_{os.getpid()}.mp4")
+    temp_transcode = os.path.join(tmp_dir, f"test_footage_{os.getpid()}.click_transcode.mp4")
+
+    with open(avi_path, "wb") as f:
+        f.write(b"RIFF_AVI_SOURCE_DATA")
+
+    with open(temp_transcode, "wb") as f:
+        f.write(b"ISOM_MP4_TRANSCODED_DATA")
+
+    try:
+        assert os.path.exists(avi_path)
+        assert os.path.exists(temp_transcode)
+
+        success, target_path = perform_atomic_replace(avi_path, temp_transcode)
+        assert success is True
+        assert target_path == mp4_target_expected
+        assert target_path.endswith(".mp4")
+        assert os.path.exists(target_path)
+        assert not os.path.exists(temp_transcode)
+        assert not os.path.exists(avi_path)
+
+        with open(target_path, "rb") as f:
+            assert f.read() == b"ISOM_MP4_TRANSCODED_DATA"
+    finally:
+        for p in (avi_path, mp4_target_expected, temp_transcode):
+            if os.path.exists(p):
+                send_to_recycle_bin(p)
+
+
 def test_encoder_catalog_and_hardware_status():
     status_headline, best_enc = get_hardware_status_summary()
     assert isinstance(status_headline, str)
     assert len(status_headline) > 0
     assert isinstance(best_enc, str)
+    # Strictly H.264
+    assert "hevc" not in best_enc.lower()
 
     catalog = get_encoder_catalog()
-    assert len(catalog) >= 8
+    assert len(catalog) >= 4
 
     encoder_ids = [c[0] for c in catalog]
     assert "h264_nvenc" in encoder_ids
-    assert "hevc_nvenc" in encoder_ids
     assert "h264_amf" in encoder_ids
-    assert "hevc_amf" in encoder_ids
     assert "h264_qsv" in encoder_ids
     assert "libx264" in encoder_ids
+    assert "hevc_nvenc" not in encoder_ids
+    assert "libx265" not in encoder_ids
 
     # Check structure
     for enc_id, label, is_avail, note in catalog:

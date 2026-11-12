@@ -191,35 +191,22 @@ def get_hardware_status_summary() -> Tuple[str, str]:
 
 def get_encoder_catalog() -> List[Tuple[str, str, bool, str]]:
     """
-    Returns full list of supported encoder definitions:
+    Returns full list of supported H.264 encoder definitions.
+    Strictly forces H.264 (AVC) across all hardware/software engines for 100% universal NLE Premiere Pro compatibility.
     (encoder_id, display_label, is_supported_on_current_machine, requirement_note)
     """
     encoders = detect_available_encoders()
     return [
-        ("h264_nvenc", "NVIDIA NVENC H.264", bool(encoders.get("h264_nvenc")), "Requires NVIDIA GPU"),
-        ("hevc_nvenc", "NVIDIA NVENC HEVC / H.265", bool(encoders.get("hevc_nvenc")), "Requires NVIDIA GPU"),
-        ("h264_amf", "AMD AMF H.264", bool(encoders.get("h264_amf")), "Requires AMD Radeon GPU"),
-        ("hevc_amf", "AMD AMF HEVC / H.265", bool(encoders.get("hevc_amf")), "Requires AMD Radeon GPU"),
+        ("h264_nvenc", "NVIDIA NVENC H.264 (Recommended)", bool(encoders.get("h264_nvenc")), "Requires NVIDIA GPU"),
         ("h264_qsv", "Intel QuickSync H.264", bool(encoders.get("h264_qsv")), "Requires Intel Arc / iGPU"),
-        ("hevc_qsv", "Intel QuickSync HEVC", bool(encoders.get("hevc_qsv")), "Requires Intel Arc / iGPU"),
+        ("h264_amf", "AMD AMF H.264", bool(encoders.get("h264_amf")), "Requires AMD Radeon GPU"),
         ("libx264", "CPU Software H.264 (libx264)", True, "Universal CPU Fallback"),
-        ("libx265", "CPU Software HEVC (libx265)", True, "Universal CPU Fallback"),
     ]
 
 
 def get_recommended_encoder(prefer_hevc: bool = False) -> str:
-    """Returns the best available encoder for the local machine."""
+    """Returns the best available H.264 encoder for the local machine (strictly forcing H.264)."""
     encoders = detect_available_encoders()
-    if prefer_hevc:
-        if encoders.get("hevc_nvenc"):
-            return "hevc_nvenc"
-        if encoders.get("hevc_qsv"):
-            return "hevc_qsv"
-        if encoders.get("hevc_amf"):
-            return "hevc_amf"
-        if encoders.get("libx265"):
-            return "libx265"
-
     if encoders.get("h264_nvenc"):
         return "h264_nvenc"
     if encoders.get("h264_qsv"):
@@ -359,10 +346,27 @@ class TranscodeWorker(QThread):
             exact_fps, nom_fps, is_vfr, is_std = analyze_framerate(source_fps, probed.avg_frame_rate if probed else 0.0)
             target_fps = exact_fps
 
-        # Resolve encoder
+        # Resolve encoder (strictly force H.264 for universal NLE Premiere Pro compatibility)
         encoder = self.config.encoder
-        if encoder == "auto":
+        if not encoder or encoder == "auto":
             encoder = get_recommended_encoder()
+
+        # Remap any legacy or accidental HEVC requests to H.264 equivalents
+        hevc_to_h264 = {
+            "hevc_nvenc": "h264_nvenc",
+            "hevc_qsv": "h264_qsv",
+            "hevc_amf": "h264_amf",
+            "libx265": "libx264",
+        }
+        if encoder in hevc_to_h264:
+            logger.info(f"Forcing H.264: remapped '{encoder}' to '{hevc_to_h264[encoder]}'")
+            encoder = hevc_to_h264[encoder]
+
+        # Verify that the selected H.264 encoder is actually operational, fallback to libx264 if not
+        encoders = detect_available_encoders()
+        if not encoders.get(encoder, False):
+            logger.warning(f"Selected encoder '{encoder}' is not available on this machine. Falling back to universal libx264.")
+            encoder = "libx264"
 
         # Generate temporary output sibling file
         src_dir = os.path.dirname(self.source_path)
@@ -378,32 +382,26 @@ class TranscodeWorker(QThread):
             "-r", f"{target_fps:.3f}".rstrip("0").rstrip("."),
         ]
 
-        # Video Codec & Quality Options
-        if "nvenc" in encoder:
+        # Video Codec & Quality Options (Strictly H.264)
+        if encoder == "h264_nvenc":
             cmd.extend([
-                "-c:v", encoder,
+                "-c:v", "h264_nvenc",
                 "-preset", self.config.preset or "p6",
                 "-cq", str(self.config.crf),
                 "-b:v", "0",
             ])
-        elif "amf" in encoder:
+        elif encoder == "h264_amf":
             cmd.extend([
-                "-c:v", encoder,
+                "-c:v", "h264_amf",
                 "-quality", "quality",
                 "-rc", "cqp",
                 "-qp_i", str(self.config.crf),
                 "-qp_p", str(self.config.crf),
             ])
-        elif "qsv" in encoder:
+        elif encoder == "h264_qsv":
             cmd.extend([
-                "-c:v", encoder,
+                "-c:v", "h264_qsv",
                 "-global_quality", str(self.config.crf),
-            ])
-        elif "libx265" in encoder:
-            cmd.extend([
-                "-c:v", "libx265",
-                "-preset", "medium",
-                "-crf", str(self.config.crf),
             ])
         else:
             cmd.extend([
@@ -435,8 +433,17 @@ class TranscodeWorker(QThread):
         if vf_filters:
             cmd.extend(["-vf", ",".join(vf_filters)])
 
-        # Audio Track: STRICTLY COPY per Cane's instruction
-        cmd.extend(["-c:a", "copy"])
+        # Audio Track: copy when safe, transcode to AAC when source is PCM/ADPCM or incompatible with MP4
+        has_audio = bool(probed and getattr(probed, "has_audio", True))
+        audio_codec = (probed.audio_codec or "").lower() if probed else ""
+
+        if not has_audio:
+            cmd.extend(["-an"])
+        elif any(x in audio_codec for x in ("pcm", "adpcm", "raw")) or self.config.audio_mode == "aac":
+            # PCM/raw audio inside AVI/WAV cannot be safely copied into standard MP4 without container errors
+            cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+        else:
+            cmd.extend(["-c:a", "copy"])
 
         # Web / Seek Optimization
         cmd.extend(["-movflags", "+faststart"])
@@ -549,13 +556,13 @@ class TranscodeWorker(QThread):
                 self.finished.emit(True, dest, f"Transcoded successfully in {dur_ms:.1f}s ({prog.speed:.1f}x speed)")
                 return
 
-            # Perform atomic replace with Windows Recycle Bin
-            success, msg = perform_atomic_replace(self.source_path, self._temp_path)
+            # Perform atomic replace with Windows Recycle Bin (ensuring output is ALWAYS modern .mp4)
+            success, final_path_or_err = perform_atomic_replace(self.source_path, self._temp_path)
             if success:
                 dur_ms = time.time() - t_start
-                self.finished.emit(True, self.source_path, f"Replaced with CFR file in {dur_ms:.1f}s ({prog.speed:.1f}x speed)")
+                self.finished.emit(True, final_path_or_err, f"Replaced with CFR .mp4 file in {dur_ms:.1f}s ({prog.speed:.1f}x speed)")
             else:
-                self.finished.emit(False, msg, "Failed to replace original file.")
+                self.finished.emit(False, final_path_or_err, "Failed to replace original file.")
 
         except Exception as e:
             logger.error(f"Transcode exception: {e}")
@@ -585,9 +592,11 @@ def perform_atomic_replace(source_path: str, temp_path: str) -> Tuple[bool, str]
     """
     Safely replaces source_path with temp_path:
     1. Tests whether source_path is locked by Premiere Pro or another process.
-    2. Moves source_path to Windows Recycle Bin via native Win32 ctypes.
-    3. Renames temp_path to source_path.
-    4. Invalidates media probe caches.
+    2. Calculates target_path (ALWAYS .mp4 container, never keeping .avi / .mkv / etc.).
+    3. Moves source_path (and any conflicting older target .mp4) to Windows Recycle Bin via native Win32 ctypes.
+    4. Renames temp_path to target_path (.mp4).
+    5. Invalidates media probe caches for both source and target.
+    Returns (True, target_path) on success, or (False, error_msg) on failure.
     """
     if not os.path.isfile(temp_path):
         return False, "Temporary transcoded file does not exist."
@@ -595,27 +604,40 @@ def perform_atomic_replace(source_path: str, temp_path: str) -> Tuple[bool, str]
     if is_file_locked(source_path):
         return False, f"File is currently open or locked by Premiere Pro / Media Player: {os.path.basename(source_path)}"
 
-    # 1. Send original to Windows Recycle Bin
+    # Target output MUST always be modern .mp4 (never ancient .avi or .mkv container)
+    src_dir = os.path.dirname(os.path.abspath(source_path))
+    src_stem, src_ext = os.path.splitext(os.path.basename(source_path))
+    target_path = os.path.join(src_dir, f"{src_stem}.mp4")
+
+    # If target .mp4 already exists and is a different file on disk than source
+    if os.path.normcase(os.path.abspath(target_path)) != os.path.normcase(os.path.abspath(source_path)):
+        if os.path.isfile(target_path):
+            if is_file_locked(target_path):
+                return False, f"Existing target file is currently locked by Premiere Pro: {os.path.basename(target_path)}"
+            if not send_to_recycle_bin(target_path):
+                return False, f"Could not move existing target .mp4 to Windows Recycle Bin: {target_path}"
+
+    # 1. Send original source file (e.g. .avi) to Windows Recycle Bin
     if not send_to_recycle_bin(source_path):
         return False, f"Could not move original file to Windows Recycle Bin: {source_path}"
 
-    # 2. Rename temporary file to original path
+    # 2. Rename temporary .mp4 file to target .mp4 path
     try:
-        os.replace(temp_path, source_path)
+        os.replace(temp_path, target_path)
     except Exception as e:
-        logger.error(f"Failed to rename temp file to source: {e}")
-        return False, f"Failed to rename transcode output to original: {e}"
+        logger.error(f"Failed to rename temp file to target .mp4: {e}")
+        return False, f"Failed to rename transcode output to target .mp4: {e}"
 
-    # 3. Invalidate MediaProbe database cache
+    # 3. Invalidate MediaProbe database cache for both source and target
     try:
         from .media_probe import probe_media_file
         from .database import db
-        # Invalidate cached SQLite probed item so new duration / CFR framerate is refreshed
         db.delete_media_probe(source_path)
-        # Re-probe new file
-        probe_media_file(source_path, use_cache=False)
+        if os.path.normcase(os.path.abspath(target_path)) != os.path.normcase(os.path.abspath(source_path)):
+            db.delete_media_probe(target_path)
+        probe_media_file(target_path, use_cache=False)
     except Exception as e:
         logger.warning(f"Could not refresh media probe cache after replacement: {e}")
 
-    logger.info(f"Successfully replaced original file with CFR transcode: {source_path}")
-    return True, "Replaced successfully"
+    logger.info(f"Successfully replaced '{os.path.basename(source_path)}' with CFR .mp4 transcode: {target_path}")
+    return True, target_path

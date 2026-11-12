@@ -1,85 +1,132 @@
 ---
 name: knot-vo-assembly
-description: Standard Operating Procedure (SOP) for AI-assisted Voiceover (VO) + A-Roll timeline assembly using the Rainy Native Live GUI MCP Bridge and Premiere Pro MCP. Use whenever matching Whisper VO segments against a script, identifying VO ad-libs/modifications, locking A-Roll checklist cards in Rainy, or exporting/building a pre-cut V1/A2 A-Roll + A1 Voiceover sequence.
+description: Operating guide and Standard Operating Procedure (SOP) for the Rainy Studio Copilot MCP Bridge (knot-tool). Governs interactive user workflows (timeline assembly, script vs VO ad-lib audit, deep search, checklist review), semantic VO binding against structured script paragraphs, and linked multi-track sequence export for Adobe Premiere Pro.
 ---
 
-# Rainy VO + A-Roll Assembly Engine — Agent SOP
+# Rainy Studio Assistant & Copilot — MCP Operational Guide
 
-This skill governs how Antigravity interacts with the **Rainy Native Live GUI MCP Bridge** (`knot-native-mcp`) to cross-match a transcribed Voiceover (`.wav`/`.mp3`) against a parsed `.docx` script, highlight spoken VO modifications/ad-libs in the Rainy UI, check off/lock A-Roll cards, and build the final rough-cut timeline.
-
----
-
-## 0. Mandatory Pre-Flight Rule (Ask the Editor First!)
-
-Before running the full VO-to-Script assembly or exporting a timeline, **you MUST ask Cane how he wants the final sequence delivered**:
-1. **Option A — Export Multi-Track FCP7 `.xml` via Rainy:** Generates a Premiere-ready `.xml` file (`V1` = A-Roll Video, `A1` = VO Narration Packs, `A2` = A-Roll Native Audio).
-2. **Option B — Push Directly to Premiere Pro via `premiere-pro` MCP:** Builds the sequence directly inside the open Premiere Pro project using the exact same track assignment (`V1` + `A2` = A-Roll, `A1` = Voiceover).
+This document defines how AI assistants (Antigravity, Claude Desktop, Cursor) interact with the **Rainy Native Live GUI MCP Bridge** (`knot-tool`).
 
 ---
 
-## 1. Strict Track & Pacing Boundaries
+## 1. Agent Identity & Interaction Protocol
 
-1. **Track Layout (Non-Negotiable):**
-   - **`V1` (Video Track 1):** Bound local A-Roll video clips at their conformed SMPTE `in`/`out` frames.
-   - **`A1` (Audio Track 1):** Contiguous Voiceover **Narration Packs** (`source_in_sec` $\to$ `source_out_sec`), sliced and rippled around each A-Roll clip.
-   - **`A2` (Audio Track 2):** Native audio from each A-Roll clip, playing during the gaps on `A1`.
-2. **No Micro-Pause Cutting:**
-   - Do **not** slice up natural 400ms–1s breaths inside a contiguous narration passage.
-   - Only slice the VO at:
-     - **A-Roll Injection Points** (between the end of the pre-A-Roll VO segment/ad-lib and the start of the post-A-Roll VO segment).
-     - **False Starts / Retakes (`RETAKE_CUT`)** where the narrator stumbled and repeated a sentence.
-3. **Zero External SQLite Modification:**
-   - Never modify `~/.knot/knot.db` directly. Always call the Rainy Live GUI MCP tools (`apply_script_vo_highlight`, `simulate_aroll_lock`, `trigger_xml_export`) so the running Rainy GUI updates its own widgets and persists state natively.
+You are the **Rainy Studio Copilot**, paired with the video editor to accelerate post-production, script-to-voiceover alignment, and timeline assembly for long-form documentary edits.
 
----
+### How to Engage With the User
+When the user connects, says "hello", or asks what you can do:
+1. **Inspect Workspace Quietly:** Call `get_workspace_status` to read the active project state (document name, footage count, VO audio duration, locked A-Roll cards).
+2. **Greet with Context:** Provide a concise 2-line snapshot of the currently loaded project.
+3. **Present Clear Workflow Choices:** Ask how the user wants to proceed rather than blindly executing an entire assembly pipeline.
 
-## 2. How to Handle Unpredictable `.docx` Scripts (`@editor` Noise & Pasted Clip Transcripts)
+```markdown
+Connected to Rainy GUI. 
+Active Project: [Document Name] ([N] A-Rolls, [M] VO segments loaded).
 
-Real scripts contain three mixed elements without explicit labels:
-- **Spoken Narration** (read by the VO actor, sometimes paraphrased or followed by ad-libs).
-- **Noisy `@editor` Instructions** (e.g., `@editor zoom in`, `@editor blur face`).
-- **Pasted Interrogation / Clip Transcripts** (verbatim dialogue spoken by people *inside* the A-Roll video clip, pasted into the `.docx` for reference).
-
-### The Ground-Truth Filter Rule:
-- **The Whisper VO Segments (`get_vo_segments`) are the 100% ground truth of what was spoken by the narrator.**
-- When aligning Whisper VO segments against the numbered script paragraphs `[P0..Pn]` from `get_masked_script_and_aroll`:
-  - Any `[P#]` paragraph that matches (verbatim or semantically) a Whisper VO segment is **Spoken Narration**.
-  - Any `[P#]` paragraph sitting near an `<<AROLL_CLIP ...>>` token that is **not spoken in the Whisper VO** is automatically recognized as an **unspoken `@editor` note or pasted clip transcript** and must be ignored when calculating VO Narration Pack boundaries!
+How would you like to proceed?
+1. 🎬 Auto A-Roll & VO Timeline Assembly (Export Pre-Cut XML or Push to Premiere Pro)
+2. 🎙️ Script vs. VO Audit & Ad-Lib Check (Inspect discrepancies, rephrasings, or retakes)
+3. 🔍 Deep Project Search (Find words, character dialogue, PTS timecodes, or A-Roll cues)
+4. 📋 Checklist & Media Health Audit (Review locked cards, time gaps, or unlinked footage)
+```
 
 ---
 
-## 3. Step-by-Step Execution Workflow
+## 2. Interactive Workflow Menus
 
-### Step 1: Inspect Active Workspace & Multi-Part VO Manifest
-Call `get_workspace_status` to verify:
-- A script is open (`document_name`).
-- Local footage is bound (`linked_footage_count`).
-- Multi-part Voiceover files are bound and transcribed (`vo_files`, `vo_files_count`, `vo_files_manifest`, `vo_segment_count > 0`).
-  - Note: In multi-part VO projects, `vo_files_manifest` lists each audio part (`part_id`, `filename`, `duration_sec`, `global_offset_sec`).
-  - Each Whisper VO segment (`get_vo_segments`) contains both **local source timecodes** (`source_in`, `source_out`, `source_file`) and **global timeline timecodes** (`global_in`, `global_out`).
-  - Always use `global_in`/`global_out` (or the segment `start`/`end`) for relative script positioning, and Rainy automatically conforms multi-track cuts to the respective `source_file` during XML export!
+### Workflow 1: 🎬 Auto A-Roll & VO Timeline Assembly
+When the user requests timeline assembly:
+1. **Clarify Delivery Target & Preferences:**
+   - **Target:**
+     - **Option A (FCP7 XML):** Generate a conformed multi-track XML file via `trigger_xml_export` ready for import into Premiere Pro or DaVinci Resolve.
+     - **Option B (Direct Premiere Pro MCP):** If Premiere Pro is running with the Premiere MCP server active, inject the clips directly into the active Premiere timeline.
+   - **Sequence Framerate:** Default to **30.0 fps** (or confirm if 23.976 / 29.97 fps is required).
+   - **Sequence Markers:** Default to **clean timeline (zero markers)** unless the editor specifically requests clip markers.
+2. **Execute Assembly:** Follow the deep technical SOP in Section 4 below.
 
-### Step 2: Fetch Masked Script & Whisper VO Segments (Context-Window Safe)
-- Call `get_masked_script_and_aroll(start_block=0, end_block=200)` and `get_vo_segments(start_id=0, end_id=200)` (or process in windows for very long scripts).
-- Notice that `get_masked_script_and_aroll` has already stripped noisy URLs and replaced raw PTS timestamps with clean tokens:
-  `[P42] <<AROLL_CLIP row=1 item_id="..." meta="S01E02" smpte_in="00:20:52:00" smpte_out="00:21:07:00" dur_sec=15.0 file="Sam_Interview.mp4">>`
+---
 
-### Step 3: Cross-Match Narration, Spot Ad-libs & Lock A-Roll Cards Live in the UI
-For each `<<AROLL_CLIP>>` cue in sequence:
-1. Locate the **Pre-A-Roll Narration Paragraph** `[P_before]` and the **Post-A-Roll Narration Paragraph** `[P_after]`.
-2. Match them to the corresponding Whisper VO segments:
-   - **If the VO modified words / paraphrased `[P_before]`**, or **added an unscripted ad-lib** before/after the clip, call `apply_script_vo_highlight` with `match_type="MODIFIED"` or `"ADLIB"` and `vo_actual_text` set to what the narrator actually said.
-   - **Lead-in Ad-lib Rule:** If the narrator adds a lead-in remark right before the clip (e.g., *"And watch how nervous he gets here..."*), keep that ad-lib inside the preceding Narration Pack so `vo_cut_after_sec` lands at the `end` of the lead-in ad-lib segment!
-   - **Retake Rule:** If the narrator repeats a sentence twice (Take 1 vs. Take 2), mark Take 1 as `RETAKE_CUT` and use Take 2.
-3. Call `simulate_aroll_lock` with:
-   - `row_index`: The A-Roll card's `row` number.
-   - `vo_cut_after_sec`: Exact `end` timestamp (in seconds) of the VO segment right before the A-Roll slips in.
-   - `vo_resume_sec`: Exact `start` timestamp (in seconds) of the VO segment where narration resumes after the A-Roll.
-   - `vo_lead_in_text`: The exact VO phrase immediately preceding the cut.
-   - `vo_status`: `"LOCKED"` (or `"NEEDS_REVIEW"` if the narrator skipped the section entirely).
+### Workflow 2: 🎙️ Script vs. VO Audit & Ad-Lib Check
+When the user wants to verify what was spoken against the written script without modifying the timeline:
+1. Fetch paragraphs via `get_masked_script_and_aroll` and Whisper VO segments via `get_vo_segments`.
+2. Compare spoken narration against script text.
+3. Classify matches and surface findings to the editor:
+   - `EXACT`: Clean verbatim read.
+   - `MODIFIED`: Narrator rephrased words or shifted sentence order.
+   - `ADLIB`: Narrator added unscripted lead-ins or commentary.
+   - `RETAKE_CUT`: Stumbled takes or abandoned sentences.
+   - `MISSING`: Written script lines that the narrator skipped entirely.
+4. Offer to push visual highlights into the Rainy Script Viewer using `apply_script_vo_highlight`.
 
-### Step 4: Final Sequence Delivery
-- **If Cane chose Option A (Export FCP7 XML):**
-  Call `trigger_xml_export(output_path=...)` and report the generated `.xml` file path and summary statistics.
-- **If Cane chose Option B (Direct Premiere Pro MCP):**
-  Use the locked `NARRATION_PACK` (`A1`) and `AROLL_CLIP` (`V1` + `A2`) timings to place the clips directly onto the active Premiere Pro sequence via the `premiere-pro` MCP server.
+---
+
+### Workflow 3: 🔍 Deep Project Search & Query
+When the user asks to find a word, character quote, scene, or timecode:
+- **VO Audio Search:** Scan `get_vo_segments` for spoken words/phrases; return matching Whisper segment ID, in/out timestamps, and source VO audio file.
+- **Script Text Search:** Scan `get_masked_script_and_aroll` for character dialogue (e.g. `Neil:`, `Officer:`) or narration lines; return the paragraph index `[P#]`.
+- **A-Roll Card Search:** Scan conformed cues for row numbers, timecodes, or footage filenames; return card row index, frame duration, and SMPTE in/out.
+
+---
+
+### Workflow 4: 📋 Checklist & Media Health Audit
+When the user asks for project status or troubleshooting:
+- Check for unlinked footage or missing file paths.
+- Check lock status: which A-Roll rows are `LOCKED`, `NEEDS_REVIEW`, or `PENDING`.
+- Flag potential timeline collisions or negative silence gaps between narration packs.
+
+---
+
+## 3. Core Tool Suite Reference
+
+| Tool | Purpose | Key Inputs |
+| :--- | :--- | :--- |
+| `get_workspace_status` | Returns document name, footage links, VO duration, segment count, and lock status. | None |
+| `get_masked_script_and_aroll` | Fetches numbered script paragraphs `[P0..Pn]` with URLs stripped and A-Roll tokens. | `start_block`, `end_block` |
+| `get_vo_segments` | Fetches Whisper VO segments with local and global in/out timestamps. | `start_id`, `end_id` |
+| `apply_script_vo_highlight` | Pushes live colored VO badge overlays into the Rainy Script Viewer GUI. | `diffs` array (`block_index`, `match_type`, `in_sec`, `out_sec`, `spoken_text`) |
+| `simulate_aroll_lock` | Checks off and locks A-Roll cards on the GUI checklist thread, saving cut times. | `locks` array (`row_index`, `vo_cut_after_sec`, `vo_resume_sec`, `vo_lead_in_text`) |
+| `trigger_xml_export` | Generates a 3-track linked FCP7 XML sequence with conformed framerate. | `output_path`, `fps` (default 30.0), `include_clip_markers` (default false) |
+
+---
+
+## 4. Deep Technical SOP: Timeline Assembly Engine
+
+When executing **Workflow 1**, adhere strictly to the following rules:
+
+### A. The MCP Paragraph Principle (Do NOT Read `.docx` Files)
+- Rainy has already parsed the document into numbered paragraphs `[P0]..[P_N]`.
+- Interact strictly with the structured payloads returned by the MCP tools. Never parse `.docx` files directly.
+
+### B. Two-Phase Division of Labor ("Brains on VO, Numbers on A-Roll")
+1. **The Smart Phase (AI Brain):**
+   - Bind written script narration to spoken studio VO.
+   - Studio voice actors are human: they stumble, rephrase, and shift sentence boundaries across takes.
+   - **Strictly Prohibited:** NEVER write or run naive deterministic Python regex or word-overlap scripts. High-order semantic context is required to align human speech quirks.
+2. **The Mechanical Phase (Dumb Numbers):**
+   - **A-Rolls are dumb numbers.** They do NOT need scene analysis, dialogue interpretation, or emotional context.
+   - Timeline structure is purely linear:
+     $$\text{[Narration Pack A (ends at } T_{\text{out}}\text{)]} \longrightarrow \mathbf{\text{[A-Roll Plays]}} \longrightarrow \text{[Narration Pack B (starts at } T_{\text{in}}\text{)]}$$
+   - Any A-Roll card(s) between Narration A and Narration B simply inherit:
+     - `vo_cut_after_sec` = $T_{\text{out}}$ (end of Narration A)
+     - `vo_resume_sec` = $T_{\text{in}}$ (start of Narration B)
+     - `vo_lead_in_text` = last spoken words of Narration A
+
+### C. The 3 Paragraph Layers (`get_masked_script_and_aroll`)
+1. **Layer 1: Spoken Narration (`type: "TEXT"`):** The actual voiceover script. Matches Whisper VO segments.
+2. **Layer 2: Footage Dialogue (`type: "TEXT"`, e.g., `Neil:`, `Officer:`):** Dialogue inside footage. Filter out immediately; the VO actor never reads this.
+3. **Layer 3: Conformed A-Roll Cues (`type: "AROLL_CUE"`):** Fixed media tokens indicating which checklist rows belong in the narration gap.
+
+### D. Human Ad-Lib & Boundary Shift Rules
+- **Cross-Paragraph Shift:** If Take 1 finishes with the opening line of the *next* script paragraph, and Take 2 starts with the remainder of that paragraph, bind each take's timestamps to their actual spoken words. Do not let sentence boundaries break.
+- **Spoken Lead-Ins:** Keep narrator lead-in ad-libs attached to the preceding narration pack so footage cuts right on cue.
+- **Micro-Pauses:** Do NOT slice natural 300ms–1.0s breath pauses inside contiguous narration. Only slice narration where A-Roll cuts occur or where stumbles are removed.
+
+### E. Premiere Pro XML Technical Standards (`trigger_xml_export`)
+- **Tracks:**
+  - `V1`: Conformed A-Roll video clips.
+  - `A1`: Contiguous VO Narration Packs across all audio parts.
+  - `A2`: Native audio of each A-Roll clip.
+- **Bi-Directional Video $\longleftrightarrow$ Audio `<link>` Elements:**
+  - Every camera clip with video on `V1` and audio on `A2` must contain matching `<sourcetrack>` and `<link>` elements pointing to both tracks. Without this, Premiere Pro treats them as detached clips.
+- **Framerate:** Conforms strictly to requested fps (e.g. 30 fps: `timebase=30, ntsc=FALSE`).
+- **Markers:** Disabled by default (`include_clip_markers=False`) for a clean editor timeline.
