@@ -10,6 +10,9 @@ logger = get_logger("Database")
 
 DB_DIR = os.path.expanduser("~/.knot")
 DB_PATH = os.environ.get("KNOT_DB_PATH") or os.path.join(DB_DIR, "knot.db")
+# Folder holding the DB plus its backups; follows the override so isolated runs
+# never write snapshots into the real ~/.knot (DB_DIR still hosts models).
+STATE_DIR = os.path.dirname(os.path.abspath(DB_PATH))
 
 class Database:
     _instance = None
@@ -23,7 +26,7 @@ class Database:
         return cls._instance
 
     def _get_connection(self) -> sqlite3.Connection:
-        os.makedirs(DB_DIR, exist_ok=True)
+        os.makedirs(STATE_DIR, exist_ok=True)
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -243,11 +246,11 @@ class Database:
         if not os.path.exists(DB_PATH):
             return None
         try:
-            backups_dir = os.path.join(DB_DIR, "backups")
+            backups_dir = os.path.join(STATE_DIR, "backups")
             os.makedirs(backups_dir, exist_ok=True)
             today_str = time.strftime("%Y-%m-%d")
             backup_file = os.path.join(backups_dir, f"knot-{today_str}.db")
-            latest_bak = os.path.join(DB_DIR, "knot.db.bak")
+            latest_bak = os.path.join(STATE_DIR, "knot.db.bak")
             
             with self._get_connection() as conn:
                 # 1. Daily snapshot
@@ -276,7 +279,7 @@ class Database:
             return None
 
     def _restore_latest_backup(self) -> bool:
-        latest_bak = os.path.join(DB_DIR, "knot.db.bak")
+        latest_bak = os.path.join(STATE_DIR, "knot.db.bak")
         if os.path.exists(latest_bak):
             try:
                 import shutil
