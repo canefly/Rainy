@@ -56,8 +56,12 @@ def test_footage_relink_dialog_vo_binding_and_no_cfr_badge(qapp, tmp_path):
     assert hasattr(dlg, "transcribe_stage")
     assert hasattr(dlg.transcribe_stage, "add_files_btn")
     assert hasattr(dlg.transcribe_stage, "start_btn")
+    # VO status now lives in the shared activity dock
     assert hasattr(dlg, "vo_header_stat_lbl")
-    assert dlg.vo_header_stat_lbl.text() == "VO: Unbound"
+    assert dlg.vo_header_stat_lbl is dlg.queue_strip.vo_lbl
+    assert "not set" in dlg.vo_header_stat_lbl.text()
+    # No Apply & Save / Close footer
+    assert dlg.buttonGroup.isHidden()
 
     # 2. Simulate matching items: one CFR, one VFR
     item_cfr = FootageMatchItem(
@@ -105,22 +109,26 @@ def test_footage_relink_dialog_vo_binding_and_no_cfr_badge(qapp, tmp_path):
     cfr_labels = [w.text() for w in card_cfr.findChildren(QLabel)]
     assert "CFR" not in cfr_labels
     assert "CFR OK" not in cfr_labels
-    assert "LINKED" in cfr_labels
+    # Healthy rows carry no status pill (exceptions only); the dot's tooltip says Linked
+    assert "LINKED" not in cfr_labels
+    assert "MISSING" not in cfr_labels
+    assert any(w.toolTip() == "Linked" for w in card_cfr.findChildren(QLabel))
 
     # Verify Card 1 (VFR) has subtle VFR indicator
     card_vfr = dlg.card_widgets[1]
     vfr_labels = [w.text() for w in card_vfr.findChildren(QLabel)]
     assert "VFR" in vfr_labels
     assert "VFR WARNING" not in vfr_labels
-    assert "LINKED" in vfr_labels
+    assert "MISSING" not in vfr_labels
 
     # Verify stage tabs (Relink vs Library) has no slide animation
+    # (underline indicator jumps straight to the target tab instead of sliding)
     dlg.switch_stage("library")
-    assert not dlg.stage_tabs.slideAni.state() == dlg.stage_tabs.slideAni.State.Running
     assert dlg.stage_tabs.currentRouteKey() == "library"
+    assert dlg.stage_tabs.slideAni.geometry == dlg.stage_tabs.currentIndicatorGeometry()
     dlg.switch_stage("relink")
-    assert not dlg.stage_tabs.slideAni.state() == dlg.stage_tabs.slideAni.State.Running
     assert dlg.stage_tabs.currentRouteKey() == "relink"
+    assert dlg.stage_tabs.slideAni.geometry == dlg.stage_tabs.currentIndicatorGeometry()
 
     # 3. Verify in-place transcode refresh
     # Simulate transcode completion: VFR converted to CFR
@@ -196,7 +204,8 @@ def test_non_repeating_card_name_and_missing_sorted_first(qapp, tmp_path):
     second_card_labels = [w.text() for w in dlg.card_widgets[1].findChildren(QLabel)]
 
     assert "MISSING" in first_card_labels
-    assert "LINKED" in second_card_labels
+    assert "MISSING" not in second_card_labels
+    assert any(w.toolTip() == "Linked" for w in dlg.card_widgets[1].findChildren(QLabel))
 
     # Verify the filename "Pat Interview.mp4-redacted.mp4" appears ONLY ONCE on the linked card
     occurrences = sum(1 for txt in second_card_labels if txt == "Pat Interview.mp4-redacted.mp4")
@@ -389,9 +398,10 @@ def test_interlaced_detection_and_decomb_settings(qapp, tmp_path):
     card_labels = [w.text() for w in dlg.card_widgets[0].findChildren(QLabel)]
     assert "INTERLACED" in card_labels
 
-    # Verify Library table displays INTERLACED in column 7 and Interlaced Only filter works
-    idx_col7 = dlg.library_stage.model.index(0, 7)
-    assert dlg.library_stage.model.data(idx_col7, Qt.DisplayRole) == "INTERLACED"
+    # Verify Library flags column shows INTERLACED (exceptions only) and Interlaced Only filter works
+    flags_col = dlg.library_stage.model.COL_FLAGS
+    idx_flags = dlg.library_stage.model.index(0, flags_col)
+    assert dlg.library_stage.model.data(idx_flags, Qt.DisplayRole) == "INTERLACED"
     dlg.library_stage.filter_combo.setCurrentIndex(2)  # "Interlaced Only"
     qapp.processEvents()
     assert dlg.library_stage.model.rowCount() == 1
@@ -461,3 +471,147 @@ def test_aroll_trimmer_refreshes_vfr_badge_after_transcode(qapp, tmp_path, monke
 
 
 
+
+
+def _linked_item(url: str, path: str) -> FootageMatchItem:
+    return FootageMatchItem(
+        url=url, norm_url=url, title=os.path.basename(path), file_type="video",
+        file_size_bytes=os.path.getsize(path), file_size_display="1 KB",
+        matched_path=path, match_tier="EXACT_NAME", is_matched=True,
+    )
+
+
+def test_close_saves_relink_changes_without_apply_button(qapp, tmp_path):
+    """No Apply & Save: closing commits changes, but only emits when something actually changed."""
+    clip = tmp_path / "Alpha.mp4"
+    clip.write_bytes(b"\x00" * 1024)
+    url = "https://example.com/Alpha.mp4"
+
+    # 1. Untouched window: links already match what the workspace had -> close emits nothing
+    dlg = FootageRelinkDialog(
+        links=[url], current_footage_dir=str(tmp_path), existing_linked={url: str(clip)},
+        doc_signature="test_close_commit_a", parent=None,
+    )
+    emitted = []
+    dlg.footage_linked.connect(lambda folder, mapping: emitted.append((folder, mapping)))
+    dlg.match_items = [_linked_item(url, str(clip))]
+    assert dlg.buttonGroup.isHidden()
+    dlg.reject()  # Esc / click-away path
+    qapp.processEvents()
+    assert emitted == []
+
+    # 2. Relink happened in this session -> closing via X emits the new mapping once
+    dlg2 = FootageRelinkDialog(
+        links=[url], current_footage_dir=str(tmp_path), existing_linked={},
+        doc_signature="test_close_commit_b", parent=None,
+    )
+    emitted2 = []
+    dlg2.footage_linked.connect(lambda folder, mapping: emitted2.append((folder, mapping)))
+    dlg2.match_items = [_linked_item(url, str(clip))]
+    dlg2.close_btn.click()
+    qapp.processEvents()
+    assert emitted2 == [(str(tmp_path), {url: str(clip)})]
+    assert dlg2.is_project_relink_confirmed() is True
+
+    # Committing twice (accept -> done) never double-emits
+    dlg2._commit_changes()
+    assert len(emitted2) == 1
+
+
+def test_transcribe_table_shows_duration_not_megabytes(qapp, tmp_path, monkeypatch):
+    from src.ui.components.footage import transcribe_stage as ts_mod
+    from src.core import media_probe
+
+    wav = tmp_path / "Narration Part 1.wav"
+    wav.write_bytes(b"\x00" * (2 * 1024 * 1024))
+
+    class _Probed:
+        duration_display = "4m 12s"
+
+    monkeypatch.setattr(media_probe, "probe_media_file", lambda p, use_cache=True: _Probed())
+    stage = ts_mod.TranscribeStage(project_name="Dur_Test", initial_vo_paths=[str(wav)])
+    t = stage.table
+    assert t.horizontalHeaderItem(stage.COL_DURATION).text() == "DURATION"
+    assert t.item(0, stage.COL_DURATION).text() == "4m 12s"
+    assert "MB" not in t.item(0, stage.COL_DURATION).text()
+    assert t.item(0, stage.COL_SIZE).text() == "2.0 MB"
+
+
+def test_library_row_click_checks_box_and_box_click_toggles(qapp, tmp_path):
+    """Regression: selecting a row must tick its checkbox; ticking boxes adds rows without clearing others."""
+    from PySide6.QtTest import QTest
+
+    paths = []
+    for name in ("A.mp4", "B.mp4", "C.mp4"):
+        p = tmp_path / name
+        p.write_bytes(b"\x00" * 512)
+        paths.append(str(p))
+    items = [_linked_item(f"https://example.com/{os.path.basename(p)}", p) for p in paths]
+
+    dlg = FootageRelinkDialog(links=[it.url for it in items], current_footage_dir="", parent=None,
+                              doc_signature="test_lib_sel")
+    dlg.show()
+    dlg.match_items = items
+    dlg.switch_stage("library")
+    qapp.processEvents()
+    stage = dlg.library_stage
+    model, table = stage.model, stage.table
+    vp = table.viewport()
+
+    def click(row, col, mods=Qt.NoModifier):
+        QTest.mouseClick(vp, Qt.LeftButton, mods, table.visualRect(model.index(row, col)).center())
+        qapp.processEvents()
+
+    def checked_rows():
+        return sorted(r for r in range(model.rowCount())
+                      if model.data(model.index(r, 0), Qt.CheckStateRole) == Qt.Checked)
+
+    click(0, model.COL_NAME)            # plain row click -> that row checked
+    assert checked_rows() == [0]
+    click(1, model.COL_NAME)            # another row click replaces it
+    assert checked_rows() == [1]
+    click(2, model.COL_CHECK)           # box click adds without clearing
+    assert checked_rows() == [1, 2]
+    assert not stage.action_bar.isHidden()
+    click(2, model.COL_CHECK)           # box click again removes only that row
+    assert checked_rows() == [1]
+    stage.select_all_cb.setChecked(True)
+    qapp.processEvents()
+    assert checked_rows() == [0, 1, 2]
+    stage._clear_all_selections()
+    qapp.processEvents()
+    assert checked_rows() == []
+    dlg.close()
+
+
+def test_background_click_closes_and_saves_and_shadow_is_cached(qapp, tmp_path):
+    """Clicking the dimmed background closes (and still saves); the card has no live shadow effect."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QWidget
+
+    clip = tmp_path / "Alpha.mp4"
+    clip.write_bytes(b"\x00" * 1024)
+    url = "https://example.com/Alpha.mp4"
+
+    host = QWidget()
+    host.resize(1100, 760)
+    host.show()
+    dlg = FootageRelinkDialog(links=[url], current_footage_dir=str(tmp_path), existing_linked={},
+                              doc_signature="test_mask_close", parent=host)
+    emitted = []
+    dlg.footage_linked.connect(lambda folder, mapping: emitted.append(mapping))
+    dlg.show()
+    dlg.match_items = [_linked_item(url, str(clip))]
+    qapp.processEvents()
+
+    # Live QGraphicsDropShadowEffect re-blurs the whole card every scroll frame; it must stay off
+    assert dlg.widget.graphicsEffect() is None
+    assert dlg._card_shadow._pix is not None
+    assert dlg._card_shadow.isVisible()
+
+    QTest.mouseClick(dlg.windowMask, Qt.LeftButton, Qt.NoModifier, QPoint(5, 5))
+    qapp.processEvents()
+    assert dlg.result() == 0  # rejected via mask click
+    assert emitted == [{url: str(clip)}]
+    host.close()

@@ -21,13 +21,13 @@ class BulkActionBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("FootageBulkActionBar")
-        self.setFixedHeight(38)
+        self.setFixedHeight(36)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setContentsMargins(12, 0, 6, 0)
         layout.setSpacing(6)
 
-        self.count_lbl = QLabel("0 Selected", self)
+        self.count_lbl = QLabel("0 selected", self)
         self.count_lbl.setObjectName("BulkActionCount")
         layout.addWidget(self.count_lbl, 0, Qt.AlignVCenter)
 
@@ -83,7 +83,7 @@ class BulkActionBar(QFrame):
         if count <= 0:
             self.hide()
             return
-        self.count_lbl.setText(f"{count} Selected")
+        self.count_lbl.setText(f"{count} selected")
         has_online = online_count > 0
         is_single_online = (count == 1 and online_count == 1)
 
@@ -106,13 +106,14 @@ class BulkActionBar(QFrame):
     def apply_theme(self):
         pal = ThemeManager.get_palette()
         accent = pal.get("accent", "#38bdf8")
+        # Soft tint, no outline: reads as a mode of the toolbar rather than another box
         self.setStyleSheet("""
             QFrame#FootageBulkActionBar {
-                background-color: rgba(56, 189, 248, 0.08);
-                border: 1px solid rgba(56, 189, 248, 0.32);
-                border-radius: 7px;
+                background-color: rgba(96, 165, 250, 0.10);
+                border: none;
+                border-radius: 6px;
             }
         """)
         self.count_lbl.setStyleSheet(
-            f"color: {accent}; font-size: 12px; font-weight: 700; border: none; background: transparent;"
+            f"color: {accent}; font-size: 12px; font-weight: 600; border: none; background: transparent;"
         )

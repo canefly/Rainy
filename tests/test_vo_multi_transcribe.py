@@ -193,19 +193,14 @@ def test_footage_relink_dialog_has_three_stages_including_transcribe(qapp):
     assert hasattr(dlg, "transcribe_stage")
     assert dlg.transcribe_stage is not None
 
-    # 2. Switch between stages and verify RenderQueue hides on Transcribe
-    dlg.switch_stage("library")
-    assert dlg.stage_stack.currentWidget() == dlg.library_stage
-    assert dlg.queue_strip.isHidden() is False
-
-    dlg.switch_stage("transcribe")
-    assert dlg.stage_stack.currentWidget() == dlg.transcribe_stage
-    assert dlg.queue_strip.isHidden() is True
-    assert "multi-part voiceovers" in dlg.header_desc.text().lower()
-
-    dlg.switch_stage("relink")
-    assert dlg.stage_stack.currentWidget() == dlg.relink_page
-    assert dlg.queue_strip.isHidden() is False
+    # 2. Switch between stages: the shared activity dock stays put on every tab,
+    #    and tab labels stay plain names (no counts when nothing is missing)
+    for key, page in (("library", dlg.library_stage), ("transcribe", dlg.transcribe_stage), ("relink", dlg.relink_page)):
+        dlg.switch_stage(key)
+        assert dlg.stage_stack.currentWidget() == page
+        assert dlg.queue_strip.isHidden() is False
+    assert dlg.stage_tabs.items["library"].text() == "Library"
+    assert dlg.stage_tabs.items["transcribe"].text() == "Transcribe"
 
 
 def test_cuda_dll_registration_and_status():
@@ -417,3 +412,21 @@ def test_vo_manifest_and_multi_part_slicing():
         assert f"<name>{os.path.basename(part2)}</name>" in xml_str
         assert "VO Pack 1 (Part 1)" in xml_str
         assert "(Part 2)" in xml_str
+
+
+def test_footage_tabs_switch_on_left_click(qapp):
+    """Regression: PivotItem.itemClicked emits a bool that used to overwrite the route key,
+    so a real left-click on Library/Transcribe always landed on Relink."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from src.ui.components.footage_relink_dialog import FootageRelinkDialog
+
+    dlg = FootageRelinkDialog(links=["https://example.com/a.mp4"], current_footage_dir="", project_name="Tabs")
+    dlg.show()
+    qapp.processEvents()
+    for key, page in (("library", dlg.library_stage), ("transcribe", dlg.transcribe_stage), ("relink", dlg.relink_page)):
+        QTest.mouseClick(dlg.stage_tabs.items[key], Qt.LeftButton)
+        qapp.processEvents()
+        assert dlg.stage_stack.currentWidget() is page, key
+        assert dlg.stage_tabs.currentRouteKey() == key
+    dlg.close()

@@ -1,15 +1,15 @@
 import os
 import subprocess
 from typing import List, Optional, Dict, Any
-from PySide6.QtCore import Qt, Signal, QThreadPool
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import Qt, Signal, QThreadPool, QSize
+from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QProgressBar, QFileDialog, QPlainTextEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QSizePolicy
 )
 from qfluentwidgets import (
-    PushButton, PrimaryPushButton, ToolButton, ComboBox,
+    PushButton, PrimaryPushButton, ToolButton, TransparentToolButton, ComboBox,
     FluentIcon
 )
 
@@ -32,6 +32,7 @@ class TranscribeStage(QWidget):
     Strictly no emojis.
     """
     transcription_completed = Signal(str, list, list)  # (saved_json_path, vo_file_paths, all_segments)
+    COL_PART, COL_FILE, COL_DURATION, COL_SIZE, COL_STATUS, COL_ACTIONS = range(6)
     vo_status_changed = Signal(str)                   # Header badge update (e.g., "VO: Ready (142 segs)")
 
     def __init__(
@@ -49,6 +50,7 @@ class TranscribeStage(QWidget):
         self._active_worker: Optional[VOBatchTranscribeWorker] = None
         self._is_transcribing = False
         self._terminal_expanded = False
+        self._duration_cache: Dict[str, str] = {}
 
         # Load existing transcript if already available
         if self.transcript_json_path and os.path.isfile(self.transcript_json_path):
@@ -60,32 +62,27 @@ class TranscribeStage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(12)
 
         # ---------------------------------------------------------------------
         # 1. Top Control Bar: Add Files, Installed Models, Start Queue
         # ---------------------------------------------------------------------
         ctrl_frame = QFrame(self)
         ctrl_frame.setObjectName("TranscribeControlBar")
-        ctrl_frame.setFixedHeight(38)
+        ctrl_frame.setFixedHeight(32)
         ctrl_layout = QHBoxLayout(ctrl_frame)
-        ctrl_layout.setContentsMargins(0, 2, 0, 2)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(8)
 
-        self.add_files_btn = PushButton("Add Audio Part(s)", ctrl_frame)
+        self.add_files_btn = PushButton("Add audio parts", ctrl_frame)
         self.add_files_btn.setIcon(FluentIcon.ADD)
-        self.add_files_btn.setFixedHeight(30)
+        self.add_files_btn.setFixedHeight(32)
         self.add_files_btn.clicked.connect(self._on_add_audio_files)
         ctrl_layout.addWidget(self.add_files_btn, 0, Qt.AlignVCenter)
 
-        ctrl_layout.addSpacing(6)
-
-        model_lbl = QLabel("Model:", ctrl_frame)
-        model_lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #94a3b8;")
-        ctrl_layout.addWidget(model_lbl, 0, Qt.AlignVCenter)
-
         self.model_combo = ComboBox(ctrl_frame)
-        self.model_combo.setFixedHeight(30)
+        self.model_combo.setToolTip("Whisper model")
+        self.model_combo.setFixedHeight(32)
         self.model_combo.setMinimumWidth(180)
         self._populate_models_combo()
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
@@ -97,14 +94,14 @@ class TranscribeStage(QWidget):
         self.overall_bar.setRange(0, 100)
         self.overall_bar.setValue(0)
         self.overall_bar.setFixedWidth(110)
-        self.overall_bar.setFixedHeight(6)
+        self.overall_bar.setFixedHeight(4)
         self.overall_bar.setTextVisible(False)
         self.overall_bar.hide()
         ctrl_layout.addWidget(self.overall_bar, 0, Qt.AlignVCenter)
 
-        self.start_btn = PrimaryPushButton("Start Queue", ctrl_frame)
+        self.start_btn = PrimaryPushButton("Start queue", ctrl_frame)
         self.start_btn.setIcon(FluentIcon.PLAY)
-        self.start_btn.setFixedHeight(30)
+        self.start_btn.setFixedHeight(32)
         self.start_btn.clicked.connect(self._on_toggle_transcribe)
         ctrl_layout.addWidget(self.start_btn, 0, Qt.AlignVCenter)
 
@@ -113,54 +110,58 @@ class TranscribeStage(QWidget):
         # ---------------------------------------------------------------------
         # 2. Multi-Part VO Queue Table (Breathes and expands vertically)
         # ---------------------------------------------------------------------
-        self.table = QTableWidget(0, 5, self)
+        self.table = QTableWidget(0, 6, self)
         self.table.setObjectName("TranscribeQueueTable")
-        self.table.setHorizontalHeaderLabels(["Order", "Filename", "Duration", "Status", "Actions"])
+        self.table.setHorizontalHeaderLabels(["PART", "AUDIO FILE", "DURATION", "SIZE", "STATUS", ""])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(28)
-        self.table.setMinimumHeight(180)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.setMinimumHeight(120)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.table.setShowGrid(False)
         self.table.setStyleSheet("""
             QTableWidget#TranscribeQueueTable {
                 background-color: transparent;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                border-radius: 6px;
-                selection-background-color: rgba(255, 255, 255, 0.05);
+                border: none;
+                font-size: 12px;
+                selection-background-color: rgba(96, 165, 250, 0.10);
+                outline: none;
             }
             QTableWidget#TranscribeQueueTable::item {
-                padding: 1px 6px;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+                padding: 0px 8px;
+                border: none;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
             }
             QTableWidget#TranscribeQueueTable::item:focus {
                 outline: none;
                 border: none;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
             }
+            QHeaderView { background-color: transparent; border: none; }
             QHeaderView::section {
                 background-color: transparent;
                 color: #94a3b8;
                 font-weight: 600;
-                font-size: 11px;
+                font-size: 10.5px;
                 border: none;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-                padding: 4px 6px;
+                border-top: 1px solid rgba(255, 255, 255, 0.07);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+                padding: 0px 8px;
             }
         """)
 
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.resizeSection(0, 60)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.resizeSection(2, 80)
-        header.setSectionResizeMode(3, QHeaderView.Fixed)
-        header.resizeSection(3, 110)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
-        header.resizeSection(4, 125)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setFixedHeight(30)
+        header.setHighlightSections(False)
+        for col, width in ((self.COL_PART, 56), (self.COL_DURATION, 84), (self.COL_SIZE, 84),
+                           (self.COL_STATUS, 130), (self.COL_ACTIONS, 96)):
+            header.setSectionResizeMode(col, QHeaderView.Fixed)
+            header.resizeSection(col, width)
+        header.setSectionResizeMode(self.COL_FILE, QHeaderView.Stretch)
 
         layout.addWidget(self.table, 1)  # Stretch factor 1: fills available vertical space
 
@@ -172,14 +173,14 @@ class TranscribeStage(QWidget):
         self.terminal_strip.setStyleSheet("""
             QFrame#TerminalStrip {
                 background-color: rgba(255, 255, 255, 0.03);
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                border: none;
                 border-radius: 6px;
             }
         """)
 
         strip_layout = QVBoxLayout(self.terminal_strip)
-        strip_layout.setContentsMargins(12, 6, 12, 6)
-        strip_layout.setSpacing(6)
+        strip_layout.setContentsMargins(12, 8, 8, 8)
+        strip_layout.setSpacing(8)
 
         # 3a. Summary Bar
         bar_layout = QHBoxLayout()
@@ -189,34 +190,43 @@ class TranscribeStage(QWidget):
         self.status_dot = StatusDot("#94a3b8", "rgba(148, 163, 184, 0.25)", self.terminal_strip)
         bar_layout.addWidget(self.status_dot, 0, Qt.AlignVCenter)
 
-        self.summary_lbl = QLabel("Terminal Idle · 0 segments", self.terminal_strip)
+        # Two-line file label: transcript file name, then segment/part detail
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+        self.output_name_lbl = QLabel("No transcript yet", self.terminal_strip)
+        self.output_name_lbl.setStyleSheet("font-size: 12px; font-weight: 600; color: #e8e9ec; background: transparent;")
+        self.output_name_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        text_col.addWidget(self.output_name_lbl)
+        self.summary_lbl = QLabel("Add audio parts, then start the queue.", self.terminal_strip)
         self.summary_lbl.setObjectName("TerminalSummary")
-        self.summary_lbl.setStyleSheet("font-size: 12px; font-weight: 500; color: #cbd5e1;")
-        self.summary_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        bar_layout.addWidget(self.summary_lbl, 1, Qt.AlignVCenter)
+        self.summary_lbl.setStyleSheet("font-size: 11.5px; color: #94a3b8; background: transparent;")
+        self.summary_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        text_col.addWidget(self.summary_lbl)
+        bar_layout.addLayout(text_col, 1)
 
-        self.reveal_json_btn = PushButton("Reveal JSON", self.terminal_strip)
-        self.reveal_json_btn.setIcon(FluentIcon.FOLDER)
-        self.reveal_json_btn.setFixedHeight(26)
+        self.reveal_json_btn = PushButton("Reveal", self.terminal_strip)
+        self.reveal_json_btn.setToolTip("Show the transcript JSON in File Explorer")
+        self.reveal_json_btn.setFixedHeight(28)
         self.reveal_json_btn.clicked.connect(self._on_reveal_json)
         self.reveal_json_btn.setEnabled(bool(self.transcript_json_path and os.path.isfile(self.transcript_json_path)))
         bar_layout.addWidget(self.reveal_json_btn, 0, Qt.AlignVCenter)
 
-        self.copy_log_btn = ToolButton(FluentIcon.COPY, self.terminal_strip)
-        self.copy_log_btn.setFixedSize(26, 26)
-        self.copy_log_btn.setToolTip("Copy Terminal Output")
+        self.copy_log_btn = TransparentToolButton(FluentIcon.COPY, self.terminal_strip)
+        self.copy_log_btn.setFixedSize(28, 28)
+        self.copy_log_btn.setToolTip("Copy log")
         self.copy_log_btn.clicked.connect(self._on_copy_log)
         bar_layout.addWidget(self.copy_log_btn, 0, Qt.AlignVCenter)
 
-        self.clear_log_btn = ToolButton(FluentIcon.DELETE, self.terminal_strip)
-        self.clear_log_btn.setFixedSize(26, 26)
-        self.clear_log_btn.setToolTip("Clear Terminal")
+        self.clear_log_btn = TransparentToolButton(FluentIcon.BROOM, self.terminal_strip)
+        self.clear_log_btn.setFixedSize(28, 28)
+        self.clear_log_btn.setToolTip("Clear log")
         self.clear_log_btn.clicked.connect(self._on_clear_log)
         bar_layout.addWidget(self.clear_log_btn, 0, Qt.AlignVCenter)
 
-        self.expand_btn = ToolButton(FluentIcon.CARE_UP_SOLID, self.terminal_strip)
-        self.expand_btn.setFixedSize(26, 26)
-        self.expand_btn.setToolTip("Expand / Collapse Terminal")
+        self.expand_btn = TransparentToolButton(FluentIcon.COMMAND_PROMPT, self.terminal_strip)
+        self.expand_btn.setFixedSize(28, 28)
+        self.expand_btn.setToolTip("Show log")
         self.expand_btn.clicked.connect(self.toggle_terminal)
         bar_layout.addWidget(self.expand_btn, 0, Qt.AlignVCenter)
 
@@ -242,7 +252,7 @@ class TranscribeStage(QWidget):
                 line-height: 1.4;
             }
         """)
-        self.console.setFixedHeight(140)
+        self.console.setFixedHeight(120)
         drawer_layout.addWidget(self.console)
 
         self.terminal_drawer.hide()  # Collapsed by default
@@ -291,12 +301,8 @@ class TranscribeStage(QWidget):
     # -------------------------------------------------------------------------
     def toggle_terminal(self):
         self._terminal_expanded = not self._terminal_expanded
-        if self._terminal_expanded:
-            self.expand_btn.setIcon(FluentIcon.CARE_DOWN_SOLID)
-            self.terminal_drawer.show()
-        else:
-            self.expand_btn.setIcon(FluentIcon.CARE_UP_SOLID)
-            self.terminal_drawer.hide()
+        self.terminal_drawer.setVisible(self._terminal_expanded)
+        self.expand_btn.setToolTip("Hide log" if self._terminal_expanded else "Show log")
 
     # -------------------------------------------------------------------------
     # UI State & Table Management
@@ -306,53 +312,53 @@ class TranscribeStage(QWidget):
         for row, path in enumerate(self.vo_file_paths):
             fname = os.path.basename(path)
 
-            order_item = QTableWidgetItem(f"Part {row + 1}")
-            order_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 0, order_item)
+            order_item = QTableWidgetItem(str(row + 1))
+            order_item.setForeground(QColor("#94a3b8"))
+            self.table.setItem(row, self.COL_PART, order_item)
 
             fn_item = QTableWidgetItem(fname)
             fn_item.setToolTip(path)
-            self.table.setItem(row, 1, fn_item)
+            self.table.setItem(row, self.COL_FILE, fn_item)
 
-            dur_txt = "--:--"
+            dur_item = QTableWidgetItem(self._probe_duration(path))
+            dur_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            dur_item.setForeground(QColor("#94a3b8"))
+            self.table.setItem(row, self.COL_DURATION, dur_item)
+
+            size_txt = "—"
             if os.path.isfile(path):
-                sz_mb = os.path.getsize(path) / (1024 * 1024)
-                dur_txt = f"{sz_mb:.1f} MB"
-            dur_item = QTableWidgetItem(dur_txt)
-            dur_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 2, dur_item)
+                size_txt = f"{os.path.getsize(path) / (1024 * 1024):.1f} MB"
+            size_item = QTableWidgetItem(size_txt)
+            size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, self.COL_SIZE, size_item)
 
-            status_txt = "Ready" if self.segments else "Queued"
-            status_item = QTableWidgetItem(status_txt)
-            status_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 3, status_item)
+            status_item = QTableWidgetItem("Transcribed" if self.segments else "Queued")
+            status_item.setForeground(QColor("#34d399") if self.segments else QColor("#94a3b8"))
+            self.table.setItem(row, self.COL_STATUS, status_item)
 
-            # Compact Action Buttons: 20x20 with 0 margin layout so no clipping occurs
             act_widget = QWidget()
             act_layout = QHBoxLayout(act_widget)
-            act_layout.setContentsMargins(0, 0, 0, 0)
-            act_layout.setSpacing(4)
-            act_layout.setAlignment(Qt.AlignCenter)
+            act_layout.setContentsMargins(0, 0, 4, 0)
+            act_layout.setSpacing(2)
+            act_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-            up_btn = ToolButton(FluentIcon.UP, act_widget)
-            up_btn.setFixedSize(20, 20)
-            up_btn.setEnabled(row > 0 and not self._is_transcribing)
-            up_btn.clicked.connect(lambda _, r=row: self._move_part(r, -1))
-            act_layout.addWidget(up_btn)
+            def _act(icon, tip, enabled, slot):
+                b = TransparentToolButton(icon, act_widget)
+                b.setFixedSize(26, 26)
+                b.setIconSize(QSize(12, 12))
+                b.setToolTip(tip)
+                b.setEnabled(enabled)
+                b.clicked.connect(slot)
+                act_layout.addWidget(b)
 
-            down_btn = ToolButton(FluentIcon.DOWN, act_widget)
-            down_btn.setFixedSize(20, 20)
-            down_btn.setEnabled(row < len(self.vo_file_paths) - 1 and not self._is_transcribing)
-            down_btn.clicked.connect(lambda _, r=row: self._move_part(r, 1))
-            act_layout.addWidget(down_btn)
+            _act(FluentIcon.UP, "Move up", row > 0 and not self._is_transcribing,
+                 lambda _=False, r=row: self._move_part(r, -1))
+            _act(FluentIcon.DOWN, "Move down", row < len(self.vo_file_paths) - 1 and not self._is_transcribing,
+                 lambda _=False, r=row: self._move_part(r, 1))
+            _act(FluentIcon.CLOSE, "Remove", not self._is_transcribing,
+                 lambda _=False, r=row: self._remove_part(r))
 
-            del_btn = ToolButton(FluentIcon.CLOSE, act_widget)
-            del_btn.setFixedSize(20, 20)
-            del_btn.setEnabled(not self._is_transcribing)
-            del_btn.clicked.connect(lambda _, r=row: self._remove_part(r))
-            act_layout.addWidget(del_btn)
-
-            self.table.setCellWidget(row, 4, act_widget)
+            self.table.setCellWidget(row, self.COL_ACTIONS, act_widget)
 
         self.start_btn.setEnabled(len(self.vo_file_paths) > 0 and not self._is_transcribing)
         self._update_summary()
@@ -399,7 +405,7 @@ class TranscribeStage(QWidget):
                 self._active_worker.cleanup()
                 self._active_worker = None
             self._is_transcribing = False
-            self.start_btn.setText("Start Queue")
+            self.start_btn.setText("Start queue")
             self.start_btn.setIcon(FluentIcon.PLAY)
             self.overall_bar.hide()
             self.status_dot.set_color("#94a3b8", "rgba(148, 163, 184, 0.25)")
@@ -460,18 +466,19 @@ class TranscribeStage(QWidget):
         fname = os.path.basename(file_path)
         row = part_id - 1
         if 0 <= row < self.table.rowCount():
-            item = self.table.item(row, 3)
+            item = self.table.item(row, self.COL_STATUS)
             if item:
-                item.setText("Transcribing...")
-                item.setForeground(Qt.cyan)
-        self.summary_lbl.setText(f"Transcribing Part {cur_idx} of {total_files}: {fname}")
+                item.setText("Transcribing…")
+                item.setForeground(QColor("#60a5fa"))
+        self.output_name_lbl.setText(f"Transcribing part {cur_idx} of {total_files}")
+        self.summary_lbl.setText(fname)
         self._append_console_line(f"\n--- Transcribing Part {cur_idx} of {total_files}: {fname} ---", "#fbbf24")
 
     def _on_worker_file_progress(self, part_id: int, pct: int, status_text: str):
         self.overall_bar.setValue(pct)
         row = part_id - 1
         if 0 <= row < self.table.rowCount():
-            item = self.table.item(row, 3)
+            item = self.table.item(row, self.COL_STATUS)
             if item:
                 item.setText(f"{pct}%")
         self.vo_status_changed.emit(f"VO: {pct}%")
@@ -488,10 +495,10 @@ class TranscribeStage(QWidget):
     def _on_worker_file_finished(self, part_id: int, file_segments: list, duration: float):
         row = part_id - 1
         if 0 <= row < self.table.rowCount():
-            item = self.table.item(row, 3)
+            item = self.table.item(row, self.COL_STATUS)
             if item:
-                item.setText(f"Done ({len(file_segments)} segs)")
-                item.setForeground(Qt.green)
+                item.setText(f"Done · {len(file_segments)} segments")
+                item.setForeground(QColor("#34d399"))
 
     def _on_worker_batch_finished(self, saved_json_path: str, manifest: dict):
         self._is_transcribing = False
@@ -501,7 +508,7 @@ class TranscribeStage(QWidget):
         self.transcript_json_path = saved_json_path
         self.segments = manifest.get("segments", [])
 
-        self.start_btn.setText("Re-Transcribe")
+        self.start_btn.setText("Transcribe again")
         self.start_btn.setIcon(FluentIcon.SYNC)
         self.start_btn.setEnabled(True)
         self.add_files_btn.setEnabled(True)
@@ -526,7 +533,7 @@ class TranscribeStage(QWidget):
         if self._active_worker:
             self._active_worker.cleanup()
             self._active_worker = None
-        self.start_btn.setText("Start Queue")
+        self.start_btn.setText("Start queue")
         self.start_btn.setIcon(FluentIcon.PLAY)
         self.start_btn.setEnabled(True)
         self.add_files_btn.setEnabled(True)
@@ -581,17 +588,37 @@ class TranscribeStage(QWidget):
     def _update_summary(self):
         if self._is_transcribing:
             return
+        parts = len(self.vo_file_paths)
         if self.segments and self.transcript_json_path:
-            fname = os.path.basename(self.transcript_json_path)
-            self.summary_lbl.setText(f"Terminal Ready · {len(self.segments)} segments ({fname})")
-            self.status_dot.set_color("#34d399", "rgba(52, 211, 153, 0.25)")
+            self.output_name_lbl.setText(os.path.basename(self.transcript_json_path))
+            self.summary_lbl.setText(
+                f"{len(self.segments)} segments  ·  {parts} part{'s' if parts != 1 else ''}"
+            )
+            self.status_dot.set_color("#34d399", "#0034d399")
             self.reveal_json_btn.setEnabled(True)
         elif self.vo_file_paths:
-            self.summary_lbl.setText(f"Terminal Idle · {len(self.vo_file_paths)} parts queued")
-            self.status_dot.set_color("#94a3b8", "rgba(148, 163, 184, 0.25)")
+            self.output_name_lbl.setText("No transcript yet")
+            self.summary_lbl.setText(f"{parts} part{'s' if parts != 1 else ''} queued. Start the queue to transcribe.")
+            self.status_dot.set_color("#6f737b", "#006f737b")
         else:
-            self.summary_lbl.setText("Terminal Idle · 0 segments")
-            self.status_dot.set_color("#94a3b8", "rgba(148, 163, 184, 0.25)")
+            self.output_name_lbl.setText("No transcript yet")
+            self.summary_lbl.setText("Add audio parts, then start the queue.")
+            self.status_dot.set_color("#6f737b", "#006f737b")
+
+    def _probe_duration(self, path: str) -> str:
+        """Real audio length (was showing file size in MB). Cached per path."""
+        if path in self._duration_cache:
+            return self._duration_cache[path]
+        txt = "—"
+        try:
+            from ....core.media_probe import probe_media_file
+            probed = probe_media_file(path, use_cache=True)
+            if probed and getattr(probed, "duration_display", ""):
+                txt = probed.duration_display
+        except Exception:
+            pass
+        self._duration_cache[path] = txt
+        return txt
 
     def _on_reveal_json(self):
         if self.transcript_json_path and os.path.isfile(self.transcript_json_path):

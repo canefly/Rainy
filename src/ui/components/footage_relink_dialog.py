@@ -1,17 +1,18 @@
 import os
 import webbrowser
 from typing import Dict, List, Optional
-from PySide6.QtCore import Qt, Signal, QThreadPool, QEvent
-from PySide6.QtGui import QCursor, QColor, QFontMetrics
+from PySide6.QtCore import Qt, Signal, QThreadPool, QEvent, QSize, QRectF, QPoint
+from PySide6.QtGui import QCursor, QColor, QFontMetrics, QPainter, QPainterPath, QPixmap, QImage, QBrush, QPen
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QFileDialog, QSizePolicy, QApplication, QDialog, QProgressBar, QStackedWidget
+    QFileDialog, QSizePolicy, QApplication, QDialog, QProgressBar, QStackedWidget,
+    QGraphicsScene, QGraphicsPathItem, QGraphicsDropShadowEffect
 )
 from qfluentwidgets import (
     MessageBoxBase, PushButton, PrimaryPushButton, ToolButton,
     FluentIcon, ComboBox, LineEdit, SearchLineEdit, CheckBox,
     SmoothScrollArea, InfoBar, InfoBarPosition, RoundMenu, Action, MessageBox,
-    SegmentedWidget
+    SegmentedWidget, Pivot, HyperlinkButton, TransparentToolButton
 )
 
 from ..theme import ThemeManager
@@ -29,6 +30,84 @@ def _elide_middle_path(path: str, max_chars: int = 62) -> str:
         return path
     half = (max_chars - 3) // 2
     return f"{path[:half]}...{path[-half:]}"
+
+
+class _CachedCardShadow(QWidget):
+    """
+    Drop-in replacement for the card's live QGraphicsDropShadowEffect.
+
+    A live effect forces Qt to re-render and re-blur the ENTIRE card offscreen on every
+    scroll frame (and disables viewport scroll blitting). This renders the identical shadow
+    (same QGraphicsDropShadowEffect, same blur/offset/color, same rounded card shape) ONCE
+    per card size into a pixmap and paints that from a layer between the dim mask and the card.
+    """
+
+    def __init__(self, card: QWidget, parent: QWidget, blur: float = 60, offset=(0, 10),
+                 color: QColor = QColor(0, 0, 0, 50), radius: float = 10.0,
+                 edge_color: QColor = QColor(58, 58, 58)):
+        super().__init__(parent)
+        self._card = card
+        self._blur, self._offset, self._color = blur, offset, QColor(color)
+        self._radius, self._edge = radius, QColor(edge_color)
+        self._pix: Optional[QPixmap] = None
+        self._pix_key = None
+        self._origin = QPoint(0, 0)  # pixmap top-left relative to the card's top-left
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # mask clicks still close
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        card.installEventFilter(self)
+        self._sync()
+
+    def _render(self):
+        w, h = self._card.width(), self._card.height()
+        dpr = self.devicePixelRatioF() or 1.0
+        key = (w, h, dpr)
+        if self._pix_key == key or w <= 0 or h <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, w, h), self._radius, self._radius)
+        item = QGraphicsPathItem(path)
+        item.setPen(QPen(Qt.NoPen))
+        # Card covers this fill; edge color matches the card border so AA edges blend the same
+        item.setBrush(QBrush(self._edge))
+        eff = QGraphicsDropShadowEffect()
+        eff.setBlurRadius(self._blur)
+        eff.setOffset(*self._offset)
+        eff.setColor(self._color)
+        item.setGraphicsEffect(eff)
+        scene = QGraphicsScene()
+        scene.addItem(item)
+        src = eff.boundingRect().toAlignedRect()
+        img = QImage(int(src.width() * dpr), int(src.height() * dpr), QImage.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        scene.render(p, QRectF(0, 0, src.width(), src.height()), QRectF(src))
+        p.end()
+        self._pix = QPixmap.fromImage(img)
+        self._pix_key = key
+        self._origin = src.topLeft()
+
+    def _sync(self):
+        self._render()
+        if self._pix is None:
+            return
+        g = self._card.geometry()
+        dpr = self._pix.devicePixelRatio() or 1.0
+        self.setGeometry(g.x() + self._origin.x(), g.y() + self._origin.y(),
+                         int(self._pix.width() / dpr), int(self._pix.height() / dpr))
+        self.setVisible(self._card.isVisible())
+        self.stackUnder(self._card)
+        self.update()
+
+    def eventFilter(self, obj, e):
+        if obj is self._card and e.type() in (QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.Hide):
+            self._sync()
+        return super().eventFilter(obj, e)
+
+    def paintEvent(self, e):
+        if self._pix is not None:
+            QPainter(self).drawPixmap(0, 0, self._pix)
 
 
 class FootageRelinkDialog(MessageBoxBase):
@@ -67,6 +146,9 @@ class FootageRelinkDialog(MessageBoxBase):
             target_parent = self._fallback_parent
 
         super().__init__(parent=target_parent)
+        # Swap the live card shadow (re-blurred every scroll frame) for a cached identical one
+        self.widget.setGraphicsEffect(None)
+        self._card_shadow = _CachedCardShadow(self.widget, self)
 
         self.links = list(dict.fromkeys(links))  # deduplicate preserving order
         self.footage_dir = current_footage_dir or ""
@@ -81,111 +163,89 @@ class FootageRelinkDialog(MessageBoxBase):
         self.card_widgets: List[QFrame] = []
         self._initial_stage_resolved = False
 
-        # Dialog Sizing: Wide landscape format for clear side-by-side file auditing & table columns
+        # Snapshot of what the workspace already has, so closing only emits real changes
+        self._initial_footage_dir = self.footage_dir
+        self._initial_linked = dict(self.manual_overrides)
+        self._committed = False
+
+        # Dialog Sizing: one fixed size for every tab so switching never makes the window jump
         parent_w = target_parent.width() if target_parent else 980
+        parent_h = target_parent.height() if target_parent else 720
         self.widget.setFixedWidth(min(920, max(740, parent_w - 40)))
+        self.widget.setFixedHeight(min(640, max(480, parent_h - 60)))
 
-        self.viewLayout.setSpacing(8)
-        self.viewLayout.setContentsMargins(20, 18, 20, 12)
+        # Changes save as they happen; the X / Esc closes. No Apply & Save / Close footer.
+        self.buttonGroup.hide()
+        self.viewLayout.setSpacing(0)
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        # Inset content area. Outer margin is 16px; title, rule and pages add 8px more (24px gutter)
+        # so the tab labels, whose items carry 8px padding, line up exactly with the title.
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setContentsMargins(16, 12, 12, 12)
+        self.content_layout.setSpacing(12)
+        self.viewLayout.addLayout(self.content_layout, 1)
 
         # =====================================================================
-        # 1. Modal Header: Title, Inline Stats, and Stage Toggle (Relink | Library)
+        # 1. Compact header: title + close, underline tabs tight beneath
         # =====================================================================
-        header_layout = QVBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(4)
+        header_block = QVBoxLayout()
+        header_block.setContentsMargins(0, 0, 0, 0)
+        header_block.setSpacing(2)
 
         title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(10)
-        title_row.setAlignment(Qt.AlignVCenter)
+        title_row.setContentsMargins(8, 0, 0, 0)
+        title_row.setSpacing(8)
 
-        self.header_title = QLabel("Footage Relink & Media Library", self.widget)
+        self.header_title = QLabel("Footage & Media", self.widget)
         self.header_title.setObjectName("RelinkDialogTitle")
-        title_row.addWidget(self.header_title)
+        title_row.addWidget(self.header_title, 1, Qt.AlignVCenter)
 
-        # Inline stats container matching Top Nav stats
-        self.header_stats = QWidget(self.widget)
-        self.header_stats.setObjectName("RelinkHeaderStats")
-        hs_layout = QHBoxLayout(self.header_stats)
-        hs_layout.setContentsMargins(0, 0, 0, 0)
-        hs_layout.setSpacing(8)
-        hs_layout.setAlignment(Qt.AlignVCenter)
+        self.close_btn = TransparentToolButton(FluentIcon.CLOSE, self.widget)
+        self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setIconSize(QSize(10, 10))
+        self.close_btn.setToolTip("Close (Esc)")
+        self.close_btn.clicked.connect(self.accept)
+        # Clicking the dimmed background closes too (reject -> done -> _commit_changes saves)
+        self.setClosableOnMaskClicked(True)
+        title_row.addWidget(self.close_btn, 0, Qt.AlignVCenter)
+        header_block.addLayout(title_row)
 
-        self.header_div1 = QFrame(self.header_stats)
-        self.header_div1.setFrameShape(QFrame.VLine)
-        self.header_div1.setFixedHeight(12)
-        hs_layout.addWidget(self.header_div1)
-
-        self.status_dot = StatusDot("#34d399", "rgba(52, 211, 153, 0.35)", self.header_stats)
-        hs_layout.addWidget(self.status_dot)
-
-        self.linked_stat_lbl = QLabel("0 / 0 Linked", self.header_stats)
-        self.linked_stat_lbl.setObjectName("RelinkHeaderLinked")
-        hs_layout.addWidget(self.linked_stat_lbl)
-
-        self.header_div2 = QFrame(self.header_stats)
-        self.header_div2.setFrameShape(QFrame.VLine)
-        self.header_div2.setFixedHeight(12)
-        hs_layout.addWidget(self.header_div2)
-
-        self.size_stat_lbl = QLabel("0 B Local", self.header_stats)
-        self.size_stat_lbl.setObjectName("RelinkHeaderSize")
-        hs_layout.addWidget(self.size_stat_lbl)
-
-        self.header_div3 = QFrame(self.header_stats)
-        self.header_div3.setFrameShape(QFrame.VLine)
-        self.header_div3.setFixedHeight(12)
-        hs_layout.addWidget(self.header_div3)
-
-        self.vo_header_stat_lbl = QLabel("VO: Unbound", self.header_stats)
-        self.vo_header_stat_lbl.setObjectName("RelinkHeaderVO")
-        self.vo_header_stat_lbl.setCursor(Qt.PointingHandCursor)
-        self.vo_header_stat_lbl.setToolTip("Click to open Voiceover Transcription")
-        self.vo_header_stat_lbl.mousePressEvent = lambda e: self.switch_stage("transcribe")
-        hs_layout.addWidget(self.vo_header_stat_lbl)
-
-        title_row.addWidget(self.header_stats)
-        title_row.addStretch(1)
-
-        # Segmented Stage Toggle: [ Relink | Library ]
-        self.stage_tabs = SegmentedWidget(self.widget)
+        # Underline tabs. Labels stay plain; Relink only gains a count when files are missing.
+        self.stage_tabs = Pivot(self.widget)
         # Disable sliding transition animation for instant responsive tab switching
         def _instant_stage_tab_slide(endValue, startValue=None):
             self.stage_tabs.slideAni.stop()
             self.stage_tabs.slideAni.setValue(endValue)
             self.stage_tabs.update()
         self.stage_tabs.slideAni.startAnimation = _instant_stage_tab_slide
-        self.stage_tabs.setFixedHeight(30)
-        self.stage_tabs.addItem(
-            routeKey="relink",
-            text="Relink",
-            onClick=lambda: self.switch_stage("relink"),
-        )
-        self.stage_tabs.addItem(
-            routeKey="library",
-            text="Library",
-            onClick=lambda: self.switch_stage("library"),
-        )
-        self.stage_tabs.addItem(
-            routeKey="transcribe",
-            text="Transcribe",
-            onClick=lambda: self.switch_stage("transcribe"),
-        )
+        for key, text in (("relink", "Relink"), ("library", "Library"), ("transcribe", "Transcribe")):
+            # PivotItem.itemClicked emits a bool; swallow it so it can't overwrite the route key
+            self.stage_tabs.addItem(
+                routeKey=key, text=text, onClick=lambda *_, k=key: self.switch_stage(k)
+            )
+            # Smaller, tighter items than the Pivot default (18px font, 10px/12px padding)
+            self.stage_tabs.items[key].setStyleSheet("PivotItem { padding: 6px 8px; }")
+        self.stage_tabs.setItemFontSize(13)  # must run after addItem or items keep 18px
         self.stage_tabs.setCurrentItem("relink")
-        title_row.addWidget(self.stage_tabs, 0, Qt.AlignVCenter)
 
-        header_layout.addLayout(title_row)
+        tabs_row = QHBoxLayout()
+        tabs_row.setContentsMargins(0, 0, 0, 0)
+        tabs_row.addWidget(self.stage_tabs, 0, Qt.AlignLeft | Qt.AlignBottom)
+        tabs_row.addStretch(1)
+        header_block.addLayout(tabs_row)
 
-        self.header_desc = QLabel(
-            "Verifies local footage against script source links based on filenames and exact probed byte sizes.",
-            self.widget
-        )
-        self.header_desc.setObjectName("RelinkDialogSubtitle")
-        self.header_desc.setWordWrap(True)
-        header_layout.addWidget(self.header_desc)
-
-        self.viewLayout.addLayout(header_layout)
+        self.tabs_rule = QFrame(self.widget)
+        self.tabs_rule.setObjectName("FootageTabsRule")
+        self.tabs_rule.setFixedHeight(1)
+        rule_row = QHBoxLayout()
+        rule_row.setContentsMargins(8, 0, 8, 0)
+        rule_row.addWidget(self.tabs_rule)
+        tabs_block = QVBoxLayout()
+        tabs_block.setContentsMargins(0, 0, 0, 0)
+        tabs_block.setSpacing(0)
+        tabs_block.addLayout(header_block)
+        tabs_block.addLayout(rule_row)
+        self.content_layout.addLayout(tabs_block)
 
         # =====================================================================
         # 2. Central Stage Stack (Stage A: Relink | Stage B: Library)
@@ -193,65 +253,78 @@ class FootageRelinkDialog(MessageBoxBase):
         self.stage_stack = QStackedWidget(self.widget)
         self.stage_stack.setContentsMargins(0, 0, 0, 0)
 
+        stage_wrap = QHBoxLayout()
+        stage_wrap.setContentsMargins(8, 0, 12, 0)  # 24px gutters on both sides
+        stage_wrap.addWidget(self.stage_stack)
+
         # --- Stage A: Relink Container ---
         self.relink_page = QWidget(self.stage_stack)
         relink_layout = QVBoxLayout(self.relink_page)
         relink_layout.setContentsMargins(0, 0, 0, 0)
-        relink_layout.setSpacing(8)
+        relink_layout.setSpacing(12)
 
-        # 2a. Directory Selector Row
+        # 2a. Folder row: left-elided path (folder name always visible), change, rescan
         dir_layout = QHBoxLayout()
         dir_layout.setContentsMargins(0, 0, 0, 0)
         dir_layout.setSpacing(8)
 
-        dir_lbl = QLabel("Footage Folder:", self.relink_page)
-        dir_lbl.setObjectName("RelinkFieldLabel")
-        dir_lbl.setFixedWidth(92)
-        dir_layout.addWidget(dir_lbl, 0, Qt.AlignVCenter)
-
         self.dir_edit = LineEdit(self.relink_page)
-        self.dir_edit.setText(self.footage_dir)
-        self.dir_edit.setPlaceholderText("Select directory containing downloaded footage...")
+        self.dir_edit.setPlaceholderText("Choose the folder that holds the downloaded footage")
         self.dir_edit.setReadOnly(True)
+        self.dir_edit.setFixedHeight(32)
+        self.dir_edit.installEventFilter(self)
         dir_layout.addWidget(self.dir_edit, 1, Qt.AlignVCenter)
 
-        self.browse_btn = PushButton("Browse...", self.relink_page)
+        self.browse_btn = PushButton("Change folder…", self.relink_page)
         self.browse_btn.setIcon(FluentIcon.FOLDER)
         self.browse_btn.setFixedHeight(32)
         self.browse_btn.clicked.connect(self._on_browse_directory)
         dir_layout.addWidget(self.browse_btn, 0, Qt.AlignVCenter)
 
-        self.rescan_btn = ToolButton(FluentIcon.SYNC, self.relink_page)
+        self.rescan_btn = TransparentToolButton(FluentIcon.SYNC, self.relink_page)
         self.rescan_btn.setFixedSize(32, 32)
-        self.rescan_btn.setToolTip("Rescan Directory & Audit Active Files")
+        self.rescan_btn.setToolTip("Rescan folder")
         self.rescan_btn.clicked.connect(self._run_scan)
         dir_layout.addWidget(self.rescan_btn, 0, Qt.AlignVCenter)
 
         relink_layout.addLayout(dir_layout)
-        self._refresh_vo_header_status()
+        self._refresh_dir_display()
 
-        # 2b. Confirm & Continue Banner (Appears when 100% of script assets are linked)
-        self.confirm_banner = QFrame(self.relink_page)
-        self.confirm_banner.setObjectName("RelinkConfirmBanner")
-        self.confirm_banner.setFixedHeight(34)
-        self.confirm_banner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 2b. Status line: quiet inline summary (no banner box) + auto-relink option
+        self.confirm_banner = QWidget(self.relink_page)
+        self.confirm_banner.setObjectName("RelinkStatusLine")
+        self.confirm_banner.setFixedHeight(28)
         cb_layout = QHBoxLayout(self.confirm_banner)
-        cb_layout.setContentsMargins(10, 4, 10, 4)
-        cb_layout.setSpacing(10)
+        cb_layout.setContentsMargins(0, 0, 0, 0)
+        cb_layout.setSpacing(8)
 
-        self.confirm_banner_lbl = QLabel("All footage files are linked and active on disk.", self.confirm_banner)
-        cb_layout.addWidget(self.confirm_banner_lbl, 1, Qt.AlignVCenter)
+        self.relink_status_dot = StatusDot("#34d399", "#0034d399", self.confirm_banner)
+        cb_layout.addWidget(self.relink_status_dot, 0, Qt.AlignVCenter)
 
-        self.continue_lib_btn = PrimaryPushButton("Confirm & Open Library", self.confirm_banner)
-        self.continue_lib_btn.setIcon(FluentIcon.ACCEPT)
-        self.continue_lib_btn.setFixedHeight(24)
+        self.confirm_banner_lbl = QLabel("Scanning folder…", self.confirm_banner)
+        cb_layout.addWidget(self.confirm_banner_lbl, 0, Qt.AlignVCenter)
+
+        self.continue_lib_btn = HyperlinkButton("", "Open Library →", self.confirm_banner)
+        self.continue_lib_btn.setFixedHeight(26)
         self.continue_lib_btn.clicked.connect(self._on_confirm_and_open_library)
         cb_layout.addWidget(self.continue_lib_btn, 0, Qt.AlignVCenter)
 
-        self.confirm_banner.hide()
+        self.copy_missing_btn = HyperlinkButton("", "Copy missing links", self.confirm_banner)
+        self.copy_missing_btn.setFixedHeight(26)
+        self.copy_missing_btn.setToolTip("Copy the source URLs of missing files to the clipboard")
+        self.copy_missing_btn.clicked.connect(self._on_copy_missing_urls)
+        cb_layout.addWidget(self.copy_missing_btn, 0, Qt.AlignVCenter)
+
+        cb_layout.addStretch(1)
+
+        self.auto_relink_cb = CheckBox("Auto-relink others in same folder", self.confirm_banner)
+        self.auto_relink_cb.setChecked(True)
+        self.auto_relink_cb.setToolTip("When you locate one missing file, link any other missing files found next to it")
+        cb_layout.addWidget(self.auto_relink_cb, 0, Qt.AlignVCenter)
+
         relink_layout.addWidget(self.confirm_banner, 0)
 
-        # 2d. Filter & Search Toolbar (Stage A)
+        # 2c. Filter & Search Toolbar (Stage A)
         self.relink_toolbar = QWidget(self.relink_page)
         self.relink_toolbar.setFixedHeight(32)
         self.relink_toolbar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -262,32 +335,38 @@ class FootageRelinkDialog(MessageBoxBase):
         self.filter_combo = ComboBox(self.relink_toolbar)
         self.filter_combo.addItems(["All Files", "Linked Only", "Missing Only", "VFR"])
         self.filter_combo.setCurrentIndex(0)
-        self.filter_combo.setFixedWidth(145)
-        self.filter_combo.setFixedHeight(30)
+        self.filter_combo.setFixedWidth(150)
+        self.filter_combo.setFixedHeight(32)
         self.filter_combo.currentTextChanged.connect(self._apply_filter)
         filter_layout.addWidget(self.filter_combo)
 
         self.search_edit = SearchLineEdit(self.relink_toolbar)
-        self.search_edit.setPlaceholderText("Filter files by name or path...")
-        self.search_edit.setFixedHeight(30)
+        self.search_edit.setPlaceholderText("Filter by name or folder")
+        self.search_edit.setFixedHeight(32)
         self.search_edit.textChanged.connect(self._apply_filter)
         filter_layout.addWidget(self.search_edit, 1)
 
         relink_layout.addWidget(self.relink_toolbar, 0)
 
-        # 2e. Media Items Smooth Scroll Area (Compact non-duplicate rows, missing sorted first)
+        # 2d. Flat list: column header + hairline-separated rows (no card per row)
+        list_block = QVBoxLayout()
+        list_block.setContentsMargins(0, 0, 0, 0)
+        list_block.setSpacing(0)
+        self.relink_header = self._build_relink_row_header(self.relink_page)
+        list_block.addWidget(self.relink_header, 0)
+
         self.scroll = SmoothScrollArea(self.relink_page)
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setMinimumHeight(230)
+        self.scroll.setMinimumHeight(160)
         self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         self.list_container = QWidget(self.scroll)
         self.list_container.setStyleSheet("background: transparent;")
         self.list_layout = QVBoxLayout(self.list_container)
-        self.list_layout.setContentsMargins(0, 0, 6, 0)
-        self.list_layout.setSpacing(5)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setSpacing(0)
         self.list_layout.addStretch(1)
 
         self.scroll.setWidget(self.list_container)
@@ -302,24 +381,9 @@ class FootageRelinkDialog(MessageBoxBase):
         self.relink_smooth_scroller = GpuSmoothScroller(self.scroll, self)
         self.relink_smooth_scroller.enable_smooth_wheel = True
         self.relink_middle_scroller = MiddleClickAutoScroller(self.scroll, self)
-        relink_layout.addWidget(self.scroll, 1)
+        list_block.addWidget(self.scroll, 1)
+        relink_layout.addLayout(list_block, 1)
 
-        # 2f. Bottom Options Row (Stage A)
-        bottom_options = QHBoxLayout()
-        bottom_options.setContentsMargins(0, 0, 0, 0)
-
-        self.auto_relink_cb = CheckBox("Automatically relink remaining missing files in same folder", self.relink_page)
-        self.auto_relink_cb.setChecked(True)
-        bottom_options.addWidget(self.auto_relink_cb, 1, Qt.AlignVCenter)
-
-        self.copy_missing_btn = PushButton("Copy Missing Links", self.relink_page)
-        self.copy_missing_btn.setIcon(FluentIcon.COPY)
-        self.copy_missing_btn.setFixedHeight(28)
-        self.copy_missing_btn.setToolTip("Copy all missing asset URLs to clipboard")
-        self.copy_missing_btn.clicked.connect(self._on_copy_missing_urls)
-        bottom_options.addWidget(self.copy_missing_btn, 0, Qt.AlignVCenter)
-
-        relink_layout.addLayout(bottom_options)
         self.stage_stack.addWidget(self.relink_page)
 
         # --- Stage B: Footage Library Explorer ---
@@ -343,24 +407,19 @@ class FootageRelinkDialog(MessageBoxBase):
         self.transcribe_stage.transcription_completed.connect(self._on_vo_stage_completed)
         self.stage_stack.addWidget(self.transcribe_stage)
 
-        self.viewLayout.addWidget(self.stage_stack)
+        self.content_layout.addLayout(stage_wrap, 1)
 
         # =====================================================================
-        # 3. Always-Visible Render Queue Strip (Bottom of Modal)
+        # 3. Shared activity dock: identical on every tab (render / voiceover / footage)
         # =====================================================================
         self.queue_strip = QueueStrip(self.widget)
-        self.viewLayout.addWidget(self.queue_strip)
+        self.queue_strip.open_transcribe_requested.connect(lambda: self.switch_stage("transcribe"))
+        self.viewLayout.addWidget(self.queue_strip)  # edge to edge, below the inset content
+        self.vo_header_stat_lbl = self.queue_strip.vo_lbl
+        self._refresh_vo_header_status()
 
         # Connect global render queue completion to auto-reprobe items in place
         render_queue.job_finished.connect(self._on_queue_job_finished)
-
-        # =====================================================================
-        # 4. Action Buttons in Button Group
-        # =====================================================================
-        self.yesButton.setText("Apply && Save")
-        self.yesButton.setIcon(FluentIcon.ACCEPT)
-        self.cancelButton.setText("Close")
-        self.yesButton.clicked.connect(self._on_apply_save)
 
         self.apply_theme()
 
@@ -383,39 +442,28 @@ class FootageRelinkDialog(MessageBoxBase):
         db.set_setting(self._confirm_setting_key(), "true" if confirmed else "false")
 
     def switch_stage(self, stage_key: str):
+        # The activity dock stays visible on every tab; only the page changes.
         if stage_key == "library":
             self.run_health_check()
             self.library_stage.set_items(self.match_items)
             self.stage_stack.setCurrentWidget(self.library_stage)
             self.stage_tabs.setCurrentItem("library")
-            self.queue_strip.show()
-            self.header_desc.setText(
-                "Multi-select footage to queue CFR transcodes, compress bloated clips, or reveal in File Explorer."
-            )
         elif stage_key == "transcribe":
             self.stage_stack.setCurrentWidget(self.transcribe_stage)
             self.stage_tabs.setCurrentItem("transcribe")
-            self.queue_strip.hide()
-            self.header_desc.setText(
-                "Queue multi-part voiceovers, stream transcription segments live in real-time, and save independent JSON."
-            )
         else:
             self.stage_stack.setCurrentWidget(self.relink_page)
             self.stage_tabs.setCurrentItem("relink")
-            self.queue_strip.show()
-            self.header_desc.setText(
-                "Verifies local footage against script source links based on filenames and exact probed byte sizes."
-            )
 
     def _on_vo_stage_status_changed(self, status_text: str):
-        if hasattr(self, "vo_header_stat_lbl"):
-            self.vo_header_stat_lbl.setText(status_text)
-            if "Ready" in status_text:
-                self.vo_header_stat_lbl.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 700;")
-            elif "%" in status_text:
-                self.vo_header_stat_lbl.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 700;")
-            elif "Error" in status_text:
-                self.vo_header_stat_lbl.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: 700;")
+        # TranscribeStage emits "VO: 42%", "VO: Ready (...)", or "VO: Error"
+        if "%" in status_text:
+            pct = status_text.split(":", 1)[-1].strip()
+            self.queue_strip.set_vo_status("Voiceover", f"transcribing {pct}", "busy")
+        elif "Ready" in status_text:
+            self.queue_strip.set_vo_status("Voiceover", "ready", "ok")
+        elif "Error" in status_text:
+            self.queue_strip.set_vo_status("Voiceover", "failed", "bad")
 
     def _on_vo_stage_completed(self, json_path: str, vo_files: list, segments: list):
         self.vo_transcript_path = json_path
@@ -471,24 +519,38 @@ class FootageRelinkDialog(MessageBoxBase):
         )
         if folder:
             self.footage_dir = os.path.normpath(folder)
-            self.dir_edit.setText(self.footage_dir)
+            self._refresh_dir_display()
             self._run_scan()
 
+    def _refresh_dir_display(self):
+        """Show the footage folder elided from the LEFT so the folder name itself stays visible."""
+        if not hasattr(self, "dir_edit"):
+            return
+        full = self.footage_dir or ""
+        self.dir_edit.setToolTip(full)
+        if not full:
+            self.dir_edit.setText("")
+            return
+        avail = max(60, self.dir_edit.width() - 28)
+        elided = QFontMetrics(self.dir_edit.font()).elidedText(full, Qt.ElideLeft, avail)
+        self.dir_edit.setText(elided)
+        self.dir_edit.setCursorPosition(0)
+
+    def eventFilter(self, obj, e):
+        if obj is getattr(self, "dir_edit", None) and e.type() == QEvent.Resize:
+            self._refresh_dir_display()
+        return super().eventFilter(obj, e)
+
     def _refresh_vo_header_status(self):
-        if not hasattr(self, "vo_header_stat_lbl"):
+        if not hasattr(self, "queue_strip"):
             return
         if self.vo_file_path and os.path.isfile(self.vo_file_path):
             if self.vo_segments:
-                parts_cnt = len(self.vo_files)
-                parts_str = f", {parts_cnt} parts" if parts_cnt > 1 else ""
-                self.vo_header_stat_lbl.setText(f"VO: Ready ({len(self.vo_segments)} segs{parts_str})")
-                self.vo_header_stat_lbl.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 700;")
+                self.queue_strip.set_vo_status("Voiceover", "ready", "ok")
             else:
-                self.vo_header_stat_lbl.setText("VO: Staged (Click Transcribe)")
-                self.vo_header_stat_lbl.setStyleSheet("color: #fbbf24; font-size: 11px; font-weight: 700;")
+                self.queue_strip.set_vo_status("Voiceover", "not transcribed", "warn")
         else:
-            self.vo_header_stat_lbl.setText("VO: Unbound")
-            self.vo_header_stat_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+            self.queue_strip.set_vo_status("Voiceover", "not set", "idle")
 
     # -------------------------------------------------------------------------
     # Directory Scan & Matching
@@ -500,7 +562,9 @@ class FootageRelinkDialog(MessageBoxBase):
 
         self.rescan_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
-        self.header_desc.setText("Scanning local directory and calculating byte signatures...")
+        self.confirm_banner_lbl.setText("Scanning folder and matching byte sizes…")
+        self.continue_lib_btn.hide()
+        self.copy_missing_btn.hide()
 
         worker = FootageScanWorker(self.footage_dir, self.links, self.manual_overrides)
         worker.signals.finished.connect(self._on_scan_finished)
@@ -520,7 +584,8 @@ class FootageRelinkDialog(MessageBoxBase):
     def _on_scan_error(self, err_msg: str):
         self.rescan_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
-        self.header_desc.setText(f"Scan failed: {err_msg}")
+        self.relink_status_dot.set_color("#f87171", "#00f87171")
+        self.confirm_banner_lbl.setText(f"Scan failed: {err_msg}. Check the folder and rescan.")
 
     def _populate_unscanned_list(self):
         matcher = FootageMatcher("")
@@ -547,8 +612,14 @@ class FootageRelinkDialog(MessageBoxBase):
             self.switch_stage("relink")
 
     # -------------------------------------------------------------------------
-    # Stats, Badges, and Non-Repeating Compact Rows
+    # Stats (status line, dock, tab label) and flat relink rows
     # -------------------------------------------------------------------------
+    # Column widths shared by the relink header and every row so they line up
+    _REL_COL_FOLDER = 120
+    _REL_COL_DUR = 72
+    _REL_COL_SIZE = 78
+    _REL_COL_FPS = 52
+
     def _update_stats(self):
         total = len(self.match_items)
         linked = sum(
@@ -560,7 +631,6 @@ class FootageRelinkDialog(MessageBoxBase):
             1 for item in self.match_items
             if item.is_matched and item.matched_path and os.path.isfile(item.matched_path) and item.is_vfr
         )
-        pct = int((linked / total) * 100) if total > 0 else 0
 
         local_bytes = 0
         for item in self.match_items:
@@ -569,43 +639,41 @@ class FootageRelinkDialog(MessageBoxBase):
                     local_bytes += os.path.getsize(item.matched_path)
                 except Exception:
                     pass
-
         size_display = format_bytes_display(local_bytes) or "0 B"
-        self.size_stat_lbl.setText(f"{size_display} Local")
 
-        # Update Segmented Toggle Relink badge with missing/offline count
+        # Tabs stay plain names; Relink only shows a count when something is missing
         try:
-            relink_tab_text = f"Relink ({missing})" if missing > 0 else "Relink"
             if "relink" in self.stage_tabs.items:
-                self.stage_tabs.items["relink"].setText(relink_tab_text)
+                self.stage_tabs.items["relink"].setText(f"Relink ({missing})" if missing > 0 else "Relink")
             if "library" in self.stage_tabs.items:
-                self.stage_tabs.items["library"].setText(f"Library ({linked})")
+                self.stage_tabs.items["library"].setText("Library")
         except Exception:
             pass
 
+        # Relink status line + dock footage stat
         if total > 0 and missing == 0:
-            self.status_dot._dot_color = QColor("#34d399")
-            self.status_dot._halo_color = QColor("rgba(52, 211, 153, 0.35)")
-            self.linked_stat_lbl.setText(f"{linked} / {total} Linked ({pct}%)")
-            self.linked_stat_lbl.setStyleSheet("color: #34d399; font-weight: 700; font-size: 11px;")
-            self.confirm_banner_lbl.setText(
-                f"All {total} footage files are linked and active on disk."
-            )
-            self.confirm_banner.show()
+            self.relink_status_dot.set_color("#34d399", "#0034d399")
+            self.confirm_banner_lbl.setText(f"All {total} files linked by name and byte size.")
+            self.continue_lib_btn.show()
+            self.copy_missing_btn.hide()
+            self.queue_strip.set_footage_status("Footage", "all linked", "ok")
         elif total > 0:
-            self.status_dot._dot_color = QColor("#fbbf24")
-            self.status_dot._halo_color = QColor("rgba(245, 158, 11, 0.35)")
-            self.linked_stat_lbl.setText(f"{linked} / {total} Linked ({pct}%)")
-            self.linked_stat_lbl.setStyleSheet("color: #fbbf24; font-weight: 700; font-size: 11px;")
-            self.confirm_banner.hide()
+            self.relink_status_dot.set_color("#fbbf24", "#00fbbf24")
+            self.confirm_banner_lbl.setText(
+                f"{missing} of {total} file{'s' if total != 1 else ''} missing. Double-click a row to locate it."
+            )
+            self.continue_lib_btn.hide()
+            self.copy_missing_btn.show()
+            self.queue_strip.set_footage_status("Footage", f"{missing} missing", "warn")
         else:
-            self.status_dot._dot_color = QColor("#94a3b8")
-            self.status_dot._halo_color = QColor("rgba(148, 163, 184, 0.25)")
-            self.linked_stat_lbl.setText("0 / 0 Linked")
-            self.linked_stat_lbl.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 11px;")
-            self.confirm_banner.hide()
+            self.relink_status_dot.set_color("#94a3b8", "#0094a3b8")
+            self.confirm_banner_lbl.setText("No footage links found in this script.")
+            self.continue_lib_btn.hide()
+            self.copy_missing_btn.hide()
+            self.queue_strip.set_footage_status("Footage", "none in script", "idle")
+        self.relink_status_dot.update()
 
-        self.status_dot.update()
+        self.library_stage.set_summary(linked, size_display)
 
         self.filter_combo.setItemText(0, f"All Files ({total})")
         self.filter_combo.setItemText(1, f"Linked ({linked})")
@@ -613,7 +681,51 @@ class FootageRelinkDialog(MessageBoxBase):
         self.filter_combo.setItemText(3, f"VFR ({vfr_count})")
 
         self.copy_missing_btn.setEnabled(missing > 0)
-        self.copy_missing_btn.setText(f"Copy Missing Links ({missing})")
+        self.copy_missing_btn.setText(f"Copy missing links ({missing})")
+
+    def _build_relink_row_header(self, parent: QWidget) -> QWidget:
+        hdr = QWidget(parent)
+        hdr.setObjectName("RelinkListHeader")
+        hdr.setFixedHeight(30)
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(8, 0, 8, 0)
+        hl.setSpacing(12)
+        self._relink_header_labels = []
+
+        def _h(text, width=None, align=Qt.AlignLeft):
+            lbl = QLabel(text.upper(), hdr)
+            lbl.setAlignment(align | Qt.AlignVCenter)
+            if width:
+                lbl.setFixedWidth(width)
+            self._relink_header_labels.append(lbl)
+            return lbl
+
+        spacer = QWidget(hdr)
+        spacer.setFixedWidth(8)
+        hl.addWidget(spacer)
+        hl.addWidget(_h("File"), 1)
+        hl.addWidget(_h("Folder", self._REL_COL_FOLDER))
+        hl.addWidget(_h("Duration", self._REL_COL_DUR, Qt.AlignRight))
+        hl.addWidget(_h("Size", self._REL_COL_SIZE, Qt.AlignRight))
+        hl.addWidget(_h("FPS", self._REL_COL_FPS, Qt.AlignRight))
+        return hdr
+
+    @staticmethod
+    def _chip(text: str, parent: QWidget, tone: str = "warn", tooltip: str = "") -> QLabel:
+        colors = {
+            "warn": ("rgba(251, 191, 36, 0.13)", "#fbbf24"),
+            "bad": ("rgba(248, 113, 113, 0.14)", "#f87171"),
+        }
+        bg, fg = colors.get(tone, colors["warn"])
+        chip = QLabel(text, parent)
+        chip.setFixedHeight(18)
+        chip.setAlignment(Qt.AlignCenter)
+        chip.setToolTip(tooltip)
+        chip.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; border: none; border-radius: 4px;"
+            f" font-size: 10px; font-weight: 700; padding: 0px 6px; }}"
+        )
+        return chip
 
     def _rebuild_cards(self):
         while self.list_layout.count() > 1:
@@ -623,10 +735,12 @@ class FootageRelinkDialog(MessageBoxBase):
         self.card_widgets.clear()
 
         pal = ThemeManager.get_palette()
-        surface = pal.get("surface", "#18181b")
-        border = pal.get("border", "#27272a")
         text_col = pal.get("text", "#ffffff")
         muted_col = pal.get("muted", "#94a3b8")
+        line_col = "rgba(255, 255, 255, 0.06)" if pal.get("is_dark", True) else "rgba(0, 0, 0, 0.07)"
+        hover_col = "rgba(255, 255, 255, 0.04)" if pal.get("is_dark", True) else "rgba(0, 0, 0, 0.04)"
+
+        footage_root = os.path.normcase(os.path.normpath(self.footage_dir)) if self.footage_dir else ""
 
         # Sort MISSING/OFFLINE first while preserving relative script order within each group
         sorted_items = sorted(
@@ -637,146 +751,94 @@ class FootageRelinkDialog(MessageBoxBase):
         for item in sorted_items:
             card = QFrame(self.list_container)
             card.setObjectName("RelinkItemCard")
-            card.setCursor(QCursor(Qt.PointingHandCursor))
+            card.setFixedHeight(34)
             c_layout = QHBoxLayout(card)
-            c_layout.setContentsMargins(10, 5, 10, 5)
-            c_layout.setSpacing(10)
+            c_layout.setContentsMargins(8, 0, 8, 0)
+            c_layout.setSpacing(12)
 
             is_online = bool(item.is_matched and item.matched_path and os.path.isfile(item.matched_path))
 
-            # 1. Status Pill (LINKED vs MISSING/OFFLINE - strictly no emojis)
-            status_pill = QLabel(card)
-            status_pill.setFixedHeight(20)
-            status_pill.setFixedWidth(64)
-            status_pill.setAlignment(Qt.AlignCenter)
+            # 1. Status dot (green linked / amber missing)
+            dot = QLabel(card)
+            dot.setFixedSize(8, 8)
+            dot.setStyleSheet(
+                f"background-color: {'#34d399' if is_online else '#fbbf24'}; border-radius: 4px; border: none;"
+            )
+            dot.setToolTip("Linked" if is_online else ("Offline" if item.matched_path else "Missing"))
+            c_layout.addWidget(dot, 0, Qt.AlignVCenter)
+
+            # 2. Name + exception chips only
+            name_box = QHBoxLayout()
+            name_box.setContentsMargins(0, 0, 0, 0)
+            name_box.setSpacing(8)
+
             if is_online:
-                status_pill.setText("LINKED")
-                status_pill.setStyleSheet("""
-                    QLabel {
-                        background-color: rgba(16, 185, 129, 0.16);
-                        color: #34d399;
-                        border: 1px solid rgba(16, 185, 129, 0.38);
-                        border-radius: 4px;
-                        font-size: 10px;
-                        font-weight: 700;
-                    }
-                """)
-            else:
-                pill_txt = "OFFLINE" if item.matched_path else "MISSING"
-                status_pill.setText(pill_txt)
-                status_pill.setStyleSheet("""
-                    QLabel {
-                        background-color: rgba(245, 158, 11, 0.16);
-                        color: #fbbf24;
-                        border: 1px solid rgba(245, 158, 11, 0.38);
-                        border-radius: 4px;
-                        font-size: 10px;
-                        font-weight: 700;
-                    }
-                """)
-            c_layout.addWidget(status_pill, 0, Qt.AlignVCenter)
-
-            if is_online and item.is_vfr:
-                vfr_pill = QLabel("VFR", card)
-                vfr_pill.setFixedHeight(20)
-                vfr_pill.setAlignment(Qt.AlignCenter)
-                vfr_pill.setToolTip(
-                    f"Variable Frame Rate ({item.frame_rate:.2f} FPS avg)\n"
-                    "Audio/video timecode will drift in Premiere Pro without CFR transcode or PTS compensation."
-                )
-                vfr_pill.setStyleSheet("""
-                    QLabel {
-                        background-color: rgba(245, 158, 11, 0.16);
-                        color: #fbbf24;
-                        border: 1px solid rgba(245, 158, 11, 0.42);
-                        border-radius: 4px;
-                        font-size: 10px;
-                        font-weight: 700;
-                        padding: 0px 6px;
-                    }
-                """)
-                c_layout.addWidget(vfr_pill, 0, Qt.AlignVCenter)
-
-            if is_online and getattr(item, "is_interlaced", False):
-                int_pill = QLabel("INTERLACED", card)
-                int_pill.setFixedHeight(20)
-                int_pill.setAlignment(Qt.AlignCenter)
-                int_pill.setToolTip(
-                    f"Interlaced Scan ({getattr(item, 'field_order', 'interlaced').upper()})\n"
-                    "Re-encode with bwdif decomb filter to remove horizontal combing artifacts."
-                )
-                int_pill.setStyleSheet("""
-                    QLabel {
-                        background-color: rgba(245, 158, 11, 0.16);
-                        color: #fbbf24;
-                        border: 1px solid rgba(245, 158, 11, 0.42);
-                        border-radius: 4px;
-                        font-size: 10px;
-                        font-weight: 700;
-                        padding: 0px 6px;
-                    }
-                """)
-                c_layout.addWidget(int_pill, 0, Qt.AlignVCenter)
-
-            # 2. Middle Text Details (Zero Duplicate Filename!)
-            # Line 1: Filename (if linked) or Script Title (if missing)
-            # Line 2: Elided parent folder path (plus "Script: <title>" ONLY when title != filename)
-            mid_layout = QVBoxLayout()
-            mid_layout.setContentsMargins(0, 0, 0, 0)
-            mid_layout.setSpacing(1)
-
-            if is_online and item.matched_path:
-                matched_filename = os.path.basename(item.matched_path)
-                primary_text = matched_filename
-                parent_folder = os.path.dirname(item.matched_path)
-                elided_folder = _elide_middle_path(parent_folder, 58)
+                primary_text = os.path.basename(item.matched_path)
+                tip = f"{item.matched_path}"
                 script_title_clean = (item.title or "").strip()
-                if script_title_clean and script_title_clean.lower() != matched_filename.lower():
-                    secondary_text = f"{elided_folder}  •  Script: {script_title_clean}"
-                else:
-                    secondary_text = elided_folder
-                secondary_tooltip = f"Full Local Path:\n{item.matched_path}\nScript Title: {item.title}"
+                if script_title_clean and script_title_clean.lower() != primary_text.lower():
+                    tip += f"\nScript title: {script_title_clean}"
             else:
                 primary_text = item.title or os.path.basename(item.url)
                 if item.matched_path:
-                    secondary_text = f"Offline • File moved or deleted ({_elide_middle_path(item.matched_path, 48)})"
+                    tip = f"Moved or deleted: {item.matched_path}\nDouble-click to locate"
                 else:
-                    secondary_text = "Offline • Missing in footage directory (Double-click to locate)"
-                secondary_tooltip = f"Source URL:\n{item.url}"
+                    tip = f"Not found in the footage folder. Double-click to locate.\nSource: {item.url}"
 
             title_lbl = QLabel(primary_text, card)
-            title_lbl.setStyleSheet(f"color: {text_col}; font-weight: 600; font-size: 12px;")
-            title_lbl.setToolTip(primary_text)
+            title_lbl.setToolTip(tip)
             title_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            mid_layout.addWidget(title_lbl)
+            title_lbl.setMinimumWidth(60)
+            title_lbl.setStyleSheet(
+                f"color: {text_col if is_online else muted_col}; font-size: 12px; border: none; background: transparent;"
+            )
+            name_box.addWidget(title_lbl, 1)
 
-            sub_lbl = QLabel(secondary_text, card)
-            sub_lbl.setToolTip(secondary_tooltip)
-            sub_style = f"color: {muted_col}; font-size: 11px;"
             if not is_online:
-                sub_style += " font-style: italic;"
-            sub_lbl.setStyleSheet(sub_style)
-            sub_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            mid_layout.addWidget(sub_lbl)
+                name_box.addWidget(self._chip("OFFLINE" if item.matched_path else "MISSING", card, "warn", tip))
+            if is_online and item.is_vfr:
+                name_box.addWidget(self._chip(
+                    "VFR", card, "warn",
+                    f"Variable frame rate ({item.frame_rate:.2f} fps avg). Timecode will drift in Premiere "
+                    "without a CFR transcode."
+                ))
+            if is_online and getattr(item, "is_interlaced", False):
+                name_box.addWidget(self._chip(
+                    "INTERLACED", card, "warn",
+                    f"Interlaced ({getattr(item, 'field_order', 'interlaced').upper()}). "
+                    "Re-encode with the bwdif decomb filter to remove combing."
+                ))
+            c_layout.addLayout(name_box, 1)
 
-            c_layout.addLayout(mid_layout, 1)
+            # 3. Folder, relative to the footage folder instead of the full absolute path
+            folder_txt = "—"
+            if item.matched_path:
+                parent_dir = os.path.dirname(os.path.normpath(item.matched_path))
+                norm_parent = os.path.normcase(parent_dir)
+                if footage_root and norm_parent == footage_root:
+                    folder_txt = "."
+                elif footage_root and norm_parent.startswith(footage_root + os.sep):
+                    folder_txt = parent_dir[len(footage_root) + 1:]
+                else:
+                    folder_txt = os.path.basename(parent_dir) or parent_dir
 
-            # 3. Size / Duration / FPS Badge
-            sz_parts = []
-            if item.duration_display:
-                sz_parts.append(item.duration_display)
-            if item.file_size_display:
-                sz_parts.append(item.file_size_display)
+            def _cell(text, width, align=Qt.AlignLeft, color=muted_col):
+                lbl = QLabel(text, card)
+                lbl.setFixedWidth(width)
+                lbl.setAlignment(align | Qt.AlignVCenter)
+                lbl.setStyleSheet(f"color: {color}; font-size: 12px; border: none; background: transparent;")
+                return lbl
+
+            folder_lbl = _cell(folder_txt, self._REL_COL_FOLDER)
+            folder_lbl.setToolTip(os.path.dirname(item.matched_path) if item.matched_path else "")
+            c_layout.addWidget(folder_lbl)
+            c_layout.addWidget(_cell(item.duration_display or "—", self._REL_COL_DUR, Qt.AlignRight))
+            c_layout.addWidget(_cell(item.file_size_display or "—", self._REL_COL_SIZE, Qt.AlignRight, text_col))
             if item.frame_rate and item.frame_rate > 0:
-                fps_txt = f"{item.frame_rate:.2f} FPS" if item.is_vfr else f"{item.frame_rate:.3f}".rstrip("0").rstrip(".") + " FPS"
-                sz_parts.append(fps_txt)
-            sz_text = " • ".join(sz_parts) if sz_parts else "—"
-
-            sz_badge = QLabel(sz_text, card)
-            sz_badge.setFixedWidth(170)
-            sz_badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            sz_badge.setStyleSheet(f"color: {muted_col}; font-size: 11px; font-weight: 600;")
-            c_layout.addWidget(sz_badge, 0, Qt.AlignVCenter)
+                fps_txt = f"{item.frame_rate:.2f}" if item.is_vfr else f"{item.frame_rate:.3f}".rstrip("0").rstrip(".")
+            else:
+                fps_txt = "—"
+            c_layout.addWidget(_cell(fps_txt, self._REL_COL_FPS, Qt.AlignRight))
 
             card.mouseDoubleClickEvent = lambda e, it=item: self._on_locate_file(it)
             card.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -788,12 +850,12 @@ class FootageRelinkDialog(MessageBoxBase):
             card.setProperty("is_matched", is_online)
             card.setStyleSheet(f"""
                 QFrame#RelinkItemCard {{
-                    background-color: {surface};
-                    border: 1px solid {border};
-                    border-radius: 6px;
+                    background-color: transparent;
+                    border: none;
+                    border-bottom: 1px solid {line_col};
                 }}
                 QFrame#RelinkItemCard:hover {{
-                    border-color: rgba(56, 189, 248, 0.4);
+                    background-color: {hover_col};
                 }}
             """)
 
@@ -1107,21 +1169,36 @@ class FootageRelinkDialog(MessageBoxBase):
 
             card.show()
 
-    def _on_apply_save(self):
-        linked_map = {}
-        for it in self.match_items:
-            if it.is_matched and it.matched_path and os.path.isfile(it.matched_path):
-                linked_map[it.norm_url] = it.matched_path
+    def _current_linked_map(self) -> Dict[str, str]:
+        return {
+            it.norm_url: it.matched_path
+            for it in self.match_items
+            if it.is_matched and it.matched_path and os.path.isfile(it.matched_path)
+        }
 
-        # If all links are bound on Apply & Save, mark project relink confirmed
+    def _commit_changes(self):
+        """
+        Saves relink results when the window closes (X, Esc, or click-away).
+        There is no Apply button: changes count as soon as they are made. Only emits
+        footage_linked when the folder or links actually changed, so closing an
+        untouched window does not re-announce an audit. VO results are already
+        emitted live when transcription finishes.
+        """
+        if self._committed:
+            return
+        self._committed = True
+
+        linked_map = self._current_linked_map()
         if self.match_items and len(linked_map) == len(self.match_items):
             self.set_project_relink_confirmed(True)
 
-        self.footage_linked.emit(self.footage_dir, linked_map)
-        if self.vo_file_path:
-            self.vo_linked.emit(self.vo_file_path, self.vo_segments)
-        if self.vo_transcript_path or self.vo_files:
-            self.vo_transcript_ready.emit(self.vo_transcript_path, self.vo_files, self.vo_segments)
+        folder_changed = os.path.normcase(self.footage_dir or "") != os.path.normcase(self._initial_footage_dir or "")
+        links_changed = linked_map != self._initial_linked
+        if self.footage_dir and (folder_changed or links_changed):
+            self.footage_linked.emit(self.footage_dir, linked_map)
+
+    def _on_apply_save(self):
+        """Kept for callers/tests that still close via the old Apply path."""
         self.accept()
 
     def showEvent(self, e):
@@ -1145,6 +1222,10 @@ class FootageRelinkDialog(MessageBoxBase):
         gc.collect()
 
     def done(self, code):
+        try:
+            self._commit_changes()
+        except Exception:
+            pass
         self.cleanup()
         self.setGraphicsEffect(None)
         if hasattr(self, "widget") and self.widget:
@@ -1169,38 +1250,26 @@ class FootageRelinkDialog(MessageBoxBase):
             QLabel#RelinkDialogTitle {{
                 color: {text_col};
                 font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
-                font-size: 15px;
-                font-weight: 700;
-            }}
-        """)
-        self.header_desc.setStyleSheet(f"""
-            QLabel#RelinkDialogSubtitle {{
-                color: {muted};
-                font-size: 12px;
-            }}
-        """)
-        self.header_div1.setStyleSheet(f"color: {border};")
-        self.header_div2.setStyleSheet(f"color: {border};")
-        if hasattr(self, "header_div3"):
-            self.header_div3.setStyleSheet(f"color: {border};")
-        self.size_stat_lbl.setStyleSheet(f"""
-            QLabel#RelinkHeaderSize {{
-                color: {muted};
-                font-size: 11px;
+                font-size: 14px;
                 font-weight: 600;
-                font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
             }}
         """)
-        self.confirm_banner.setStyleSheet("""
-            QFrame#RelinkConfirmBanner {
-                background-color: rgba(16, 185, 129, 0.12);
-                border: 1px solid rgba(16, 185, 129, 0.36);
-                border-radius: 6px;
-            }
-        """)
-        self.confirm_banner_lbl.setStyleSheet("color: #34d399; font-size: 11.5px; font-weight: 700; border: none; background: transparent;")
+        line_col = "rgba(255, 255, 255, 0.07)" if pal.get("is_dark", True) else "rgba(0, 0, 0, 0.08)"
+        self.tabs_rule.setStyleSheet(f"QFrame#FootageTabsRule {{ background-color: {line_col}; border: none; }}")
+        self.relink_header.setStyleSheet(
+            f"QWidget#RelinkListHeader {{ border-top: 1px solid {line_col}; border-bottom: 1px solid {line_col}; }}"
+        )
+        for lbl in getattr(self, "_relink_header_labels", []):
+            lbl.setStyleSheet(
+                f"color: {muted}; font-size: 10.5px; font-weight: 600; letter-spacing: 0.5px;"
+                " border: none; background: transparent;"
+            )
+        self.confirm_banner_lbl.setStyleSheet(f"color: {muted}; font-size: 12px; border: none; background: transparent;")
+        self._refresh_dir_display()
         self._refresh_vo_header_status()
         self._update_stats()
+        self._rebuild_cards()
+        self._apply_filter()
         if hasattr(self, "library_stage"):
             self.library_stage.apply_theme()
         if hasattr(self, "queue_strip"):

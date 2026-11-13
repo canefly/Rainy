@@ -19,6 +19,22 @@ _FONT_DEMI.setWeight(QFont.DemiBold)
 _FONT_BOLD = QFont()
 _FONT_BOLD.setWeight(QFont.Bold)
 
+# Qt hands data()/flags() plain ints for roles; comparing ints is far cheaper than comparing
+# against PySide enum members, and data() runs hundreds of times per scroll frame.
+_R_DISPLAY = Qt.DisplayRole.value
+_R_TOOLTIP = Qt.ToolTipRole.value
+_R_FONT = Qt.FontRole.value
+_R_ALIGN = Qt.TextAlignmentRole.value
+_R_FG = Qt.ForegroundRole.value
+_R_CHECK = Qt.CheckStateRole.value
+_CHECKED = Qt.Checked
+_UNCHECKED = Qt.Unchecked
+_ALIGN_LEFT = int(Qt.AlignLeft | Qt.AlignVCenter)
+_ALIGN_RIGHT = int(Qt.AlignRight | Qt.AlignVCenter)
+_FLAGS_NORMAL = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+_FLAGS_CHECK = _FLAGS_NORMAL | Qt.ItemIsUserCheckable
+_TONE_COLORS = {"warn": _COL_AMBER, "bad": _COL_RED, "busy": _COL_BLUE, "ok": _COL_GREEN}
+
 
 class FootageLibraryModel(QAbstractTableModel):
     """
@@ -27,34 +43,32 @@ class FootageLibraryModel(QAbstractTableModel):
     so Qt's paint loop executes in <0.05ms per frame at 240Hz+.
     Columns:
       0: ☐ (CheckState)
-      1: Status (ACTIVE / OFFLINE / MISSING)
-      2: Name (Filename or Title)
-      3: Folder (Parent folder name)
-      4: Codec (H264 / HEVC / etc.)
-      5: Res (1920x1080)
-      6: FPS (29.97 / 23.976)
-      7: Frame Mode (VFR WARN / CFR)
-      8: Duration (01:24)
-      9: Size (142.5 MB)
-      10: Job State (Idle / Queued / 43% / Done / Failed)
+      1: Name (Filename or Title)
+      2: Folder (Parent folder name)
+      3: Format ("H264 · 1080p · 29.97", one quiet column instead of Codec/Res/FPS)
+      4: Duration
+      5: Size
+      6: Flags: exceptions only (MISSING / OFFLINE / VFR / INTERLACED / job state).
+         Blank when the clip is healthy and idle, so normal rows carry no noise.
     """
     selection_changed = Signal()
 
     HEADERS = [
         "",
-        "Status",
-        "Name",
-        "Folder",
-        "Codec",
-        "Res",
-        "FPS",
-        "VFR",
-        "Duration",
-        "Size",
-        "Job State",
+        "NAME",
+        "FOLDER",
+        "FORMAT",
+        "DURATION",
+        "SIZE",
+        "",
     ]
+    COL_CHECK, COL_NAME, COL_FOLDER, COL_FORMAT, COL_DURATION, COL_SIZE, COL_FLAGS = range(7)
 
     ITEM_ROLE = Qt.UserRole + 1
+    _R_ITEM = int(Qt.UserRole.value) + 1
+    # Static per-column alignment / font (index = column)
+    _ALIGN_BY_COL = (_ALIGN_LEFT, _ALIGN_LEFT, _ALIGN_LEFT, _ALIGN_LEFT, _ALIGN_RIGHT, _ALIGN_RIGHT, _ALIGN_LEFT)
+    _FONT_BY_COL = (None, None, None, None, None, None, _FONT_BOLD)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -71,6 +85,8 @@ class FootageLibraryModel(QAbstractTableModel):
         self._row_display_cache: List[Tuple[str, ...]] = []
         self._row_tooltip_cache: List[str] = []
         self._row_job_status_cache: List[str] = []
+        self._row_flag_tone_cache: List[str] = []  # "", "warn", "bad", "busy", "ok"
+        self._row_fg_cache: List[Tuple[QColor, ...]] = []  # per-row, per-column foreground
 
         self._text_color = QColor("#ffffff")
         self._muted_color = QColor("#94a3b8")
@@ -78,8 +94,24 @@ class FootageLibraryModel(QAbstractTableModel):
 
     def update_palette_cache(self):
         pal = ThemeManager.get_palette()
-        self._text_color = QColor(pal.get("text", "#ffffff"))
-        self._muted_color = QColor(pal.get("muted", "#94a3b8"))
+        text_c = QColor(pal.get("text", "#ffffff"))
+        muted_c = QColor(pal.get("muted", "#94a3b8"))
+        changed = (text_c != self._text_color) or (muted_c != self._muted_color)
+        self._text_color = text_c
+        self._muted_color = muted_c
+        if changed and getattr(self, "_row_fg_cache", None):
+            self._rebuild_fg_cache()
+
+    def _fg_row(self, row: int) -> Tuple[QColor, ...]:
+        it = self._visible_items[row]
+        online = self._online_cache.get(it.norm_url, False)
+        m, t = self._muted_color, self._text_color
+        flag_c = _TONE_COLORS.get(self._row_flag_tone_cache[row], m)
+        # cols: check, name, folder, format, duration, size, flags
+        return (m, t if online else m, m, m, m, t, flag_c)
+
+    def _rebuild_fg_cache(self):
+        self._row_fg_cache = [self._fg_row(r) for r in range(len(self._visible_items))]
 
     def set_items(self, items: List[FootageMatchItem]):
         self.beginResetModel()
@@ -156,64 +188,71 @@ class FootageLibraryModel(QAbstractTableModel):
         self._row_display_cache.clear()
         self._row_tooltip_cache.clear()
         self._row_job_status_cache.clear()
+        self._row_flag_tone_cache.clear()
+        self._row_fg_cache = []
 
         for it in self._visible_items:
             online = self._is_item_online(it)
-            status_str = "ACTIVE" if online else ("OFFLINE" if it.matched_path else "MISSING")
             name_str = os.path.basename(it.matched_path) if it.matched_path else (it.title or os.path.basename(it.url))
             if it.matched_path:
                 parent_dir = os.path.dirname(it.matched_path)
                 folder_str = os.path.basename(parent_dir) or parent_dir
             else:
                 folder_str = "—"
-            codec_str = (it.video_codec or "—").upper()
-            res_str = it.resolution or "—"
+
+            codec_str = (it.video_codec or "").upper()
+            res_str = it.resolution or ""
             if it.frame_rate and it.frame_rate > 0:
                 fps_str = f"{it.frame_rate:.2f}" if it.is_vfr else f"{it.frame_rate:.3f}".rstrip("0").rstrip(".")
             else:
-                fps_str = "—"
-            is_interlaced = bool(getattr(it, "is_interlaced", False))
-            if not online:
-                vfr_str = "—"
-            elif it.is_vfr and is_interlaced:
-                vfr_str = "VFR + INT"
-            elif it.is_vfr:
-                vfr_str = "VFR WARN"
-            elif is_interlaced:
-                vfr_str = "INTERLACED"
-            else:
-                vfr_str = "CFR"
+                fps_str = ""
+            format_str = "  ·  ".join(p for p in (codec_str, res_str, fps_str) if p) or "—"
             dur_str = it.duration_display or "—"
             size_str = it.file_size_display or "—"
 
-            job_status = ""
-            if not it.matched_path:
-                job_str = "—"
+            # Flags: only things that need attention
+            flags: List[str] = []
+            tone = ""
+            is_interlaced = bool(getattr(it, "is_interlaced", False))
+            if not online:
+                flags.append("OFFLINE" if it.matched_path else "MISSING")
+                tone = "warn"
             else:
+                if it.is_vfr:
+                    flags.append("VFR")
+                    tone = "warn"
+                if is_interlaced:
+                    flags.append("INTERLACED")
+                    tone = "warn"
+
+            job_status = ""
+            if it.matched_path:
                 job = render_queue.get_job_for_path(it.matched_path)
-                if not job:
-                    job_str = "Idle"
-                elif job.status == "RUNNING":
-                    job_str = f"{job.progress:.0f}% ({job.speed:.1f}x)"
-                    job_status = "RUNNING"
-                else:
-                    job_str = job.status.title()
+                if job:
                     job_status = job.status
+                    if job.status == "RUNNING":
+                        flags.append(f"{job.progress:.0f}%")
+                        tone = "busy"
+                    else:
+                        flags.append(job.status.title())
+                        if job.status in ("FAILED", "INTERRUPTED"):
+                            tone = "bad"
+                        elif job.status == "DONE" and not tone:
+                            tone = "ok"
+                        elif job.status == "QUEUED" and not tone:
+                            tone = "busy"
 
             self._row_display_cache.append((
                 "",
-                status_str,
                 name_str,
                 folder_str,
-                codec_str,
-                res_str,
-                fps_str,
-                vfr_str,
+                format_str,
                 dur_str,
                 size_str,
-                job_str,
+                "  ·  ".join(flags),
             ))
             self._row_job_status_cache.append(job_status)
+            self._row_flag_tone_cache.append(tone)
 
             tip_lines = [
                 f"Script Asset: {it.title}",
@@ -226,6 +265,8 @@ class FootageLibraryModel(QAbstractTableModel):
                 fo = getattr(it, "field_order", "interlaced")
                 tip_lines.append(f"Interlaced Scan ({fo.upper()}): Use Re-encode with bwdif decomb filter")
             self._row_tooltip_cache.append("\n".join(tip_lines))
+
+        self._rebuild_fg_cache()
 
     def refresh_rows(self):
         if not self._visible_items:
@@ -252,72 +293,31 @@ class FootageLibraryModel(QAbstractTableModel):
         return None
 
     def flags(self, index: QModelIndex):
-        if not index.isValid():
-            return Qt.NoItemFlags
-        base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if index.column() == 0:
-            base |= Qt.ItemIsUserCheckable
-        return base
+        return _FLAGS_CHECK if index.column() == 0 else _FLAGS_NORMAL
 
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+    def data(self, index: QModelIndex, role: int = _R_DISPLAY):
+        # Hot path (~600 calls per scroll frame): int role compares, cached tuples, no allocations.
         row = index.row()
-        if not index.isValid() or not (0 <= row < len(self._visible_items)):
+        if row < 0 or row >= len(self._row_display_cache):
             return None
-
         col = index.column()
-        it = self._visible_items[row]
 
-        if role == Qt.DisplayRole:
-            return self._row_display_cache[row][col] if col > 0 else None
-
-        if role == Qt.CheckStateRole:
+        if role == _R_DISPLAY:
+            return self._row_display_cache[row][col] if col else None
+        if role == _R_FG:
+            return self._row_fg_cache[row][col]
+        if role == _R_ALIGN:
+            return self._ALIGN_BY_COL[col]
+        if role == _R_FONT:
+            return self._FONT_BY_COL[col]
+        if role == _R_CHECK:
             if col == 0:
-                return Qt.Checked if it.norm_url in self._checked_urls else Qt.Unchecked
+                return _CHECKED if self._visible_items[row].norm_url in self._checked_urls else _UNCHECKED
             return None
-
-        if role == Qt.ForegroundRole:
-            online = self._online_cache.get(it.norm_url, False)
-            if col == 1:
-                return _COL_GREEN if online else _COL_AMBER
-            if col == 2:
-                return self._text_color if online else _COL_AMBER
-            if col == 7:
-                if not online:
-                    return self._muted_color
-                return _COL_AMBER if (it.is_vfr or getattr(it, "is_interlaced", False)) else _COL_GREEN
-            if col == 10:
-                jst = self._row_job_status_cache[row]
-                if jst == "RUNNING":
-                    return _COL_BLUE
-                if jst == "DONE":
-                    return _COL_GREEN
-                if jst in ("FAILED", "INTERRUPTED"):
-                    return _COL_RED
-                return self._muted_color
-            if col in (3, 4, 5, 6, 8, 9):
-                return self._muted_color
-            return self._text_color
-
-        if role == Qt.FontRole:
-            if col == 2:
-                return _FONT_DEMI
-            if col in (1, 7, 10):
-                return _FONT_BOLD
-            return None
-
-        if role == Qt.TextAlignmentRole:
-            if col in (1, 4, 5, 6, 7, 8, 10):
-                return int(Qt.AlignCenter)
-            if col == 9:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            return int(Qt.AlignLeft | Qt.AlignVCenter)
-
-        if role == Qt.ToolTipRole:
+        if role == _R_TOOLTIP:
             return self._row_tooltip_cache[row]
-
-        if role == self.ITEM_ROLE:
-            return it
-
+        if role == self._R_ITEM:
+            return self._visible_items[row]
         return None
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
