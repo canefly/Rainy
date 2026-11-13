@@ -73,7 +73,6 @@ class MainWindow(FluentWindow):
         saved_dark_str = db.get_setting("theme_dark", "true")
         saved_orb_str = db.get_setting("orb_glow_intensity", "25")
         saved_glass_str = db.get_setting("glass_transparency", "65")
-        saved_exp_dwm_str = db.get_setting("experimental_pure_dwm_glass", "false")
         try:
             self._saved_variant = ThemeVariant(saved_var_str)
         except ValueError:
@@ -87,7 +86,6 @@ class MainWindow(FluentWindow):
             ThemeManager.glass_transparency = max(0, min(100, int(saved_glass_str)))
         except ValueError:
             ThemeManager.glass_transparency = 65
-        ThemeManager.experimental_pure_dwm_glass = (saved_exp_dwm_str.lower() == "true")
         ThemeManager.current_variant = self._saved_variant
         ThemeManager.is_dark = self._saved_dark
 

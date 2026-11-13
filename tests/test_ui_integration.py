@@ -573,8 +573,6 @@ def test_themes_detent_sliders_and_pro_solid_modes(qapp):
     db.set_setting("theme_variant", "pink")
     ThemeManager.is_dark = True
     db.set_setting("theme_dark", "true")
-    ThemeManager.experimental_pure_dwm_glass = False
-    db.set_setting("experimental_pure_dwm_glass", "false")
     pref = PreferencesWindow()
     pref._on_theme_toggled(True, ThemeVariant.PINK)
     pref.show()
@@ -584,20 +582,7 @@ def test_themes_detent_sliders_and_pro_solid_modes(qapp):
     assert isinstance(pref.orb_slider, MagneticDetentSlider)
     assert isinstance(pref.glass_slider, MagneticDetentSlider)
     assert ThemeVariant.GREEN in pref.theme_radios
-    assert hasattr(pref, "exp_dwm_switch")
-    assert pref.exp_dwm_switch.isChecked() is False
-    assert ThemeManager.experimental_pure_dwm_glass is False
-
-    # Test Experimental Pure DWM See-Through Glass toggle
-    pref._on_exp_dwm_glass_changed(True)
-    assert ThemeManager.experimental_pure_dwm_glass is True
-    assert db.get_setting("experimental_pure_dwm_glass") == "true"
-    assert "Pure DWM" in pref.glass_value_badge.text()
-
-    # Reset back to default Off
-    pref._on_exp_dwm_glass_changed(False)
-    assert ThemeManager.experimental_pure_dwm_glass is False
-    assert db.get_setting("experimental_pure_dwm_glass") == "false"
+    assert not hasattr(pref, "exp_dwm_switch")
 
     # 2. Test Matcha Green Consumer Glass Theme
     pref.theme_radios[ThemeVariant.GREEN].setChecked(True)
@@ -637,7 +622,6 @@ def test_themes_detent_sliders_and_pro_solid_modes(qapp):
     assert ThemeManager.supports_glass_effects() is False
     assert pref.orb_slider.isEnabled() is False
     assert pref.glass_slider.isEnabled() is False
-    assert pref.exp_dwm_switch.isEnabled() is False
     assert "Disabled in Pro Solid Themes" in pref.orb_value_badge.text()
     assert "Disabled in Pro Solid Themes" in pref.glass_value_badge.text()
     pal_gray_dark = ThemeManager.get_palette()

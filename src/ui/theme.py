@@ -205,7 +205,6 @@ class ThemeManager:
     is_dark = True
     orb_glow_intensity: int = 25              # 0..100% (Default: 25% Subtle preset)
     glass_transparency: int = 65              # 0..100% (Default: 65% Balanced DWM glass preset)
-    experimental_pure_dwm_glass: bool = False # Optional experimental pure DWM blur-behind (Default: False)
     _orb_field_cache: Dict[Tuple[Any, ...], QPixmap] = {}
     _noise_brush = None
     _applied_fluent_state = None
@@ -223,16 +222,10 @@ class ThemeManager:
         border_col = QColor(pal["border"])
         if pal["supports_glass"]:
             gt = max(0, min(100, int(cls.glass_transparency))) / 100.0
-            if cls.experimental_pure_dwm_glass:
-                card_a_dark = int(round((0.88 - gt * 0.64) * 255))
-                card_a_light = int(round((0.92 - gt * 0.56) * 255))
-                side_a_dark = int(round((0.45 - gt * 0.35) * 255))
-                side_a_light = int(round((0.65 - gt * 0.40) * 255))
-            else:
-                card_a_dark = int(round((0.88 - gt * 0.36) * 255))
-                card_a_light = int(round((0.92 - gt * 0.28) * 255))
-                side_a_dark = int(round((0.42 - gt * 0.24) * 255))
-                side_a_light = int(round((0.62 - gt * 0.25) * 255))
+            card_a_dark = int(round((0.88 - gt * 0.36) * 255))
+            card_a_light = int(round((0.92 - gt * 0.28) * 255))
+            side_a_dark = int(round((0.42 - gt * 0.24) * 255))
+            side_a_light = int(round((0.62 - gt * 0.25) * 255))
             side_col = QColor(0, 0, 0, max(0, min(255, side_a_dark))) if dark else QColor(255, 255, 255, max(0, min(255, side_a_light)))
             card_col = QColor(18, 18, 22, max(0, min(255, card_a_dark))) if dark else QColor(255, 255, 255, max(0, min(255, card_a_light)))
         else:
@@ -279,16 +272,6 @@ class ThemeManager:
             return
         cls.glass_transparency = new_val
         cls._refresh_all_windows()
-
-    @classmethod
-    def set_experimental_pure_dwm_glass(cls, enabled: bool):
-        cls.experimental_pure_dwm_glass = bool(enabled)
-        cls.refresh_theme_styles()
-        app = QApplication.instance()
-        if app:
-            for w in app.topLevelWidgets():
-                if w.isVisible():
-                    cls.enable_window_backdrop(w)
 
     @classmethod
     def _refresh_all_windows(cls):
@@ -346,8 +329,8 @@ class ThemeManager:
 
     @classmethod
     def enable_window_backdrop(cls, window: QWidget):
-        """Enables Windows 11 DWM glass (Standard Desktop Acrylic or Experimental Pure DWM Blur-Behind)
-        on consumer glass themes, or disables DWM glass on Pro Solid themes.
+        """Enables Windows 11 DWM glass (Desktop Acrylic) on consumer glass themes,
+        or disables DWM glass on Pro Solid themes.
         """
         if sys.platform != "win32" or sys.getwindowsversion().build < 22000:
             return
@@ -370,18 +353,6 @@ class ThemeManager:
                     win_effect.accentPolicy.GradientColor = 0
                     win_effect.SetWindowCompositionAttribute(hwnd, pointer(win_effect.winCompAttrData))
                     win_effect.DwmSetWindowAttribute(hwnd, 38, byref(c_int(1)), 4)
-                elif cls.experimental_pure_dwm_glass:
-                    # Experimental Pure DWM See-Through Glass:
-                    # Bypass Windows 11's milky Acrylic luminosity sheet (DWMSBT_NONE = 1)
-                    # and activate direct DWM Blur-Behind (ACCENT_ENABLE_BLURBEHIND = 3)
-                    win_effect.DwmSetWindowAttribute(hwnd, 38, byref(c_int(1)), 4)
-                    win_effect.addShadowEffect(hwnd)
-                    win_effect.winCompAttrData.Attribute = 19  # WCA_ACCENT_POLICY
-                    win_effect.accentPolicy.AccentState = 3    # ACCENT_ENABLE_BLURBEHIND
-                    win_effect.accentPolicy.AccentFlags = 2
-                    win_effect.accentPolicy.GradientColor = 0
-                    win_effect.SetWindowCompositionAttribute(hwnd, pointer(win_effect.winCompAttrData))
-                    win_effect.enableBlurBehindWindow(hwnd)
                 else:
                     # Default Standard Windows 11 Desktop Acrylic (DWMSBT_TRANSIENTWINDOW = 3)
                     # Keep DWM blur-behind alpha compositing enabled (matching AcrylicWindow)
@@ -426,21 +397,13 @@ class ThemeManager:
 
         # Consumer Glass Themes (Femboy Pink / Cloudy Blue / Matcha Green):
         glass_t = max(0, min(100, int(cls.glass_transparency))) / 100.0
-        if cls.experimental_pure_dwm_glass:
-            # Experimental Pure DWM See-Through Glass:
-            if cls.is_dark:
-                base_alpha = int(round(255 - glass_t * 235))  # 255 @ 0%, 102 @ 65%, 20 @ 100%
-            else:
-                base_alpha = int(round(255 - glass_t * 220))  # 255 @ 0%, 112 @ 65%, 35 @ 100%
-            min_alpha = 18
+        # Windows 11 Desktop Acrylic (DWMSBT_TRANSIENTWINDOW = 3):
+        # Scales smoothly from 255 (0% Solid) -> ~76 (65% Balanced, our usual ~25-30% tint) -> 22 (100% Max Glass)
+        if cls.is_dark:
+            base_alpha = int(round(255 - glass_t * 233))  # 255 @ 0%, 104 @ 65%, 22 @ 100%
         else:
-            # Standard Windows 11 Desktop Acrylic (DWMSBT_TRANSIENTWINDOW = 3):
-            # Scales smoothly from 255 (0% Solid) -> ~76 (65% Balanced, our usual ~25-30% tint) -> 22 (100% Max Glass)
-            if cls.is_dark:
-                base_alpha = int(round(255 - glass_t * 233))  # 255 @ 0%, 104 @ 65%, 22 @ 100%
-            else:
-                base_alpha = int(round(255 - glass_t * 215))  # 255 @ 0%, 115 @ 65%, 40 @ 100%
-            min_alpha = 20
+            base_alpha = int(round(255 - glass_t * 215))  # 255 @ 0%, 115 @ 65%, 40 @ 100%
+        min_alpha = 20
 
         base_tint = QColor(bg_hex)
         base_tint.setAlpha(max(min_alpha, min(255, base_alpha)))
@@ -496,7 +459,7 @@ class ThemeManager:
                 painter.restore()
 
             # Layer 3: Frosted Mica Diffusion Veil
-            veil_factor = (1.0 - glass_t * 0.92) if cls.experimental_pure_dwm_glass else (1.0 - glass_t * 0.55)
+            veil_factor = 1.0 - glass_t * 0.55
             veil_alpha = int(round((32 if cls.is_dark else 42) * max(0.0, veil_factor)))
             if veil_alpha > 2:
                 veil_col = QColor(bg_hex)
@@ -558,16 +521,10 @@ class ThemeManager:
         note_card_bg = "rgba(255, 255, 255, 0.025)" if dark else "#ffffff"
         if pal["supports_glass"]:
             gt = max(0, min(100, int(cls.glass_transparency))) / 100.0
-            if cls.experimental_pure_dwm_glass:
-                card_a_dark = round(0.88 - gt * 0.64, 2)    # 0.88 @ 0%, 0.46 @ 65%, 0.24 @ 100%
-                card_a_light = round(0.92 - gt * 0.56, 2)
-                side_a_dark = round(0.45 - gt * 0.35, 2)
-                side_a_light = round(0.65 - gt * 0.40, 2)
-            else:
-                card_a_dark = round(0.88 - gt * 0.36, 2)    # 0.88 @ 0%, 0.65 @ 65%, 0.52 @ 100%
-                card_a_light = round(0.92 - gt * 0.28, 2)
-                side_a_dark = round(0.42 - gt * 0.24, 2)
-                side_a_light = round(0.62 - gt * 0.25, 2)
+            card_a_dark = round(0.88 - gt * 0.36, 2)    # 0.88 @ 0%, 0.65 @ 65%, 0.52 @ 100%
+            card_a_light = round(0.92 - gt * 0.28, 2)
+            side_a_dark = round(0.42 - gt * 0.24, 2)
+            side_a_light = round(0.62 - gt * 0.25, 2)
             pref_sidebar_bg = f"rgba(0, 0, 0, {side_a_dark})" if dark else f"rgba(255, 255, 255, {side_a_light})"
             pref_card_bg = f"rgba(18, 18, 22, {card_a_dark})" if dark else f"rgba(255, 255, 255, {card_a_light})"
         else:

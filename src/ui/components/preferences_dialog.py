@@ -1223,47 +1223,6 @@ class PreferencesWindow(FramelessWindow):
         self.glass_slider.valueChanged.connect(self._on_glass_slider_changed)
         self.glass_slider.sliderReleased.connect(lambda _: db.flush_settings())
         gb_layout.addWidget(self.glass_slider)
-
-        # Subtle divider + Optional Experimental Pure DWM See-Through Glass row (Default: Off)
-        exp_divider = QFrame(glass_box)
-        exp_divider.setFixedHeight(1)
-        exp_divider.setStyleSheet("background-color: rgba(128, 128, 136, 0.16); border: none;")
-        gb_layout.addWidget(exp_divider)
-
-        exp_row = QHBoxLayout()
-        exp_row.setContentsMargins(0, 4, 0, 0)
-        exp_row.setSpacing(12)
-
-        exp_label_col = QVBoxLayout()
-        exp_label_col.setContentsMargins(0, 0, 0, 0)
-        exp_label_col.setSpacing(2)
-
-        exp_title_row = QHBoxLayout()
-        exp_title_row.setContentsMargins(0, 0, 0, 0)
-        exp_title_row.setSpacing(8)
-        exp_title = QLabel("Pure DWM See-Through Glass")
-        exp_title.setObjectName("PrefSectionTitle")
-        self.exp_dwm_badge = QLabel("EXPERIMENTAL")
-        exp_title_row.addWidget(exp_title)
-        exp_title_row.addWidget(self.exp_dwm_badge, 0, Qt.AlignVCenter)
-        exp_title_row.addStretch(1)
-        exp_label_col.addLayout(exp_title_row)
-
-        exp_sub = QLabel(
-            "Bypasses Windows 11's milky Acrylic luminosity wash via low-level DWM blur-behind "
-            "so underlying active windows shine directly through the glass"
-        )
-        exp_sub.setWordWrap(True)
-        exp_sub.setObjectName("PrefCaption")
-        exp_label_col.addWidget(exp_sub)
-        exp_row.addLayout(exp_label_col, 1)
-
-        self.exp_dwm_switch = SwitchButton(glass_box)
-        self.exp_dwm_switch.setChecked(ThemeManager.experimental_pure_dwm_glass)
-        self.exp_dwm_switch.checkedChanged.connect(self._on_exp_dwm_glass_changed)
-        exp_row.addWidget(self.exp_dwm_switch, 0, Qt.AlignVCenter)
-
-        gb_layout.addLayout(exp_row)
         layout.addWidget(glass_box)
 
         self._update_orb_ui_state(ThemeManager.orb_glow_intensity)
@@ -1325,12 +1284,6 @@ class PreferencesWindow(FramelessWindow):
         ThemeManager.set_glass_transparency(clamped)
         self._update_glass_ui_state(clamped)
 
-    def _on_exp_dwm_glass_changed(self, enabled: bool):
-        db.set_setting("experimental_pure_dwm_glass", "true" if enabled else "false")
-        ThemeManager.set_experimental_pure_dwm_glass(enabled)
-        self._update_glass_ui_state(ThemeManager.glass_transparency)
-        self.update()
-
     def _update_orb_ui_state(self, val: int):
         supports_glass = ThemeManager.supports_glass_effects()
         if hasattr(self, "orb_slider") and self.orb_slider:
@@ -1374,9 +1327,6 @@ class PreferencesWindow(FramelessWindow):
             if self.glass_slider.isEnabled() != supports_glass:
                 self.glass_slider.setEnabled(supports_glass)
             self.glass_slider.update()
-        if hasattr(self, "exp_dwm_switch") and self.exp_dwm_switch:
-            if self.exp_dwm_switch.isEnabled() != supports_glass:
-                self.exp_dwm_switch.setEnabled(supports_glass)
         preset_names = {0: "Solid", 35: "Subtle", 65: "Balanced", 100: "Max Glass"}
         tag = preset_names.get(val, "Custom")
         is_dark = ThemeManager.is_dark
@@ -1384,16 +1334,6 @@ class PreferencesWindow(FramelessWindow):
         badge_fg = "#60cdff" if is_dark else "#0078d4"
         badge_bd = "rgba(96, 205, 255, 0.35)" if is_dark else "rgba(0, 120, 212, 0.25)"
         muted = "#a1a1aa" if is_dark else "#71717a"
-        if hasattr(self, "exp_dwm_badge") and self.exp_dwm_badge:
-            _set_qss_if_changed(self.exp_dwm_badge, f"""
-                background-color: {badge_bg};
-                color: {badge_fg if supports_glass else muted};
-                font-size: 9px;
-                font-weight: 700;
-                padding: 2px 6px;
-                border-radius: 4px;
-                border: 1px solid {badge_bd};
-            """)
         if hasattr(self, "glass_value_badge") and self.glass_value_badge:
             if not supports_glass:
                 self.glass_value_badge.setText("Disabled in Pro Solid Themes")
@@ -1407,8 +1347,7 @@ class PreferencesWindow(FramelessWindow):
                     border: 1px solid rgba(128, 128, 136, 0.24);
                 """)
             else:
-                mode_suffix = "  •  Pure DWM" if ThemeManager.experimental_pure_dwm_glass else ""
-                self.glass_value_badge.setText(f"{val}%  •  {tag}{mode_suffix}")
+                self.glass_value_badge.setText(f"{val}%  •  {tag}")
                 _set_qss_if_changed(self.glass_value_badge, f"""
                     background-color: {badge_bg};
                     color: {badge_fg};
@@ -1608,7 +1547,7 @@ class PreferencesWindow(FramelessWindow):
         # Standardize switch toggle indicators to Windows 11 Blue
         win_blue = QColor("#0078d4")
         win_blue_dark = QColor("#0078d4")
-        for sw_attr in ("home_dark_switch", "dark_switch", "exp_dwm_switch"):
+        for sw_attr in ("home_dark_switch", "dark_switch"):
             sw = getattr(self, sw_attr, None)
             if sw:
                 sw.setCheckedIndicatorColor(win_blue, win_blue_dark)
@@ -1645,10 +1584,6 @@ class PreferencesWindow(FramelessWindow):
             self.orb_slider.blockSignals(True)
             self.orb_slider.setValue(ThemeManager.orb_glow_intensity)
             self.orb_slider.blockSignals(False)
-        if hasattr(self, 'exp_dwm_switch') and self.exp_dwm_switch:
-            self.exp_dwm_switch.blockSignals(True)
-            self.exp_dwm_switch.setChecked(ThemeManager.experimental_pure_dwm_glass)
-            self.exp_dwm_switch.blockSignals(False)
         if hasattr(self, 'glass_slider') and self.glass_slider:
             self.glass_slider.blockSignals(True)
             self.glass_slider.setValue(ThemeManager.glass_transparency)
