@@ -1,7 +1,8 @@
+import math
 import os
 import webbrowser
 from typing import Dict, Optional, Tuple
-from PySide6.QtCore import Qt, Signal, QTimer, QElapsedTimer, QEvent, QRect, QSize
+from PySide6.QtCore import Qt, Signal, QTimer, QElapsedTimer, QEvent, QRect, QRectF, QSize
 from PySide6.QtGui import QCursor, QColor, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QGridLayout, QStackedLayout, QLabel, QWidget, QApplication
@@ -137,6 +138,7 @@ class TimelineCueCard(QFrame):
         self.is_compact = False
         self._cached_surface: Optional[QPixmap] = None
         self._cached_surface_key = None
+        self._slice_info = None
         self.isHover = False
         self._is_reflow_held = False
         self.borderRadius = 8
@@ -934,9 +936,14 @@ class TimelineCueCard(QFrame):
     def set_hold_reflow(self, hold: bool):
         self._is_reflow_held = hold
 
-    def get_cached_surface(self, w: int, h: int, dpr: float, hold_cache: bool = False) -> QPixmap:
-        """Returns a high-DPI GPU/RAM rasterized texture surface of this card."""
-        if (hold_cache or getattr(self, "_is_reflow_held", False)) and self._cached_surface is not None:
+    def get_cached_surface(self, w: int, h: int, dpr: float, hold_cache: bool = False, bypass_hold: bool = False) -> QPixmap:
+        """Returns a high-DPI GPU/RAM rasterized texture surface of this card.
+
+        bypass_hold forces a real rebake at width w even while a splitter drag holds the
+        cache (used when a 3-slice stretch can't faithfully represent the new width).
+        """
+        is_held = (hold_cache or getattr(self, "_is_reflow_held", False)) and not bypass_hold
+        if is_held and self._cached_surface is not None:
             return self._cached_surface
 
         cache_key = (
@@ -966,11 +973,79 @@ class TimelineCueCard(QFrame):
                 self._is_rendering_surface = False
             self._cached_surface = pix
             self._cached_surface_key = cache_key
+            self._capture_slice_geometry(w)
         return self._cached_surface
 
     def invalidate_cache(self):
         """Invalidates pre-baked texture surface so next paint pass re-renders."""
         self._cached_surface = None
         self._cached_surface_key = None
+        self._slice_info = None
+
+    # --- 3-slice live resize -------------------------------------------------------
+    # The card layout is [left cluster] <stretch> [right cluster]. Between two widths
+    # (that don't cross a layout breakpoint) only the flat stretch gap changes, so the
+    # baked surface can be redrawn at a new width as: left slice pinned left, right slice
+    # pinned right, and one flat middle column stretched to fill. This keeps splitter /
+    # window drags live at full refresh rate without rebaking widget trees per frame.
+
+    DOMAIN_BREAKPOINT_W = 560   # Mirrors the domain chip visibility rule in resizeEvent
+    MIN_STRETCH_GAP = 12        # Two layout spacings (5px each) + slack: layout not squeezed
+
+    def _capture_slice_geometry(self, w: int):
+        """Records where the left cluster ends and the right cluster starts in the bake."""
+        self._slice_info = None
+        try:
+            left = [self.cb, self.index_lbl, self.meta_pill, getattr(self, "domain_lbl", None)]
+            left_end = max(wd.geometry().right() + 1 for wd in left if wd is not None and not wd.isHidden())
+            right = [self.play_btn, self.tc_container]
+            right_start = min(wd.geometry().left() for wd in right if wd is not None and not wd.isHidden())
+        except (ValueError, RuntimeError, AttributeError):
+            return
+        if right_start - left_end < self.MIN_STRETCH_GAP:
+            return
+        domain_visible = bool(getattr(self, "domain_lbl", None)) and not self.domain_lbl.isHidden()
+        self._slice_info = (w, left_end, right_start, bool(self.is_compact), domain_visible)
+
+    def can_stretch_to(self, w: int) -> bool:
+        """True if the current bake can be 3-slice stretched to width w pixel-faithfully."""
+        info = getattr(self, "_slice_info", None)
+        if info is None or self._cached_surface is None or self._cached_surface.isNull():
+            return False
+        baked_w, left_end, right_start, was_compact, domain_visible = info
+        if was_compact != bool(self.is_compact):
+            return False
+        # Gap the stretch would leave at the new width; below this the layout squeezes widgets.
+        if (right_start - left_end) + (w - baked_w) < self.MIN_STRETCH_GAP:
+            return False
+        # Domain chip appears/disappears across its breakpoint: a real relayout is needed.
+        if getattr(self, "domain_lbl", None) is not None and not self.is_compact:
+            if domain_visible != (w >= self.DOMAIN_BREAKPOINT_W):
+                return False
+        return True
+
+    def draw_stretched(self, painter: QPainter, x: int, y: int, w: int):
+        """Draws the cached surface at width w via left / stretched-middle / right slices."""
+        pix = self._cached_surface
+        baked_w, left_end, right_start, _, _ = self._slice_info
+        dpr = pix.devicePixelRatio() or 1.0
+        ph = pix.height()
+        pw = pix.width()
+        # Work in whole device pixels so fractional scaling (125%/150%) never leaves seams.
+        # Round slice edges outward (+1px margin) so half-covered antialiased widget edges
+        # stay inside their cluster instead of being replaced by the flat middle column.
+        l_px = math.ceil(left_end * dpr) + 1
+        r_px = math.floor(right_start * dpr) - 1
+        right_w_px = pw - r_px
+        target_px = int(round(w * dpr))
+        mid_px = target_px - l_px - right_w_px
+        h_log = ph / dpr
+        mid_col = l_px + (r_px - l_px) // 2   # A single flat column from the middle gap
+
+        painter.drawPixmap(QRectF(x, y, l_px / dpr, h_log), pix, QRectF(0, 0, l_px, ph))
+        if mid_px > 0:
+            painter.drawPixmap(QRectF(x + l_px / dpr, y, mid_px / dpr, h_log), pix, QRectF(mid_col, 0, 1, ph))
+        painter.drawPixmap(QRectF(x + (target_px - right_w_px) / dpr, y, right_w_px / dpr, h_log),
+                           pix, QRectF(r_px, 0, right_w_px, ph))
 
 TimelineCard = TimelineCueCard

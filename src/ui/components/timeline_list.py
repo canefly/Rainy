@@ -124,6 +124,16 @@ class TimelineCanvas(QWidget):
                         self.active_idx = -1
                 card = self.timeline.filtered_cards[i]
                 pix = card.get_cached_surface(w, card_h, dpr, hold_cache=is_held)
+                if is_held and pix is not None and not pix.isNull():
+                    baked_w = card._slice_info[0] if card._slice_info else round(pix.width() / (pix.devicePixelRatio() or 1.0))
+                    if baked_w != w:
+                        if card.can_stretch_to(w):
+                            # Live resize: 3-slice stretch instead of rebaking the widget tree
+                            card.draw_stretched(painter, 0, i * slot_h, w)
+                            pix = None
+                        else:
+                            # Breakpoint crossed / too narrow: one real rebake at this width
+                            pix = card.get_cached_surface(w, card_h, dpr, bypass_hold=True)
                 if pix is not None and not pix.isNull():
                     painter.drawPixmap(0, i * slot_h, pix)
                 # Composite animated highlight pulse even when card is not the hovered active widget
