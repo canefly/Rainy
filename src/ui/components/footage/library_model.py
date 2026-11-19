@@ -4,7 +4,8 @@ from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal
 from PySide6.QtGui import QColor, QFont
 
 from ...theme import ThemeManager
-from ....core.footage_matcher import FootageMatchItem
+from ....core.footage_matcher import FootageMatchItem, is_still_item
+from .stills import still_format_label, thumbnail_tooltip_html
 from ....core.render_queue import render_queue
 
 
@@ -84,6 +85,9 @@ class FootageLibraryModel(QAbstractTableModel):
         # Precomputed row display tuples & tooltips for instant O(1) paint
         self._row_display_cache: List[Tuple[str, ...]] = []
         self._row_tooltip_cache: List[str] = []
+        self._row_is_still: List[bool] = []
+        self._row_thumb_done: List[bool] = []  # thumbnail tooltip built lazily on first hover
+        self._still_cache: Dict[str, bool] = {}
         self._row_job_status_cache: List[str] = []
         self._row_flag_tone_cache: List[str] = []  # "", "warn", "bad", "busy", "ok"
         self._row_fg_cache: List[Tuple[QColor, ...]] = []  # per-row, per-column foreground
@@ -123,8 +127,15 @@ class FootageLibraryModel(QAbstractTableModel):
         self.endResetModel()
         self.selection_changed.emit()
 
+    def is_still(self, it: FootageMatchItem) -> bool:
+        v = self._still_cache.get(it.norm_url)
+        if v is None:
+            v = self._still_cache[it.norm_url] = is_still_item(it)
+        return v
+
     def _refresh_online_cache(self):
         self._online_cache.clear()
+        self._still_cache.clear()
         for it in self._all_items:
             self._online_cache[it.norm_url] = bool(
                 it.is_matched and it.matched_path and os.path.isfile(it.matched_path)
@@ -147,9 +158,14 @@ class FootageLibraryModel(QAbstractTableModel):
         q = self._search_query
         for it in self._all_items:
             online = self._is_item_online(it)
-            if self._filter_mode == "VFR" and not (online and it.is_vfr):
+            still = self.is_still(it)
+            if self._filter_mode == "VFR" and not (online and it.is_vfr and not still):
                 continue
-            if self._filter_mode == "INTERLACED" and not (online and getattr(it, "is_interlaced", False)):
+            if self._filter_mode == "INTERLACED" and not (online and getattr(it, "is_interlaced", False) and not still):
+                continue
+            if self._filter_mode == "VIDEO" and still:
+                continue
+            if self._filter_mode == "PHOTO" and not still:
                 continue
             if self._filter_mode == "OFFLINE" and online:
                 continue
@@ -187,6 +203,8 @@ class FootageLibraryModel(QAbstractTableModel):
         self.update_palette_cache()
         self._row_display_cache.clear()
         self._row_tooltip_cache.clear()
+        self._row_is_still = []
+        self._row_thumb_done = []
         self._row_job_status_cache.clear()
         self._row_flag_tone_cache.clear()
         self._row_fg_cache = []
@@ -200,14 +218,20 @@ class FootageLibraryModel(QAbstractTableModel):
             else:
                 folder_str = "—"
 
-            codec_str = (it.video_codec or "").upper()
-            res_str = it.resolution or ""
-            if it.frame_rate and it.frame_rate > 0:
-                fps_str = f"{it.frame_rate:.2f}" if it.is_vfr else f"{it.frame_rate:.3f}".rstrip("0").rstrip(".")
+            still = self.is_still(it)
+            if still:
+                # Photos: real type + pixel size; no codec/fps (ffprobe calls a JPEG "MJPEG 25fps")
+                format_str = still_format_label(it.matched_path or it.title or "", it.resolution or "") or "—"
+                dur_str = "Still"
             else:
-                fps_str = ""
-            format_str = "  ·  ".join(p for p in (codec_str, res_str, fps_str) if p) or "—"
-            dur_str = it.duration_display or "—"
+                codec_str = (it.video_codec or "").upper()
+                res_str = it.resolution or ""
+                if it.frame_rate and it.frame_rate > 0:
+                    fps_str = f"{it.frame_rate:.2f}" if it.is_vfr else f"{it.frame_rate:.3f}".rstrip("0").rstrip(".")
+                else:
+                    fps_str = ""
+                format_str = "  ·  ".join(p for p in (codec_str, res_str, fps_str) if p) or "—"
+                dur_str = it.duration_display or "—"
             size_str = it.file_size_display or "—"
 
             # Flags: only things that need attention
@@ -217,7 +241,7 @@ class FootageLibraryModel(QAbstractTableModel):
             if not online:
                 flags.append("OFFLINE" if it.matched_path else "MISSING")
                 tone = "warn"
-            else:
+            elif not still:  # frame-rate / scan warnings only make sense for video
                 if it.is_vfr:
                     flags.append("VFR")
                     tone = "warn"
@@ -259,9 +283,13 @@ class FootageLibraryModel(QAbstractTableModel):
                 f"Local File: {it.matched_path or 'Missing'}",
                 f"Source URL: {it.url}",
             ]
-            if online and it.is_vfr and it.frame_rate:
+            self._row_is_still.append(still)
+            self._row_thumb_done.append(False)
+            if still:
+                tip_lines.append("Double-click to open in your photo viewer")
+            if online and not still and it.is_vfr and it.frame_rate:
                 tip_lines.append(f"VFR Warning: Variable Frame Rate ({it.frame_rate:.2f} FPS avg)")
-            if online and getattr(it, "is_interlaced", False):
+            if online and not still and getattr(it, "is_interlaced", False):
                 fo = getattr(it, "field_order", "interlaced")
                 tip_lines.append(f"Interlaced Scan ({fo.upper()}): Use Re-encode with bwdif decomb filter")
             self._row_tooltip_cache.append("\n".join(tip_lines))
@@ -315,6 +343,14 @@ class FootageLibraryModel(QAbstractTableModel):
                 return _CHECKED if self._visible_items[row].norm_url in self._checked_urls else _UNCHECKED
             return None
         if role == _R_TOOLTIP:
+            if self._row_is_still[row] and not self._row_thumb_done[row]:
+                # First hover on a photo: build its thumbnail once, then reuse the HTML
+                self._row_thumb_done[row] = True
+                it = self._visible_items[row]
+                if it.matched_path and self._online_cache.get(it.norm_url, False):
+                    self._row_tooltip_cache[row] = thumbnail_tooltip_html(
+                        it.matched_path, self._row_tooltip_cache[row]
+                    )
             return self._row_tooltip_cache[row]
         if role == self._R_ITEM:
             return self._visible_items[row]
@@ -360,7 +396,8 @@ class FootageLibraryModel(QAbstractTableModel):
     def select_vfr_items(self):
         self._checked_urls = {
             it.norm_url for it in self._all_items
-            if self._is_item_online(it) and (it.is_vfr or getattr(it, "is_interlaced", False))
+            if self._is_item_online(it) and not self.is_still(it)
+            and (it.is_vfr or getattr(it, "is_interlaced", False))
         }
         if self._visible_items:
             top = self.index(0, 0)

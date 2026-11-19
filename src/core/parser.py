@@ -2,11 +2,10 @@ import os
 import re
 import uuid
 import hashlib
-import tempfile
 import colorsys
 import html
 from typing import Tuple, List, Dict, Optional, Any
-from PySide6.QtCore import QRunnable, QObject, Signal
+from PySide6.QtCore import QRunnable, QObject, Signal, QUrl
 from docx import Document
 from docx.text.run import Run
 from docx.shared import RGBColor, Pt
@@ -14,6 +13,89 @@ from docx.oxml import OxmlElement
 
 from .models import DocumentState, ScriptItem, EditorNote
 from .database import db
+
+# Embedded script photos live beside Transcripts/ and Projects/ so files dragged into an
+# NLE keep a stable path (the OS temp folder gets cleaned and the media goes offline).
+PHOTOS_TEMP_DIR = os.environ.get("KNOT_PHOTOS_DIR") or os.path.join(
+    os.path.expanduser("~"), "Documents", "Rainy", "Photos Temp"
+)
+SCRIPT_IMAGE_MAX_WIDTH = 360
+
+
+def script_photos_dir(file_path: str) -> str:
+    """Folder holding the photos extracted from one script: Photos Temp/<script name>/."""
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    safe = re.sub(r'[<>:"/\\|?*]', '_', stem).strip(" .") or "script"
+    return os.path.join(PHOTOS_TEMP_DIR, safe)
+
+
+def _save_script_photo(photos_dir: str, img_bytes: bytes, ext: str) -> str:
+    """Writes one embedded photo under a content-derived name, so re-parsing the same
+    script reuses the file instead of piling up copies or changing a path an NLE links to."""
+    digest = hashlib.sha1(img_bytes).hexdigest()[:10]
+    prefix = os.path.basename(photos_dir)
+    img_path = os.path.join(photos_dir, f"{prefix}_{digest}.{ext}")
+    if not (os.path.isfile(img_path) and os.path.getsize(img_path) == len(img_bytes)):
+        os.makedirs(photos_dir, exist_ok=True)
+        with open(img_path, 'wb') as f_img:
+            f_img.write(img_bytes)
+    return os.path.abspath(img_path)
+
+
+def _image_display_width(img_path: str) -> int:
+    """Width to render a script photo at (natural width, capped), or 0 if Qt can't decode it."""
+    try:
+        from PySide6.QtGui import QImageReader
+        natural_w = QImageReader(img_path).size().width()
+    except Exception:
+        natural_w = -1
+    if natural_w <= 0:
+        return 0
+    return min(natural_w, SCRIPT_IMAGE_MAX_WIDTH)
+
+
+# Photo formats worth trying inline for footage-bound links (anything Qt can't decode is skipped).
+_LINKED_PHOTO_EXTENSIONS = {
+    ".jpg", ".jpeg", ".jfif", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg",
+    ".heic", ".heif", ".avif",
+}
+
+
+def _linked_photo_paths(block: Dict[str, Any], linked_footage: Optional[Dict[str, str]]) -> List[str]:
+    """Local photo files bound (via footage linking) to the links inside one script block."""
+    if not linked_footage:
+        return []
+    paths: List[str] = []
+    for s in block.get("spans", []):
+        link = s.get("link")
+        if not link or link == "#":
+            continue
+        local = linked_footage.get(normalize_link(link)) or linked_footage.get(link)
+        if not local or local in paths:
+            continue
+        if os.path.splitext(local)[1].lower() in _LINKED_PHOTO_EXTENSIONS:
+            paths.append(local)
+    return paths
+
+
+def _build_block_images_html(image_paths: List[str], has_text: bool) -> str:
+    """Inline <img> tags for a block's photos. They stay inside the block's own <p> because
+    ScriptViewer maps QTextBlocks to script blocks one-to-one."""
+    tags = []
+    seen = set()
+    for img_path in image_paths or []:
+        if not img_path or img_path in seen or not os.path.isfile(img_path):
+            continue
+        seen.add(img_path)
+        width = _image_display_width(img_path)
+        if width <= 0:
+            continue
+        src = QUrl.fromLocalFile(img_path).toString()
+        tags.append(f"<img src='{html.escape(src, quote=True)}' width='{width}'/>")
+    if not tags:
+        return ""
+    return ("<br/>" if has_text else "") + "<br/>".join(tags)
+
 
 def compute_file_hash(file_path: str) -> str:
     """Computes SHA256 of file for stable document signature."""
@@ -343,6 +425,7 @@ def build_raw_html(
     light_paper: bool = False,
     view_mode: str = "reading",
     vo_block_diffs: Optional[Dict[str, Dict[str, Any]]] = None,
+    linked_footage: Optional[Dict[str, str]] = None,
 ) -> str:
     """Builds styled HTML for ScriptViewer preserving DOCX font colors, highlights, formatting, and headings."""
     html_parts = []
@@ -413,8 +496,12 @@ def build_raw_html(
                     span_htmls.append(styled_txt)
 
         inner_content = "".join(span_htmls)
+        # Photos embedded in the .docx, then photos bound to this block's links via footage linking.
+        block_photos = list(b.get("images") or []) + _linked_photo_paths(b, linked_footage)
+        images_html = _build_block_images_html(block_photos, has_text=bool(inner_content.strip()))
+        inner_content += images_html
 
-        if not inner_content.strip() and not b.get("images"):
+        if not inner_content.strip():
             # Preserve blank paragraph lines for authentic DOCX layout
             p_style = "margin-top: 0px; margin-bottom: 7px; line-height: 1.15; min-height: 12.65pt;" if is_doc else "margin: 4px 0; min-height: 1em;"
             html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>&nbsp;</p>")
@@ -462,6 +549,12 @@ def build_raw_html(
                 if is_doc
                 else f"margin: 4px 0; line-height: 1.4; color: {body_text_col}; {p_extra_border}"
             )
+            if images_html:
+                # Proportional line-height would scale with the photo's height and leave a huge
+                # gap under it; use a fixed gap between lines for photo paragraphs instead.
+                p_style = re.sub(
+                    r'line-height: [\d.]+;', 'line-height: 6px; -qt-line-height-type: line-distance;', p_style, count=1
+                )
             html_parts.append(f"<p id='block-{block_id}' style='{p_style}'><a name='block-{block_id}'></a>{inner_content}{vo_callout_html}</p>")
 
     return "".join(html_parts)
@@ -482,8 +575,7 @@ def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Option
 
     doc = Document(file_path)
     page_geometry = extract_page_geometry(doc)
-    temp_img_dir = os.path.join(tempfile.gettempdir(), "knot_images", file_sig[:12])
-    os.makedirs(temp_img_dir, exist_ok=True)
+    photos_dir = script_photos_dir(file_path)
 
     lines = []
     total_paragraphs = len(doc.paragraphs)
@@ -651,11 +743,7 @@ def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Option
                         img_ext = img_part.content_type.split('/')[-1] if img_part.content_type else 'png'
                         if img_ext == 'jpeg':
                             img_ext = 'jpg'
-                        img_filename = f"{uuid.uuid4().hex[:8]}.{img_ext}"
-                        img_path = os.path.join(temp_img_dir, img_filename)
-                        with open(img_path, 'wb') as f_img:
-                            f_img.write(img_bytes)
-                        extracted_images.append(os.path.abspath(img_path))
+                        extracted_images.append(_save_script_photo(photos_dir, img_bytes, img_ext))
                     except Exception:
                         pass
 

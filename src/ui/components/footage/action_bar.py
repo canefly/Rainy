@@ -79,16 +79,26 @@ class BulkActionBar(QFrame):
         self.apply_theme()
         self.hide()
 
-    def set_selection_count(self, count: int, online_count: int):
+    def set_selection_count(self, count: int, online_count: int,
+                            reencodable_count: int = None, single_still: bool = False):
         if count <= 0:
             self.hide()
             return
         self.count_lbl.setText(f"{count} selected")
         has_online = online_count > 0
         is_single_online = (count == 1 and online_count == 1)
+        # Photos can't be re-encoded; the button counts videos only
+        n_videos = online_count if reencodable_count is None else reencodable_count
 
-        self.reencode_btn.setText("Re-encode Clip" if count == 1 else f"Re-encode Clips ({online_count})")
-        self.reencode_btn.setEnabled(has_online)
+        self.reencode_btn.setText("Re-encode Clip" if n_videos == 1 else f"Re-encode Clips ({n_videos})")
+        self.reencode_btn.setEnabled(n_videos > 0)
+        self.reencode_btn.setToolTip(
+            "Photos don't need re-encoding" if (has_online and n_videos == 0)
+            else "Convert VFR to CFR or compress selected clips in the background Render Queue"
+        )
+
+        self.open_btn.setIcon(FluentIcon.PHOTO if single_still else FluentIcon.PLAY)
+        self.open_btn.setToolTip("Open in your photo viewer" if single_still else "Open in your default player")
 
         # Explicitly disable Show in Explorer when multiple files are selected per Cane's instruction
         self.reveal_btn.setEnabled(is_single_online)

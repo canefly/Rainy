@@ -9,6 +9,36 @@ from .parser import normalize_link
 from .unfurl_engine import LinkMetadata, unfurl_engine, format_bytes_display
 
 
+# Still-image handling: ffprobe reports a JPEG as a one-frame "MJPEG, 25 fps, 0s" video, so
+# stills must be recognised up front or they inherit meaningless FPS / VFR / re-encode options.
+STILL_IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".jfif", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    ".heic", ".heif", ".avif", ".svg",
+}
+_STILL_CODECS = {"mjpeg", "jpeg", "jpegls", "png", "bmp", "gif", "webp", "tiff", "jpeg2000", "svg", "heic", "avif"}
+
+
+def is_still_media(path: Optional[str], video_codec: str = "", duration_seconds: Optional[float] = None) -> bool:
+    """True for photos/stills: known image extension, or an image codec with no real duration."""
+    if path:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in STILL_IMAGE_EXTENSIONS:
+            return True
+        if ext in (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".webm", ".mts", ".m2ts"):
+            return False
+    codec = (video_codec or "").lower()
+    return codec in _STILL_CODECS and (duration_seconds is None or duration_seconds < 0.05)
+
+
+def is_still_item(item) -> bool:
+    """is_still_media for a FootageMatchItem (uses the linked file, else the script title)."""
+    return is_still_media(
+        item.matched_path or getattr(item, "title", "") or "",
+        getattr(item, "video_codec", ""),
+        getattr(item, "duration_seconds", None),
+    )
+
+
 @dataclass
 class FootageMatchItem:
     url: str
@@ -55,7 +85,8 @@ class FootageMatcher:
         # Audio
         ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".aiff", ".wma",
         # Image
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg",
+        ".jpg", ".jpeg", ".jfif", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg",
+        ".heic", ".heif", ".avif",
         # Document
         ".pdf", ".docx", ".doc", ".txt", ".rtf", ".csv"
     }

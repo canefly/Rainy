@@ -7,7 +7,7 @@ from PySide6.QtGui import (
     QDrag, QPixmap, QCursor, QColor, QPainter, QPen,
     QTextCursor, QTextFormat, QTextCharFormat, QTextBlockFormat,
     QTextBlockUserData, QFont, QKeySequence, QShortcut, QPalette,
-    QAbstractTextDocumentLayout
+    QAbstractTextDocumentLayout, QImage, QImageReader, QTextDocument, QPainterPath, QDesktopServices
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -17,7 +17,9 @@ from qfluentwidgets import Slider, ComboBox, SmoothScrollDelegate, SmoothScrollB
 from ..theme import ThemeManager
 from .widgets import GpuSmoothScroller, MiddleClickAutoScroller, get_display_frame_interval_ms, safe_copy_to_clipboard
 from .link_embed_card import link_embed_controller
-from ...core.parser import build_raw_html
+from .find_bar import FindBar
+from ...core.parser import build_raw_html, SCRIPT_IMAGE_MAX_WIDTH
+from ...core.photo_censor import photo_censor, MANUAL_CENSOR, MANUAL_SAFE, MODEL_SIZE_DISPLAY
 
 
 class ScriptBlockUserData(QTextBlockUserData):
@@ -33,48 +35,104 @@ class ScriptBlockUserData(QTextBlockUserData):
         self.formatting_modified: bool = False
 
 
-class DraggableImageLabel(QLabel):
-    """An image label that allows dragging local image files directly into Premiere Pro / DaVinci Resolve."""
-    def __init__(self, image_path: str, parent=None):
-        super().__init__(parent)
-        self.image_path = image_path
-        self.setCursor(QCursor(Qt.OpenHandCursor))
-        self.setToolTip("Drag me to your timeline!")
+_SCRIPT_PHOTO_LOAD_WIDTH = 720   # 2x the 360px display cap, so HiDPI stays crisp
+_SCRIPT_PHOTO_CACHE: Dict[tuple, tuple] = {}   # (path, mtime) -> (image, image px per display px)
+_SCRIPT_PHOTO_CACHE_MAX = 64
+_PHOTO_EYE_SIZE = 26      # eye badge, in display px
+_PHOTO_EYE_MARGIN = 8
 
-        if os.path.exists(image_path):
-            pix = QPixmap(image_path)
-            scaled = pix.scaled(320, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.setPixmap(scaled)
-            self.setStyleSheet("""
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                padding: 4px;
-                background-color: rgba(0, 0, 0, 0.2);
-            """)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.drag_start_position = event.pos()
+def _load_script_photo_entry(path: str) -> Optional[tuple]:
+    """Decodes a script photo at display resolution (cached), or None if unreadable."""
+    try:
+        key = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return None
+    cached = _SCRIPT_PHOTO_CACHE.get(key)
+    if cached is not None:
+        return cached
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid() and size.width() > _SCRIPT_PHOTO_LOAD_WIDTH:
+        reader.setScaledSize(size.scaled(_SCRIPT_PHOTO_LOAD_WIDTH, 1_000_000, Qt.KeepAspectRatio))
+    img = reader.read()
+    if img.isNull():
+        return None
+    natural_w = size.width() if size.isValid() else img.width()
+    display_w = max(1, min(natural_w, SCRIPT_IMAGE_MAX_WIDTH))
+    entry = (img, img.width() / display_w)
+    if len(_SCRIPT_PHOTO_CACHE) >= _SCRIPT_PHOTO_CACHE_MAX:
+        _SCRIPT_PHOTO_CACHE.pop(next(iter(_SCRIPT_PHOTO_CACHE)))
+    _SCRIPT_PHOTO_CACHE[key] = entry
+    return entry
 
-    def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.LeftButton):
-            return
-        if not hasattr(self, 'drag_start_position'):
-            return
-        if (event.pos() - self.drag_start_position).manhattanLength() < 10:
-            return
 
-        drag = QDrag(self)
-        mime_data = QMimeData()
-        url = QUrl.fromLocalFile(os.path.abspath(self.image_path))
-        mime_data.setUrls([url])
-        mime_data.setText(os.path.abspath(self.image_path))
-        
-        drag.setMimeData(mime_data)
-        if self.pixmap():
-            drag.setPixmap(self.pixmap().scaled(120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        
-        drag.exec(Qt.CopyAction)
+def _load_script_photo(path: str) -> Optional[QImage]:
+    entry = _load_script_photo_entry(path)
+    return entry[0] if entry else None
+
+
+def _draw_photo_eye(painter: QPainter, img_w: int, k: float, crossed: bool):
+    """Eye toggle badge in the photo's top-right corner (crossed out while the photo is hidden)."""
+    size, margin = _PHOTO_EYE_SIZE * k, _PHOTO_EYE_MARGIN * k
+    box = QRectF(img_w - margin - size, margin, size, size)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(0, 0, 0, 150))
+    painter.drawRoundedRect(box, 6 * k, 6 * k)
+
+    cx, cy = box.center().x(), box.center().y()
+    half_w, half_h = size * 0.32, size * 0.30
+    lid = QPainterPath()
+    lid.moveTo(cx - half_w, cy)
+    lid.quadTo(cx, cy - half_h * 1.5, cx + half_w, cy)
+    lid.quadTo(cx, cy + half_h * 1.5, cx - half_w, cy)
+    pen = QPen(QColor("#ffffff"), 1.6 * k)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPath(lid)
+    painter.setBrush(QColor("#ffffff"))
+    painter.drawEllipse(QPointF(cx, cy), size * 0.10, size * 0.10)
+    if crossed:
+        painter.drawLine(QPointF(cx - half_w, cy + half_h * 1.1), QPointF(cx + half_w, cy - half_h * 1.1))
+
+
+def _render_script_photo(path: str) -> Optional[QImage]:
+    """The photo as the script shows it: blurred behind a warning when censored, plus the eye toggle."""
+    entry = _load_script_photo_entry(path)
+    if entry is None:
+        return None
+    img, k = entry
+    hidden = photo_censor.is_hidden(path)
+    w, h = img.width(), img.height()
+    if hidden:
+        tiny = img.scaled(max(1, w // 48), max(1, h // 48), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        out = tiny.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    else:
+        out = img.copy()
+    out = out.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    if hidden:
+        painter.fillRect(out.rect(), QColor(10, 10, 14, 165))
+        if w / k >= 150 and h / k >= 70:
+            title = "CHECKING PHOTO…" if photo_censor.is_pending(path) else "SENSITIVE CONTENT"
+            font = QFont("Segoe UI")
+            font.setBold(True)
+            font.setPixelSize(max(1, round(14 * k)))
+            painter.setFont(font)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(QRectF(0, h / 2 - 22 * k, w, 22 * k), Qt.AlignHCenter | Qt.AlignBottom, title)
+            font.setBold(False)
+            font.setPixelSize(max(1, round(11 * k)))
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 190))
+            painter.drawText(QRectF(0, h / 2 + 2 * k, w, 20 * k), Qt.AlignHCenter | Qt.AlignTop, "Click to view")
+    _draw_photo_eye(painter, w, k, crossed=hidden)
+    painter.end()
+    return out
 
 
 class ScriptSmoothScrollDelegate(SmoothScrollDelegate):
@@ -201,6 +259,13 @@ class ScriptTextBrowser(QTextBrowser):
             "margin_right_pt": 72.0,
         }
         self._hovered_anchor = None
+        self._img_drag_path = ""
+        self._img_drag_origin = QPoint()
+        self._image_drag_active = False
+        self._over_image = False
+        self._photo_urls: Dict[str, QUrl] = {}
+        photo_censor.photo_changed.connect(self.refresh_photo)
+        photo_censor.all_photos_changed.connect(self.refresh_all_photos)
         if self.verticalScrollBar():
             self.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
 
@@ -473,8 +538,138 @@ class ScriptTextBrowser(QTextBrowser):
         elif vp_y > vp_h - margin:
             sb.setValue(min(sb.maximum(), sb.value() + scroll_speed))
 
+    def loadResource(self, rtype, url):
+        # Footage photos can be huge; hand the document a downscaled copy while the <img>
+        # keeps pointing at the original file (which is what gets dragged out).
+        if rtype == QTextDocument.ImageResource and url.isLocalFile():
+            path = url.toLocalFile()
+            img = _render_script_photo(path)
+            if img is not None:
+                self._photo_urls[os.path.normcase(os.path.abspath(path))] = QUrl(url)
+                return img
+        return super().loadResource(rtype, url)
+
+    def refresh_photo(self, path: str):
+        """Re-renders one photo in place (censor state changed) without reflowing the script."""
+        url = self._photo_urls.get(os.path.normcase(os.path.abspath(path)))
+        if url is None:
+            return
+        img = _render_script_photo(url.toLocalFile())
+        if img is None:
+            return
+        doc = self.document()
+        doc.addResource(QTextDocument.ImageResource, url, img)
+        doc.markContentsDirty(0, doc.characterCount())
+        self.viewport().update()
+
+    def reset_photo_resources(self):
+        """Drops photos pinned by refresh_photo so the next render loads them fresh."""
+        doc = self.document()
+        for url in self._photo_urls.values():
+            doc.addResource(QTextDocument.ImageResource, url, None)
+        self._photo_urls.clear()
+
+    def refresh_all_photos(self):
+        for url in list(self._photo_urls.values()):
+            self.refresh_photo(url.toLocalFile())
+
+    # --- Script photos: drag them out as real files, eye toggle in the corner ---
+    def _photo_hit(self, vp_pos) -> tuple:
+        """(local file path, is_on_eye_badge) for the photo under a viewport position, else ('', False)."""
+        if self._view_mode == "document":
+            _, doc_pt = self._map_viewport_to_doc_coords(QPointF(vp_pos), clamp=False)
+        else:
+            doc_pt = QPointF(
+                vp_pos.x() + self.horizontalScrollBar().value(),
+                vp_pos.y() + self.verticalScrollBar().value(),
+            )
+        if doc_pt is None:
+            return "", False
+        doc = self.document()
+        layout = doc.documentLayout()
+        name = layout.imageAt(doc_pt)
+        if not name:
+            return "", False
+        url = QUrl(name)
+        path = url.toLocalFile() if url.isLocalFile() else name
+        if not os.path.isfile(path):
+            return "", False
+        path = os.path.abspath(path)
+
+        # Locate the image's rect to tell whether the press landed on its corner eye badge.
+        on_eye = False
+        pos = layout.hitTest(doc_pt, Qt.FuzzyHit)
+        for cand in (pos, pos - 1):
+            if cand < 0 or doc.characterAt(cand) != '￼':
+                continue
+            block = doc.findBlock(cand)
+            rel = cand - block.position()
+            line = block.layout().lineForTextPosition(rel)
+            if not line.isValid():
+                continue
+            origin = layout.blockBoundingRect(block).topLeft()
+            x0, _ = line.cursorToX(rel)
+            x1, _ = line.cursorToX(rel + 1)
+            if not (origin.x() + x0 <= doc_pt.x() <= origin.x() + x1):
+                continue
+            zone = _PHOTO_EYE_SIZE + 2 * _PHOTO_EYE_MARGIN
+            on_eye = (
+                doc_pt.x() >= origin.x() + x1 - zone
+                and doc_pt.y() <= origin.y() + line.y() + zone
+            )
+            break
+        return path, on_eye
+
+    def _image_file_at(self, vp_pos) -> str:
+        """Local file path of the photo under a viewport position, or ''."""
+        return self._photo_hit(vp_pos)[0]
+
+    @staticmethod
+    def _image_drag_mime(image_path: str) -> QMimeData:
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(image_path)])
+        return mime_data
+
+    def _start_image_drag(self):
+        image_path, self._img_drag_path = self._img_drag_path, ""
+        if not image_path:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(self._image_drag_mime(image_path))
+        pix = QPixmap(image_path)
+        if not pix.isNull():
+            drag.setPixmap(pix.scaled(120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self._image_drag_active = True
+        try:
+            drag.exec(Qt.CopyAction)
+        finally:
+            self._image_drag_active = False
+
+    def canInsertFromMimeData(self, source):
+        # Don't let a photo dragged out of the script drop back in as a file-URL string.
+        if self._image_drag_active:
+            return False
+        return super().canInsertFromMimeData(source)
+
     def mouseMoveEvent(self, event):
         pos_pt = event.pos()
+        if self._img_drag_path and (event.buttons() & Qt.LeftButton):
+            if (pos_pt - self._img_drag_origin).manhattanLength() >= QApplication.startDragDistance():
+                self._start_image_drag()
+            return
+        hover_path, hover_eye = ("", False) if event.buttons() else self._photo_hit(event.position())
+        if hover_path:
+            if self._hovered_anchor is not None:
+                self._hovered_anchor = None
+                self._handle_anchor_hover(None, pos_pt)
+            self._over_image = True
+            clickable = hover_eye or photo_censor.is_hidden(hover_path)
+            self.viewport().setCursor(QCursor(Qt.PointingHandCursor if clickable else Qt.OpenHandCursor))
+            return
+        if self._over_image:
+            self._over_image = False
+            self.viewport().setCursor(QCursor(Qt.IBeamCursor))
+
         if self._view_mode == "document":
             p = event.position() if hasattr(event, "position") else pos_pt
             if getattr(self, "_doc_selecting", False) and (event.buttons() & Qt.LeftButton):
@@ -531,6 +726,19 @@ class ScriptTextBrowser(QTextBrowser):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            image_path, on_eye = self._photo_hit(event.position())
+            if image_path and on_eye:
+                photo_censor.toggle_hidden(image_path)
+                event.accept()
+                return
+            if image_path:
+                # Arm a file drag; consumed so it doesn't start a text selection.
+                self._img_drag_path = image_path
+                self._img_drag_origin = event.pos()
+                event.accept()
+                return
+
         if self._view_mode == "document" and event.button() == Qt.LeftButton:
             p = event.position() if hasattr(event, "position") else event.pos()
             p_idx, doc_pt = self._map_viewport_to_doc_coords(p, clamp=False)
@@ -587,6 +795,13 @@ class ScriptTextBrowser(QTextBrowser):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._img_drag_path:
+            clicked_path, self._img_drag_path = self._img_drag_path, ""
+            # A plain click (no drag) on a censored photo reveals it.
+            if photo_censor.is_hidden(clicked_path):
+                photo_censor.toggle_hidden(clicked_path)
+            event.accept()
+            return
         if self._view_mode == "document":
             self._doc_selecting = False
         super().mouseReleaseEvent(event)
@@ -763,6 +978,7 @@ class ScriptViewer(QFrame):
         self._raw_html = ""
         self._blocks: List[Dict[str, Any]] = []
         self._link_colors: Dict[str, str] = {}
+        self._linked_footage: Dict[str, str] = {}
         self._page_geometry: Dict[str, float] = {
             "width_pt": 612.0,
             "height_pt": 792.0,
@@ -945,7 +1161,17 @@ class ScriptViewer(QFrame):
         self.middle_scroller = MiddleClickAutoScroller(self.browser, self)
         self._pulse_clock = QElapsedTimer()
         self._pulse_duration_ms = 1050.0
+        self._pulse_sel = None
+        self._find_sels: List[QTextEdit.ExtraSelection] = []
         layout.addWidget(self.browser, 1)
+
+        # VS Code style find widget (floats over the top-right of the text view)
+        self.find_bar = FindBar(self, self)
+        self.browser.installEventFilter(self)
+        for seq, fwd in (("F3", True), ("Shift+F3", False)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda f=fwd: self._find_step(f))
 
         # Bottom MS Word-style Status Bar (Visible in Document Mode: Page X of Y on left, - [slider] + 100% on right)
         self.doc_status_bar = QFrame(self)
@@ -1013,6 +1239,8 @@ class ScriptViewer(QFrame):
         self._style_header_controls()
 
     def _style_header_controls(self):
+        if hasattr(self, "find_bar"):
+            self.find_bar.apply_theme()
         pal = ThemeManager.get_palette()
         is_dark = pal["is_dark"]
         accent = pal["accent"]
@@ -1363,7 +1591,8 @@ class ScriptViewer(QFrame):
 
         block = doc.begin()
         while block.isValid():
-            text = block.text().strip()
+            # U+FFFC is the placeholder character Qt puts in the text for an inline photo.
+            text = block.text().replace('￼', '').strip()
             user_data = block.userData()
             orig_id = user_data.block_id if isinstance(user_data, ScriptBlockUserData) else None
             is_header = user_data.is_header if isinstance(user_data, ScriptBlockUserData) else False
@@ -1398,7 +1627,7 @@ class ScriptViewer(QFrame):
                 while not it.atEnd():
                     frag = it.fragment()
                     if frag.isValid():
-                        frag_text = frag.text()
+                        frag_text = frag.text().replace('￼', '')
                         if frag_text:
                             fmt = frag.charFormat()
                             bold = fmt.fontWeight() >= QFont.Bold
@@ -1472,11 +1701,11 @@ class ScriptViewer(QFrame):
         cursor = self.browser.textCursor()
         if cursor.hasSelection():
             raw_text = cursor.selectedText()
-            clean_text = raw_text.replace('\u2029', '\n').strip('\r')
+            clean_text = raw_text.replace('\u2029', '\n').replace('\ufffc', '').strip('\r')
             safe_copy_to_clipboard(clean_text)
             self.copy_feedback_requested.emit("Copied!")
         elif not self.is_edit_mode:
-            full_text = self.browser.toPlainText()
+            full_text = self.browser.toPlainText().replace('\ufffc', '')
             if full_text:
                 safe_copy_to_clipboard(full_text)
                 self.copy_feedback_requested.emit("Copied Script!")
@@ -1789,6 +2018,98 @@ class ScriptViewer(QFrame):
 
         return 0
 
+    # ---- Find (Ctrl+F) host interface ------------------------------------------------
+    def document(self):
+        return self.browser.document()
+
+    def focus_content(self):
+        self.browser.setFocus()
+
+    def open_find(self):
+        seed = ""
+        cur = self.browser.textCursor()
+        if cur.hasSelection():
+            txt = cur.selectedText()
+            if " " not in txt and len(txt) <= 200:
+                seed = txt
+        self.find_bar.open_bar(seed)
+
+    def _find_step(self, forward: bool):
+        if not self.find_bar.isVisible():
+            self.open_find()
+            return
+        self.find_bar.next_match() if forward else self.find_bar.prev_match()
+
+    def position_find_bar(self):
+        bar = self.find_bar
+        bar.adjustSize()
+        g = self.browser.geometry()
+        sb_w = self.browser.verticalScrollBar().width() if self.browser.verticalScrollBar().isVisible() else 0
+        bar.move(max(g.left(), g.right() - bar.width() - 18 - sb_w), g.top() + 6)
+
+    def eventFilter(self, obj, event):
+        if obj is self.browser and event.type() in (QEvent.Resize, QEvent.Move) and self.find_bar.isVisible():
+            slide = getattr(self.find_bar, "_slide", None)
+            if slide is None or slide.state() != QPropertyAnimation.Running:
+                self.position_find_bar()
+        return super().eventFilter(obj, event)
+
+    def view_anchor_position(self) -> int:
+        vp = self.browser.viewport()
+        c = self.browser.cursorForPosition(QPoint(min(24, max(0, vp.width() - 1)), 8))
+        return c.position() if c and not c.isNull() else 0
+
+    def set_find_matches(self, cursors: List[QTextCursor], current: Optional[QTextCursor]):
+        is_light = (self.view_mode == "document" and self.paper_theme == "light")
+        others = []
+        for c in cursors:
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = c
+            sel.format.setBackground(QColor(234, 92, 0, 85) if is_light else QColor(234, 120, 20, 105))
+            others.append(sel)
+        if current is not None:
+            cur_sel = QTextEdit.ExtraSelection()
+            cur_sel.cursor = current
+            cur_sel.format.setBackground(QColor(255, 140, 0, 235) if is_light else QColor(255, 165, 30, 235))
+            cur_sel.format.setForeground(QColor("#111111"))
+            # replace the "other" entry for the current match so it paints on top, not under
+            others = [s for s in others if s.cursor.position() != current.position() or s.cursor.anchor() != current.anchor()]
+            others.append(cur_sel)
+        self._find_sels = others
+        self._refresh_selections()
+
+    def _refresh_selections(self):
+        sels = list(self._find_sels)
+        if self._pulse_sel is not None:
+            sels.append(self._pulse_sel)
+        self.browser.setExtraSelections(sels)
+        if self.browser.viewport():
+            self.browser.viewport().update()
+
+    def reveal_find_match(self, cursor: QTextCursor):
+        sb = self.browser.verticalScrollBar()
+        vh = self.browser.viewport().height()
+        if self.view_mode == "document":
+            block = cursor.block()
+            doc = self.browser.document()
+            brect = doc.documentLayout().blockBoundingRect(block)
+            printable_h = max(1.0, self.browser._printable_h)
+            p_idx = int(brect.y() // printable_h)
+            in_page_y = brect.y() % printable_h
+            scale = self.browser._doc_zoom_pct / 100.0
+            stride = self.browser._sheet_h * scale + self.browser._page_gap * scale
+            y = self.browser._page_gap * scale + p_idx * stride + self.browser._margin_top * scale + in_page_y * scale
+            h = 18.0 * scale
+        else:
+            r = self.browser.cursorRect(cursor)
+            y = r.y() + sb.value()
+            h = r.height()
+        top_clear, bottom_clear = 64, 40  # keep out from under the floating bar
+        if y - sb.value() >= top_clear and (y + h) - sb.value() <= vh - bottom_clear:
+            return
+        target = max(0, min(sb.maximum(), int(y + h / 2.0 - vh / 2.0)))
+        self.smooth_scroller.scroll_to(target)
+
     def _pulse_highlight(self, cursor: QTextCursor):
         self._highlight_cursor = cursor
         self._pulse_duration_ms = 1400.0
@@ -1818,18 +2139,16 @@ class ScriptViewer(QFrame):
             sel.format.setForeground(QColor("#000000"))
         sel.format.setProperty(QTextFormat.FullWidthSelection, not is_exact)
         sel.cursor = self._highlight_cursor
-        self.browser.setExtraSelections([sel])
-        if self.browser.viewport():
-            self.browser.viewport().update()
+        self._pulse_sel = sel
+        self._refresh_selections()
 
     def _step_pulse(self):
         elapsed = self._pulse_clock.nsecsElapsed() / 1_000_000.0
         if elapsed >= self._pulse_duration_ms:
             self._pulse_timer.stop()
             self._last_pulse_alpha = -1
-            self.browser.setExtraSelections([])
-            if self.browser.viewport():
-                self.browser.viewport().update()
+            self._pulse_sel = None
+            self._refresh_selections()
             return
         # Hold peak brightness during smooth scroll glide (first 450ms), then quadratic fade
         progress = elapsed / self._pulse_duration_ms
@@ -1846,6 +2165,17 @@ class ScriptViewer(QFrame):
         if self.view_mode == "document":
             return 11.0
         return max(5.0, float(self.current_font_size))
+
+    def set_linked_footage(self, linked_footage: Optional[Dict[str, str]], refresh: bool = True):
+        """Footage bindings (link -> local file). Links bound to a photo render it inline."""
+        new_map = dict(linked_footage or {})
+        if new_map == self._linked_footage:
+            return
+        self._linked_footage = new_map
+        if refresh and self._blocks and not self.is_edit_mode:
+            scroll_pos = self.browser.verticalScrollBar().value()
+            self._update_display()
+            self.browser.verticalScrollBar().setValue(scroll_pos)
 
     def _on_zoom_changed(self, size: int):
         self.current_font_size = size
@@ -1876,6 +2206,7 @@ class ScriptViewer(QFrame):
                     light_paper=use_light_surface,
                     view_mode=self.view_mode,
                     vo_block_diffs=None if self.is_edit_mode else getattr(self, "_vo_block_diffs", None),
+                    linked_footage=self._linked_footage,
                 )
             else:
                 inner_html = self._raw_html
@@ -1910,6 +2241,7 @@ class ScriptViewer(QFrame):
             </body>
             </html>
             """
+            self.browser.reset_photo_resources()
             self.browser.setHtml(wrapped)
             self._attach_block_user_data()
             self.browser.set_page_layout(
@@ -1952,7 +2284,94 @@ class ScriptViewer(QFrame):
         else:
             self.scroll_to_anchor(raw_url)
 
+    def _show_photo_menu(self, path: str, global_pos):
+        """Right-click options for a photo in the script: censor controls and file actions."""
+        pal = ThemeManager.get_palette()
+        accent = pal.get("accent", "#38bdf8")
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: #1e1b1e;
+                color: #ffffff;
+                border: 1px solid #4c3d4c;
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {accent};
+                color: #ffffff;
+                border-radius: 4px;
+            }}
+            QMenu::item:disabled {{ color: #7c7480; }}
+            QMenu::separator {{ height: 1px; background: #4c3d4c; margin: 4px 6px; }}
+        """)
+
+        manual = photo_censor.manual(path)
+        hidden = photo_censor.is_hidden(path)
+        model_ready = photo_censor.model_ready()
+
+        act_toggle = menu.addAction("Show Photo" if hidden else "Hide Photo")
+        menu.addSeparator()
+        act_censor = menu.addAction("Always Censor This Photo")
+        act_censor.setCheckable(True)
+        act_censor.setChecked(manual == MANUAL_CENSOR)
+        act_safe = menu.addAction("Never Censor This Photo")
+        act_safe.setCheckable(True)
+        act_safe.setChecked(manual == MANUAL_SAFE)
+        act_reset = menu.addAction("Reset to Automatic")
+        act_reset.setEnabled(manual is not None)
+        act_rescan = menu.addAction("Re-check Photo")
+        act_rescan.setEnabled(model_ready and photo_censor.auto_enabled())
+        menu.addSeparator()
+        act_copy = menu.addAction("Copy File Path")
+        act_reveal = menu.addAction("Show in Folder")
+        menu.addSeparator()
+        act_auto = menu.addAction("Auto-Censor Sensitive Photos")
+        act_auto.setCheckable(True)
+        act_auto.setChecked(photo_censor.auto_enabled())
+        act_download = None
+        if not model_ready:
+            if photo_censor.is_downloading():
+                act_download = menu.addAction("Cancel Auto-Censor Model Download")
+            else:
+                act_download = menu.addAction(f"Download Auto-Censor Model ({MODEL_SIZE_DISPLAY})")
+
+        res = menu.exec(global_pos)
+        if res is None:
+            return
+        if res == act_toggle:
+            photo_censor.toggle_hidden(path)
+        elif res == act_censor:
+            photo_censor.set_manual(path, None if manual == MANUAL_CENSOR else MANUAL_CENSOR)
+        elif res == act_safe:
+            photo_censor.set_manual(path, None if manual == MANUAL_SAFE else MANUAL_SAFE)
+        elif res == act_reset:
+            photo_censor.set_manual(path, None)
+        elif res == act_rescan:
+            photo_censor.rescan(path)
+        elif res == act_copy:
+            safe_copy_to_clipboard(os.path.normpath(path))
+            self.copy_feedback_requested.emit("Copied Path!")
+        elif res == act_reveal:
+            import subprocess
+            try:
+                subprocess.Popen(f'explorer.exe /select,"{os.path.normpath(path)}"')
+            except Exception:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+        elif res == act_auto:
+            photo_censor.set_auto_enabled(not photo_censor.auto_enabled())
+        elif act_download is not None and res == act_download:
+            if photo_censor.is_downloading():
+                photo_censor.cancel_download()
+            else:
+                photo_censor.download_model()
+
     def _show_context_menu(self, pos):
+        photo_path = self.browser._image_file_at(QPointF(pos))
+        if photo_path:
+            self._show_photo_menu(photo_path, self.browser.mapToGlobal(pos))
+            return
+
         cursor = self.browser.textCursor()
         selected_text = cursor.selectedText().strip().replace('\u2029', ' ')
 

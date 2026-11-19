@@ -3291,6 +3291,7 @@ class PreferencesWindow(FramelessWindow):
         mc_layout.addWidget(self.whisper_dl_status_lbl)
 
         layout.addWidget(models_card)
+        layout.addWidget(self._build_photo_censor_card())
 
         # --- Card 3: Antigravity Live GUI MCP Bridge ---
         mcp_card = PrefCardFrame()
@@ -3344,6 +3345,229 @@ class PreferencesWindow(FramelessWindow):
 
         self._refresh_whisper_tab_state()
         return widget
+
+    # --- Automatic Photo Censoring (local sensitivity model) ---
+    def _build_photo_censor_card(self) -> QWidget:
+        from ...core import photo_censor as pc
+        svc = pc.photo_censor
+
+        card = PrefCardFrame()
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+
+        top = QHBoxLayout()
+        title = QLabel("Automatic Photo Censoring")
+        title.setObjectName("PrefSectionTitle")
+        top.addWidget(title)
+        self.censor_badge = QLabel("", card)
+        top.addWidget(self.censor_badge)
+        top.addStretch(1)
+        self.censor_enable_switch = SwitchButton(card)
+        self.censor_enable_switch.setOnText("Enabled")
+        self.censor_enable_switch.setOffText("Disabled")
+        self.censor_enable_switch.setChecked(svc.auto_enabled())
+        self.censor_enable_switch.checkedChanged.connect(self._on_censor_enabled_toggled)
+        top.addWidget(self.censor_enable_switch)
+        lay.addLayout(top)
+
+        desc = QLabel(
+            "Blurs graphic photos in the script (gore, bodies, crime scenes) behind a "
+            "\"Sensitive Content\" cover until you click to view. The check runs entirely on this "
+            "computer; photos are never uploaded. You can always censor or uncensor a photo yourself "
+            "by right-clicking it, with or without the model."
+        )
+        desc.setObjectName("PrefBodyText")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        row = QFrame(card)
+        row.setObjectName("WhisperModelRow")
+        r_lay = QHBoxLayout(row)
+        r_lay.setContentsMargins(10, 8, 10, 8)
+        r_lay.setSpacing(10)
+        info = QVBoxLayout()
+        info.setContentsMargins(0, 0, 0, 0)
+        info.setSpacing(2)
+        name_lbl = QLabel(f"{pc.MODEL_NAME}  \u2022  {pc.MODEL_SIZE_DISPLAY}  \u2022  Offline", row)
+        name_lbl.setStyleSheet("font-weight: 700; font-size: 12.5px;")
+        info.addWidget(name_lbl)
+        sub_lbl = QLabel(
+            "Downloads automatically the first time the app runs. Checks a photo in well under a second.", row
+        )
+        sub_lbl.setObjectName("PrefCaption")
+        sub_lbl.setWordWrap(True)
+        info.addWidget(sub_lbl)
+        r_lay.addLayout(info, 1)
+
+        self.censor_status_lbl = QLabel("", row)
+        self.censor_status_lbl.setFixedWidth(130)
+        self.censor_status_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        r_lay.addWidget(self.censor_status_lbl)
+
+        self.censor_dl_btn = PushButton("Download", row)
+        self.censor_dl_btn.setFixedWidth(128)
+        self.censor_dl_btn.setFixedHeight(28)
+        self.censor_dl_btn.clicked.connect(self._on_censor_download_clicked)
+        r_lay.addWidget(self.censor_dl_btn)
+
+        self.censor_del_btn = ToolButton(FluentIcon.DELETE, row)
+        self.censor_del_btn.setFixedSize(28, 28)
+        self.censor_del_btn.setToolTip("Delete the auto-censor model from this computer")
+        self.censor_del_btn.clicked.connect(self._on_censor_delete_clicked)
+        r_lay.addWidget(self.censor_del_btn)
+        lay.addWidget(row)
+
+        self.censor_dl_progress = QProgressBar(card)
+        self.censor_dl_progress.setRange(0, 100)
+        self.censor_dl_progress.setFixedHeight(6)
+        self.censor_dl_progress.setTextVisible(False)
+        self.censor_dl_progress.hide()
+        lay.addWidget(self.censor_dl_progress)
+
+        self.censor_dl_status_lbl = QLabel("", card)
+        self.censor_dl_status_lbl.setObjectName("PrefCaption")
+        self.censor_dl_status_lbl.hide()
+        lay.addWidget(self.censor_dl_status_lbl)
+
+        sens_row = QHBoxLayout()
+        sens_row.setSpacing(12)
+        sens_lbl = QLabel("Sensitivity:", card)
+        sens_lbl.setObjectName("PrefBodyText")
+        sens_row.addWidget(sens_lbl)
+        self.censor_sensitivity_combo = ComboBox(card)
+        self._censor_levels = [key for key, _, _ in pc.SENSITIVITY_LEVELS]
+        self.censor_sensitivity_combo.addItems([label for _, label, _ in pc.SENSITIVITY_LEVELS])
+        self.censor_sensitivity_combo.setCurrentIndex(self._censor_levels.index(svc.sensitivity()))
+        self.censor_sensitivity_combo.setFixedWidth(240)
+        self.censor_sensitivity_combo.currentIndexChanged.connect(self._on_censor_sensitivity_changed)
+        sens_row.addWidget(self.censor_sensitivity_combo)
+        sens_row.addStretch(1)
+        open_btn = PushButton("Open Model Folder", card)
+        open_btn.setIcon(FluentIcon.FOLDER)
+        open_btn.setFixedHeight(28)
+        open_btn.clicked.connect(self._on_open_censor_model_dir)
+        sens_row.addWidget(open_btn)
+        lay.addLayout(sens_row)
+
+        svc.model_state_changed.connect(self._refresh_photo_censor_state)
+        svc.model_download_progress.connect(self._on_censor_dl_progress)
+        svc.model_download_finished.connect(self._on_censor_dl_finished)
+        svc.all_photos_changed.connect(self._refresh_photo_censor_state)
+        self._refresh_photo_censor_state()
+        return card
+
+    def _refresh_photo_censor_state(self):
+        from ...core import photo_censor as pc
+        if not hasattr(self, "censor_badge"):
+            return
+        svc = pc.photo_censor
+        ready, downloading, enabled = svc.model_ready(), svc.is_downloading(), svc.auto_enabled()
+        green = ("rgba(16, 185, 129, 0.14)", "#34d399", "rgba(16, 185, 129, 0.35)")
+        amber = ("rgba(245, 158, 11, 0.14)", "#fbbf24", "rgba(245, 158, 11, 0.35)")
+        grey = ("rgba(113, 113, 122, 0.16)", "#a1a1aa", "rgba(113, 113, 122, 0.35)")
+        if not enabled:
+            text, tone = "Off \u2014 manual censoring only", grey
+        elif downloading:
+            text, tone = "Downloading model\u2026", amber
+        elif ready:
+            text, tone = "Active", green
+        else:
+            text, tone = "Model needed \u2014 manual censoring only", amber
+        self.censor_badge.setText(text)
+        self.censor_badge.setStyleSheet(
+            f"background-color: {tone[0]}; color: {tone[1]}; font-size: 11px; font-weight: 700; "
+            f"padding: 3px 9px; border-radius: 5px; border: 1px solid {tone[2]};"
+        )
+
+        if self.censor_enable_switch.isChecked() != enabled:
+            self.censor_enable_switch.blockSignals(True)
+            self.censor_enable_switch.setChecked(enabled)
+            self.censor_enable_switch.blockSignals(False)
+
+        self.censor_dl_btn.setEnabled(True)
+        if downloading:
+            pct, status = svc.download_progress()
+            self.censor_status_lbl.setText(f"{pct}%")
+            self.censor_status_lbl.setStyleSheet("color: #fbbf24; font-size: 11px; font-weight: 700;")
+            self.censor_dl_btn.setText("Cancel")
+            self.censor_dl_btn.setIcon(FluentIcon.CLOSE)
+            self.censor_del_btn.setEnabled(False)
+            self.censor_dl_progress.setValue(pct)
+            self.censor_dl_progress.show()
+            self.censor_dl_status_lbl.setText(f"Downloading\u2026 {status}")
+            self.censor_dl_status_lbl.show()
+        else:
+            self.censor_dl_progress.hide()
+            self.censor_dl_status_lbl.hide()
+            self.censor_dl_btn.setIcon(FluentIcon.DOWNLOAD)
+            if ready:
+                self.censor_status_lbl.setText(f"{pc.model_disk_bytes() / 1_000_000:.0f} MB on disk")
+                self.censor_status_lbl.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 700;")
+                self.censor_dl_btn.setText("Downloaded")
+                self.censor_dl_btn.setEnabled(False)
+                self.censor_del_btn.setEnabled(True)
+            else:
+                partial = pc.model_disk_bytes() > 0
+                self.censor_status_lbl.setText("Partly Downloaded" if partial else "Not Downloaded")
+                self.censor_status_lbl.setStyleSheet("color: #71717a; font-size: 11px; font-weight: 600;")
+                self.censor_dl_btn.setText("Resume" if partial else "Download")
+                self.censor_del_btn.setEnabled(partial)
+
+    def _on_censor_enabled_toggled(self, enabled: bool):
+        from ...core.photo_censor import photo_censor
+        photo_censor.set_auto_enabled(enabled)
+
+    def _on_censor_sensitivity_changed(self, idx: int):
+        from ...core.photo_censor import photo_censor
+        if 0 <= idx < len(self._censor_levels):
+            photo_censor.set_sensitivity(self._censor_levels[idx])
+
+    def _on_censor_download_clicked(self):
+        from ...core.photo_censor import photo_censor
+        if photo_censor.is_downloading():
+            photo_censor.cancel_download()
+            self.censor_dl_btn.setEnabled(False)
+            self.censor_dl_btn.setText("Cancelling\u2026")
+        else:
+            photo_censor.download_model()
+
+    def _on_censor_dl_progress(self, pct: int, status: str):
+        if hasattr(self, "censor_dl_progress"):
+            self.censor_dl_progress.setValue(pct)
+            self.censor_dl_status_lbl.setText(f"Downloading\u2026 {status}")
+            self.censor_status_lbl.setText(f"{pct}%")
+
+    def _on_censor_dl_finished(self, outcome: str, message: str):
+        from ...core import photo_censor as pc
+        self._refresh_photo_censor_state()
+        if not self.isVisible():
+            return   # the main window shows its own notice
+        if outcome == pc.DOWNLOAD_OK:
+            InfoBar.success("Auto-Censor Ready", message, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=3500)
+        elif outcome == pc.DOWNLOAD_FAILED:
+            InfoBar.error("Download Failed", message, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=6000)
+
+    def _on_censor_delete_clicked(self):
+        from ...core.photo_censor import photo_censor
+        if photo_censor.delete_model():
+            InfoBar.info(
+                "Model Removed",
+                "Auto-censor model deleted. Photos you censored by hand stay censored.",
+                parent=self, position=InfoBarPosition.TOP_RIGHT, duration=3500,
+            )
+        else:
+            InfoBar.error(
+                "Could Not Delete Model", "The model files are in use. Close other Rainy windows and try again.",
+                parent=self, position=InfoBarPosition.TOP_RIGHT, duration=5000,
+            )
+
+    def _on_open_censor_model_dir(self):
+        import sys
+        from ...core.photo_censor import MODEL_DIR
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(MODEL_DIR)
 
     def _refresh_whisper_tab_state(self):
         from ...core.vo_engine import WhisperModelManager

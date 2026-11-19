@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon
 )
 from qfluentwidgets import (
-    FluentWindow, FluentTitleBar, InfoBar, InfoBarPosition, isDarkTheme
+    FluentWindow, FluentTitleBar, InfoBar, InfoBarIcon, InfoBarPosition, PushButton, isDarkTheme
 )
 
 from .theme import ThemeManager, ThemeVariant
@@ -232,6 +232,76 @@ class MainWindow(FluentWindow):
 
         # 4. Idle pre-warm settings window and hardware encoder probe (instant 0ms opening)
         QTimer.singleShot(1000, self._idle_prewarm_services)
+
+        # 5. Photo auto-censor model: fetch once on first launch, with a cancellable notice
+        self._censor_dl_bar = None
+        from ..core.photo_censor import photo_censor
+        photo_censor.model_state_changed.connect(self._sync_censor_download_notice)
+        photo_censor.model_download_progress.connect(self._on_censor_download_progress)
+        photo_censor.model_download_finished.connect(self._on_censor_download_finished)
+        QTimer.singleShot(4000, photo_censor.maybe_auto_download)
+
+    # --- Photo auto-censor model download notice ---
+    def _sync_censor_download_notice(self):
+        """Shows a small persistent notice while the censor model downloads, wherever it was started."""
+        from ..core.photo_censor import photo_censor
+        if not photo_censor.is_downloading() or self._censor_dl_bar is not None:
+            return
+        bar = InfoBar.new(
+            InfoBarIcon.INFORMATION,
+            "Setting up automatic photo censoring",
+            "Downloading a small on-device model (about 155 MB)\u2026",
+            orient=Qt.Vertical,
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            parent=self,
+        )
+        cancel_btn = PushButton("Cancel Download", bar)
+        cancel_btn.setFixedHeight(28)
+        cancel_btn.clicked.connect(photo_censor.cancel_download)
+        bar.addWidget(cancel_btn)
+        bar.closedSignal.connect(self._on_censor_notice_closed)   # closing only hides the notice
+        self._censor_dl_bar = bar
+
+    def _on_censor_notice_closed(self):
+        self._censor_dl_bar = None
+
+    def _on_censor_download_progress(self, pct: int, status: str):
+        bar = self._censor_dl_bar
+        if bar is not None:
+            bar.content = f"Downloading a small on-device model\u2026 {pct}%  ({status})"
+            bar._adjustText()
+
+    def _on_censor_download_finished(self, outcome: str, message: str):
+        from ..core import photo_censor as pc
+        bar, self._censor_dl_bar = self._censor_dl_bar, None
+        if bar is not None:
+            try:
+                bar.closedSignal.disconnect(self._on_censor_notice_closed)
+                bar.close()
+            except Exception:
+                pass
+        where = "Preferences \u203a AI & MCP"
+        if outcome == pc.DOWNLOAD_OK:
+            InfoBar.success(
+                "Automatic photo censoring is on",
+                "Graphic photos in your scripts are now blurred until you click to view.",
+                parent=self, position=InfoBarPosition.BOTTOM_RIGHT, duration=5000,
+            )
+        elif outcome == pc.DOWNLOAD_CANCELLED:
+            if self.isVisible():
+                InfoBar.info(
+                    "Download cancelled",
+                    f"Photos will not be censored automatically. You can get the model later in {where}.",
+                    parent=self, position=InfoBarPosition.BOTTOM_RIGHT, duration=6000,
+                )
+        else:
+            InfoBar.warning(
+                "Could not download the photo censor model",
+                f"{message} It will try again next launch, or retry in {where}.",
+                parent=self, position=InfoBarPosition.BOTTOM_RIGHT, duration=8000,
+            )
 
     def _idle_prewarm_services(self):
         """Pre-warms independent background services and windows during main thread idle."""
@@ -872,21 +942,7 @@ class MainWindow(FluentWindow):
     def _on_menu_find(self):
         if self.stack.currentWidget() != self.workspace_view or not self.current_doc:
             return
-        query, ok = QInputDialog.getText(self, "Find in Script", "Search text:")
-        if ok and query:
-            browser = self.workspace_view.script_viewer.browser
-            found = browser.find(query)
-            if not found:
-                browser.moveCursor(QTextCursor.Start)
-                found = browser.find(query)
-            if not found:
-                InfoBar.warning(
-                    title="Not Found",
-                    content=f"No occurrences of '{query}' found in script.",
-                    parent=self,
-                    position=InfoBarPosition.TOP_RIGHT,
-                    duration=2500
-                )
+        self.workspace_view.script_viewer.open_find()
 
     def _on_menu_export_xml(self):
         if not self.current_doc:

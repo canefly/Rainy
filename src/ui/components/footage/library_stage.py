@@ -57,6 +57,8 @@ class FootageLibraryStage(QWidget):
             "Interlaced Only",
             "Missing / Offline",
             "Largest First",
+            "Video Only",
+            "Photos Only",
         ])
         self.filter_combo.setFixedWidth(160)
         self.filter_combo.setFixedHeight(32)
@@ -238,10 +240,12 @@ class FootageLibraryStage(QWidget):
         vfr_count = sum(
             1 for it in items
             if it.is_matched and it.matched_path and os.path.isfile(it.matched_path) and it.is_vfr
+            and not self.model.is_still(it)
         )
         interlaced_count = sum(
             1 for it in items
             if it.is_matched and it.matched_path and os.path.isfile(it.matched_path) and getattr(it, "is_interlaced", False)
+            and not self.model.is_still(it)
         )
         offline_count = sum(
             1 for it in items
@@ -274,7 +278,8 @@ class FootageLibraryStage(QWidget):
     def _on_select_vfr_clicked(self):
         self._select_items([
             it for it in self.model._all_items
-            if self.model._is_item_online(it) and (it.is_vfr or getattr(it, "is_interlaced", False))
+            if self.model._is_item_online(it) and not self.model.is_still(it)
+            and (it.is_vfr or getattr(it, "is_interlaced", False))
         ])
 
     # ------------------------------------------------------------------
@@ -334,7 +339,7 @@ class FootageLibraryStage(QWidget):
 
     def _apply_filters(self, *_):
         idx = self.filter_combo.currentIndex()
-        modes = {0: "ALL", 1: "VFR", 2: "INTERLACED", 3: "OFFLINE", 4: "LARGEST"}
+        modes = {0: "ALL", 1: "VFR", 2: "INTERLACED", 3: "OFFLINE", 4: "LARGEST", 5: "VIDEO", 6: "PHOTO"}
         mode = modes.get(idx, "ALL")
         keep = self.model.get_checked_items()
         self.model.set_filter(
@@ -364,7 +369,9 @@ class FootageLibraryStage(QWidget):
             it for it in selected
             if it.is_matched and it.matched_path and os.path.isfile(it.matched_path)
         ]
-        self.action_bar.set_selection_count(len(selected), len(online))
+        reencodable = [it for it in online if not self.model.is_still(it)]
+        single_still = len(selected) == 1 and len(online) == 1 and self.model.is_still(online[0])
+        self.action_bar.set_selection_count(len(selected), len(online), len(reencodable), single_still)
 
     def _clear_all_selections(self):
         self.select_all_cb.blockSignals(True)
@@ -407,6 +414,7 @@ class FootageLibraryStage(QWidget):
             it for it in selected
             if it.is_matched and it.matched_path and os.path.isfile(it.matched_path)
         ]
+        online = [it for it in online if not self.model.is_still(it)]  # photos can't be re-encoded
         if not online:
             return
         # Default to CFR preset if any selected clip is VFR, else custom/global settings
@@ -469,14 +477,19 @@ class FootageLibraryStage(QWidget):
 
         menu = RoundMenu(parent=self)
 
-        if online:
-            re_lbl = f"Re-encode {len(online)} Clips..." if len(online) > 1 else "Re-encode Clip..."
-            preset = "cfr" if any(it.is_vfr for it in online) else "custom"
+        videos = [it for it in online if not self.model.is_still(it)]
+        stills_skipped = len(online) - len(videos)
+        if videos:
+            re_lbl = f"Re-encode {len(videos)} Clips..." if len(videos) > 1 else "Re-encode Clip..."
+            if stills_skipped:
+                re_lbl = re_lbl.replace("...", f" (skips {stills_skipped} photo{'s' if stills_skipped != 1 else ''})...")
+            preset = "cfr" if any(it.is_vfr for it in videos) else "custom"
             re_act = Action(FluentIcon.MOVIE, re_lbl, menu)
-            re_act.triggered.connect(lambda: self.batch_transcode_requested.emit(online, preset))
+            re_act.triggered.connect(lambda: self.batch_transcode_requested.emit(videos, preset))
             menu.addAction(re_act)
-
             menu.addSeparator()
+
+        if online:
 
             rev_act = Action(FluentIcon.FOLDER, "Show in File Explorer", menu)
             rev_act.setEnabled(is_single_online)
@@ -484,7 +497,12 @@ class FootageLibraryStage(QWidget):
                 rev_act.triggered.connect(lambda: self.reveal_requested.emit(online[0].matched_path))
             menu.addAction(rev_act)
 
-            open_act = Action(FluentIcon.PLAY, "Open in Default Player", menu)
+            single_still = is_single_online and self.model.is_still(online[0])
+            open_act = Action(
+                FluentIcon.PHOTO if single_still else FluentIcon.PLAY,
+                "Open in Photo Viewer" if single_still else "Open in Default Player",
+                menu,
+            )
             open_act.setEnabled(is_single_online)
             if is_single_online:
                 open_act.triggered.connect(lambda: self._open_file_in_os(online[0].matched_path))

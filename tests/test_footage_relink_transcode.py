@@ -615,3 +615,92 @@ def test_background_click_closes_and_saves_and_shadow_is_cached(qapp, tmp_path):
     assert dlg.result() == 0  # rejected via mask click
     assert emitted == [{url: str(clip)}]
     host.close()
+
+
+def test_is_still_media_detection():
+    from src.core.footage_matcher import is_still_media
+    assert is_still_media("C:/x/IMG_8472.JPG")
+    assert is_still_media("C:/x/phone.HEIC")
+    assert is_still_media("C:/x/odd_name.bin", "mjpeg", 0.0)      # image codec, no duration
+    assert not is_still_media("C:/x/clip.mp4", "mjpeg", 0.0)       # video container wins
+    assert not is_still_media("C:/x/clip.mov", "h264", 120.0)
+    assert not is_still_media("C:/x/motion.avi_unknown", "mjpeg", 12.5)  # MJPEG video has duration
+
+
+def test_photos_are_treated_as_stills_not_one_frame_videos(qapp, tmp_path):
+    """Photos: honest format/duration, no VFR noise, not re-encodable, thumbnail tooltip on hover."""
+    from PySide6.QtGui import QImage, QColor
+    from src.ui.components.footage import stills
+
+    photo = tmp_path / "IMG_8472.JPG"
+    img = QImage(1200, 900, QImage.Format_RGB32)
+    img.fill(QColor("#336699"))
+    assert img.save(str(photo), "JPEG")
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"\x00" * 1024)
+
+    p_url, v_url = "https://example.com/IMG_8472.JPG", "https://example.com/clip.mp4"
+    it_photo = _linked_item(p_url, str(photo))
+    # What ffprobe actually reports for a JPEG: MJPEG, 25 fps, 0s (and VFR set to prove it's ignored)
+    it_photo.video_codec, it_photo.frame_rate, it_photo.duration_display = "mjpeg", 25.0, "0s"
+    it_photo.duration_seconds, it_photo.resolution, it_photo.is_vfr = 0.0, "4K", True
+    it_video = _linked_item(v_url, str(video))
+    it_video.video_codec, it_video.frame_rate, it_video.duration_display = "h264", 29.97, "1m 0s"
+
+    dlg = FootageRelinkDialog(links=[p_url, v_url], current_footage_dir="", parent=None,
+                              doc_signature="test_stills")
+    dlg.show()
+    dlg.match_items = [it_photo, it_video]
+    dlg._rebuild_cards()
+    dlg._update_stats()
+    dlg.switch_stage("library")
+    qapp.processEvents()
+    m = dlg.library_stage.model
+
+    row = next(r for r in range(m.rowCount()) if m.item_at(r) is it_photo)
+    disp = lambda col: m.data(m.index(row, col), Qt.DisplayRole)
+    assert disp(m.COL_FORMAT) == "JPEG  ·  1200×900"
+    assert disp(m.COL_DURATION) == "Still"
+    assert disp(m.COL_FLAGS) == ""                      # no VFR warning for a photo
+    assert dlg.library_stage.vfr_banner.isHidden()       # and no "VFR clips" banner
+    assert dlg.filter_combo.itemText(3) == "VFR (0)"
+
+    # Photos Only / Video Only filters
+    dlg.library_stage.filter_combo.setCurrentText("Photos Only")
+    qapp.processEvents()
+    assert [m.item_at(r) for r in range(m.rowCount())] == [it_photo]
+    dlg.library_stage.filter_combo.setCurrentText("Video Only")
+    qapp.processEvents()
+    assert [m.item_at(r) for r in range(m.rowCount())] == [it_video]
+    dlg.library_stage.filter_combo.setCurrentText("All Clips")
+    qapp.processEvents()
+
+    # Re-encode excludes photos: photo alone -> disabled; mixed -> counts videos only
+    bar = dlg.library_stage.action_bar
+    dlg.library_stage._select_items([it_photo])
+    qapp.processEvents()
+    assert not bar.reencode_btn.isEnabled()
+    dlg.library_stage._select_items([it_photo, it_video])
+    qapp.processEvents()
+    assert bar.reencode_btn.isEnabled() and bar.reencode_btn.text() == "Re-encode Clip"
+    requested = []
+    # Don't open the real (modal) Transcode dialog in a test; just record what would be queued
+    dlg.library_stage.batch_transcode_requested.disconnect(dlg._launch_batch_transcode)
+    dlg.library_stage.batch_transcode_requested.connect(lambda items, preset: requested.append(items))
+    dlg.library_stage._trigger_reencode()
+    assert requested == [[it_video]]
+
+    # Thumbnail tooltip is built lazily on first hover, then cached
+    row = next(r for r in range(m.rowCount()) if m.item_at(r) is it_photo)
+    tip = m.data(m.index(row, m.COL_NAME), Qt.ToolTipRole)
+    assert "<img" in tip
+    thumb = stills.thumbnail_path(str(photo))
+    assert thumb and os.path.isfile(thumb)
+    t = QImage(thumb)
+    assert max(t.width(), t.height()) == stills.THUMB_MAX
+
+    # Relink row: Still / no FPS / no VFR chip
+    card = next(c for c in dlg.card_widgets if c.property("match_item") is it_photo)
+    texts = [w.text() for w in card.findChildren(QLabel)]
+    assert "Still" in texts and "VFR" not in texts and "25" not in texts
+    dlg.close()
