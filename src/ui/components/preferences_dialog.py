@@ -374,6 +374,7 @@ class PreferencesWindow(FramelessWindow):
     theme_changed = Signal(object, bool) # (ThemeVariant, is_dark)
     document_opened = Signal(str)
     smpte_conforming_changed = Signal(bool)
+    mcp_bridge_toggled = Signal(bool)
 
     def __init__(self, parent=None, initial_tab: int = 0):
         super().__init__(parent)
@@ -449,7 +450,8 @@ class PreferencesWindow(FramelessWindow):
             ("Shortcuts", FluentIcon.COMMAND_PROMPT),
             ("Copyright Helper", FluentIcon.VIDEO),
             ("Cookies & Accounts", FluentIcon.GLOBE),
-            ("AI & MCP", FluentIcon.ROBOT),
+            ("AI Models", FluentIcon.ROBOT),
+            ("MCP", FluentIcon.CONNECT),
             ("About & Updates", FluentIcon.INFO),
         ]
 
@@ -479,6 +481,7 @@ class PreferencesWindow(FramelessWindow):
         self.stack.addWidget(self._wrap_in_scroll(self._build_copyright_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_cookies_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_ai_mcp_tab()))
+        self.stack.addWidget(self._wrap_in_scroll(self._build_mcp_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_about_tab()))
 
         c_layout.addWidget(self.stack)
@@ -535,11 +538,13 @@ class PreferencesWindow(FramelessWindow):
             "auth": 7,
             "accounts": 7,
             "ai": 8,
-            "mcp": 8,
+            "models": 8,
             "whisper": 8,
-            "about": 9,
-            "updates": 9,
-            "license": 9,
+            "mcp": 9,
+            "bridge": 9,
+            "about": 10,
+            "updates": 10,
+            "license": 10,
         }
         if isinstance(key_or_index, str):
             target = tab_map.get(key_or_index.lower().strip(), 0)
@@ -566,8 +571,9 @@ class PreferencesWindow(FramelessWindow):
             (["shortcut", "shortcuts", "keyboard", "key", "timecode", "double click", "space", "meta", "drag"], 5),
             (["copyright", "helper", "broadcast", "pts", "smpte", "strike", "demonetization", "license", "licensing", "audio-visual"], 6),
             (["cookie", "cookies", "auth", "session", "firefox", "profile", "cookies.txt", "netscape", "paste", "restricted", "drive", "youtube"], 7),
-            (["ai", "mcp", "whisper", "faster-whisper", "model", "models", "voiceover", "vo", "transcribe", "antigravity", "cuda"], 8),
-            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 9),
+            (["ai", "whisper", "faster-whisper", "model", "models", "voiceover", "vo", "transcribe", "cuda", "censor", "photo"], 8),
+            (["mcp", "bridge", "antigravity", "claude", "codex", "cursor", "gemini", "pipe", "activity", "ai app"], 9),
+            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 10),
         ]
 
         for keywords, tab_idx in routes:
@@ -1556,6 +1562,9 @@ class PreferencesWindow(FramelessWindow):
         # Update home tab preset label
         if hasattr(self, "r1_sub") and self.r1_sub:
             self.r1_sub.setText(f"Current preset: {ThemeManager.current_variant.value.title()}")
+
+        if getattr(self, "mcp_page", None) is not None:
+            self.mcp_page.apply_theme()
 
         self._apply_caption_button_theme()
         self._update_orb_ui_state(ThemeManager.orb_glow_intensity)
@@ -3113,21 +3122,19 @@ class PreferencesWindow(FramelessWindow):
                 }}
             """)
 
-    # --- 6. AI & MCP Tab (Faster-Whisper Engine, Model Download Manager & Live GUI MCP Bridge) ---
+    # --- 6. AI Models Tab (Faster-Whisper Engine, Model Download Manager, Photo Censoring) ---
     def _build_ai_mcp_tab(self) -> QWidget:
         from ...core.vo_engine import (
             WhisperModelManager, ModelDownloadWorker, EngineUpdateWorker
         )
-        from ...core.gui_ipc_server import PIPE_NAME
-
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
         layout.addLayout(self._create_tab_header(
-            "AI & MCP Integration",
-            "Configure the built-in Faster-Whisper voiceover transcription engine, manage local speech models, and control the Antigravity Live GUI MCP Bridge.",
+            "AI Models",
+            "Configure the built-in Faster-Whisper voiceover transcription engine, manage local speech models, and the on-device photo censoring model. AI apps connect under MCP.",
             "VOICEOVER ENGINE"
         ))
 
@@ -3293,54 +3300,6 @@ class PreferencesWindow(FramelessWindow):
         layout.addWidget(models_card)
         layout.addWidget(self._build_photo_censor_card())
 
-        # --- Card 3: Antigravity Live GUI MCP Bridge ---
-        mcp_card = PrefCardFrame()
-        mcp_layout = QVBoxLayout(mcp_card)
-        mcp_layout.setContentsMargins(16, 14, 16, 14)
-        mcp_layout.setSpacing(8)
-
-        mcp_top = QHBoxLayout()
-        mcp_title = QLabel("Antigravity Live GUI MCP Bridge")
-        mcp_title.setObjectName("PrefSectionTitle")
-        mcp_top.addWidget(mcp_title)
-
-        self.mcp_pipe_badge = QLabel(f"Pipe: \\\\.\\pipe\\{PIPE_NAME}", mcp_card)
-        self.mcp_pipe_badge.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.14); color: #34d399; "
-            "font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 5px; "
-            "border: 1px solid rgba(16, 185, 129, 0.35); font-family: 'Cascadia Mono', 'Consolas', monospace;"
-        )
-        mcp_top.addWidget(self.mcp_pipe_badge)
-        mcp_top.addStretch(1)
-
-        self.mcp_enable_switch = SwitchButton(mcp_card)
-        self.mcp_enable_switch.setOnText("Enabled")
-        self.mcp_enable_switch.setOffText("Disabled")
-        mcp_enabled = db.get_setting("mcp_bridge_enabled", "true") != "false"
-        self.mcp_enable_switch.setChecked(mcp_enabled)
-        self.mcp_enable_switch.checkedChanged.connect(self._on_mcp_bridge_toggled)
-        mcp_top.addWidget(self.mcp_enable_switch)
-        mcp_layout.addLayout(mcp_top)
-
-        mcp_desc = QLabel(
-            "Routes Antigravity AI tool calls directly into the running Rainy GUI thread. "
-            "Simulates native A-Roll card checkbox locks, highlights modified/ad-libbed VO lines on the script, "
-            "and triggers Multi-Track XML export (V1/A2 = A-Roll, A1 = Voiceover) without external database writes."
-        )
-        mcp_desc.setObjectName("PrefBodyText")
-        mcp_desc.setWordWrap(True)
-        mcp_layout.addWidget(mcp_desc)
-
-        mcp_btn_row = QHBoxLayout()
-        copy_mcp_btn = PushButton("Copy Antigravity MCP Config JSON", mcp_card)
-        copy_mcp_btn.setIcon(FluentIcon.COPY)
-        copy_mcp_btn.setFixedHeight(30)
-        copy_mcp_btn.clicked.connect(self._on_copy_mcp_config_json)
-        mcp_btn_row.addWidget(copy_mcp_btn)
-        mcp_btn_row.addStretch(1)
-        mcp_layout.addLayout(mcp_btn_row)
-
-        layout.addWidget(mcp_card)
         layout.addStretch(1)
 
         self._refresh_whisper_tab_state()
@@ -3690,32 +3649,19 @@ class PreferencesWindow(FramelessWindow):
         else:
             InfoBar.error("Update Error", msg, parent=self, position=InfoBarPosition.TOP_RIGHT, duration=5000)
 
-    def _on_mcp_bridge_toggled(self, enabled: bool):
-        db.set_setting("mcp_bridge_enabled", "true" if enabled else "false")
-        parent_win = self.parent()
-        if parent_win and hasattr(parent_win, "set_mcp_bridge_enabled"):
-            parent_win.set_mcp_bridge_enabled(enabled)
-
-    def _on_copy_mcp_config_json(self):
-        import sys
-        import json
-        mcp_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "core", "mcp_server.py"))
-        cfg = {
-            "mcpServers": {
-                "knot": {
-                    "command": sys.executable,
-                    "args": [mcp_script]
-                }
-            }
-        }
-        safe_copy_to_clipboard(json.dumps(cfg, indent=2))
-        InfoBar.success(
-            "MCP Config Copied",
-            "Copied Rainy MCP configuration JSON to clipboard.",
-            parent=self,
-            position=InfoBarPosition.TOP_RIGHT,
-            duration=3000
+    # --- 7. MCP Tab (live bridge, auto-install into AI apps, live activity log) ---
+    def _build_mcp_tab(self) -> QWidget:
+        from .mcp_settings import McpSettingsPage
+        self.mcp_page = McpSettingsPage(
+            PrefCardFrame,
+            self._create_tab_header(
+                "MCP",
+                "Connect AI apps (Claude, Codex, Antigravity, Cursor...) to this Rainy and watch what they do, live.",
+                "LIVE BRIDGE",
+            ),
         )
+        self.mcp_page.bridge_toggled.connect(self.mcp_bridge_toggled)
+        return self.mcp_page
 
     # --- 7. About & License Tab ---
     def _build_about_tab(self) -> QWidget:

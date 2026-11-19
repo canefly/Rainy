@@ -282,7 +282,7 @@ class MainWindow(FluentWindow):
                 bar.close()
             except Exception:
                 pass
-        where = "Preferences \u203a AI & MCP"
+        where = "Preferences \u203a AI Models"
         if outcome == pc.DOWNLOAD_OK:
             InfoBar.success(
                 "Automatic photo censoring is on",
@@ -315,6 +315,7 @@ class MainWindow(FluentWindow):
                 self.pref_window.theme_changed.connect(self.apply_palette)
                 self.pref_window.document_opened.connect(self.load_docx_file)
                 self.pref_window.smpte_conforming_changed.connect(self._on_smpte_conforming_changed)
+                self.pref_window.mcp_bridge_toggled.connect(self.set_mcp_bridge_enabled)
         except Exception as e:
             logger.warning(f"Could not pre-warm preferences dialog: {e}")
 
@@ -538,6 +539,7 @@ class MainWindow(FluentWindow):
             self.pref_window.theme_changed.connect(self.apply_palette)
             self.pref_window.document_opened.connect(self.load_docx_file)
             self.pref_window.smpte_conforming_changed.connect(self._on_smpte_conforming_changed)
+            self.pref_window.mcp_bridge_toggled.connect(self.set_mcp_bridge_enabled)
         else:
             self.pref_window.switch_tab(initial_tab)
 

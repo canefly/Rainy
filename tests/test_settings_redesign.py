@@ -36,7 +36,7 @@ def test_settings_window_initialization(qapp):
     assert win.user_profile.sub_lbl.text() == "canefly@outlook.ph"
 
     # Nav list & categories
-    assert win.nav_list.count() == 10
+    assert win.nav_list.count() == 11
     categories = [win._categories[i][0] for i in range(win.nav_list.count())]
     assert "Home" in categories
     assert "Data Vault" in categories
@@ -46,7 +46,8 @@ def test_settings_window_initialization(qapp):
     assert "Shortcuts" in categories
     assert "Copyright Helper" in categories
     assert "Cookies & Accounts" in categories
-    assert "AI & MCP" in categories
+    assert "AI Models" in categories
+    assert "MCP" in categories
     assert "About & Updates" in categories
 
     win.close()
@@ -90,9 +91,13 @@ def test_settings_tab_switching_and_routing(qapp):
     assert win.nav_list.currentRow() == 8
     assert win.stack.currentIndex() == 8
 
-    win.switch_tab("about")
+    win.switch_tab("mcp")
     assert win.nav_list.currentRow() == 9
     assert win.stack.currentIndex() == 9
+
+    win.switch_tab("about")
+    assert win.nav_list.currentRow() == 10
+    assert win.stack.currentIndex() == 10
 
     win.switch_tab("home")
     assert win.nav_list.currentRow() == 0

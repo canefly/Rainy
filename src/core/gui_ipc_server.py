@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from typing import Optional, Dict, Any, Callable
 from PySide6.QtCore import QObject, Signal, QByteArray, QEventLoop, QTimer, QCoreApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -46,6 +47,8 @@ class GuiIpcServer(QObject):
         QLocalServer.removeServer(pipe_name)
         ok = self._server.listen(pipe_name)
         self._is_running = ok
+        from .mcp_activity import mcp_activity
+        mcp_activity.set_bridge_running(ok)
         if ok:
             logger.info("Rainy Live GUI MCP Pipe listening on '%s'", self._server.fullServerName())
         else:
@@ -63,6 +66,8 @@ class GuiIpcServer(QObject):
         if self._server.isListening():
             self._server.close()
         self._is_running = False
+        from .mcp_activity import mcp_activity
+        mcp_activity.set_bridge_running(False)
 
     def _on_new_connection(self):
         while self._server.hasPendingConnections():
@@ -103,16 +108,32 @@ class GuiIpcServer(QObject):
         action = req.get("action", "")
         params = req.get("params") or {}
         req_id = req.get("id")
+        client = req.get("client") if isinstance(req.get("client"), dict) else {}
+
+        from .mcp_activity import HELLO_ACTION, mcp_activity
+        if action == HELLO_ACTION:
+            label = mcp_activity.note_client(client, connected=True)
+            return {"id": req_id, "ok": True, "result": {"pong": True, "client": label}}
 
         if not self._handler_callback:
             return {"id": req_id, "ok": False, "error": "GUI handler not attached."}
 
+        t0 = time.perf_counter()
         try:
             result = self._handler_callback(action, params)
-            return {"id": req_id, "ok": True, "result": result}
+            response = {"id": req_id, "ok": True, "result": result}
         except Exception as e:
             logger.error("GUI handler error for action '%s': %s", action, e, exc_info=True)
-            return {"id": req_id, "ok": False, "error": str(e)}
+            response = {"id": req_id, "ok": False, "error": str(e)}
+        try:
+            mcp_activity.record_call(
+                action, params, client,
+                ok=response["ok"], result=response.get("result"), error=response.get("error", ""),
+                duration_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+        except Exception as e:  # the log must never break a call
+            logger.warning("MCP activity log failed for '%s': %s", action, e)
+        return response
 
 
 def send_gui_ipc_request(
@@ -120,6 +141,7 @@ def send_gui_ipc_request(
     params: Optional[Dict[str, Any]] = None,
     pipe_name: str = PIPE_NAME,
     timeout_ms: int = 8000,
+    client: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Client helper used by mcp_server.py and unit tests to send a command to the
@@ -149,7 +171,7 @@ def send_gui_ipc_request(
     if app:
         app.processEvents()
 
-    payload = json.dumps({"action": action, "params": params or {}}, ensure_ascii=False) + "\n"
+    payload = json.dumps({"action": action, "params": params or {}, "client": client or {}}, ensure_ascii=False) + "\n"
     sock.write(QByteArray(payload.encode("utf-8")))
     sock.flush()
     sock.waitForBytesWritten(200)

@@ -9,7 +9,13 @@ _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT_DIR not in sys.path:
     sys.path.insert(0, _ROOT_DIR)
 
-PIPE_NAME = "knot-native-mcp"
+# KNOT_MCP_PIPE lets tests (and Settings > MCP > Test connection) aim at a private pipe.
+PIPE_NAME = os.environ.get("KNOT_MCP_PIPE") or "knot-native-mcp"
+HELLO_ACTION = "__hello"
+
+# clientInfo from the AI app's `initialize` ({"name": "claude-code", "version": ...}).
+# Sent with every pipe request so Settings > MCP can say who made each call.
+_CLIENT_INFO: Dict[str, Any] = {}
 
 
 def _send_pipe_ipc_request(
@@ -18,7 +24,7 @@ def _send_pipe_ipc_request(
     pipe_name: str = PIPE_NAME,
     timeout_ms: int = 8000,
 ) -> Dict[str, Any]:
-    """
+    r"""
     Lightweight cross-process IPC client for communicating with the running
     Rainy GUI over Windows Named Pipe (\\.\pipe\<pipe_name>).
     Falls back to Qt QLocalSocket when invoked inside an in-process Qt unit test.
@@ -26,10 +32,10 @@ def _send_pipe_ipc_request(
     qt_core = sys.modules.get("PySide6.QtCore")
     if qt_core is not None and qt_core.QCoreApplication.instance() is not None:
         from src.core.gui_ipc_server import send_gui_ipc_request
-        return send_gui_ipc_request(action, params, pipe_name=pipe_name, timeout_ms=timeout_ms)
+        return send_gui_ipc_request(action, params, pipe_name=pipe_name, timeout_ms=timeout_ms, client=_CLIENT_INFO)
 
     pipe_path = rf"\\.\pipe\{pipe_name}" if os.name == "nt" and not pipe_name.startswith(r"\\.\pipe\\") else pipe_name
-    payload = (json.dumps({"action": action, "params": params or {}}, ensure_ascii=False) + "\n").encode("utf-8")
+    payload = (json.dumps({"action": action, "params": params or {}, "client": _CLIENT_INFO}, ensure_ascii=False) + "\n").encode("utf-8")
 
     deadline = time.monotonic() + (min(2000, timeout_ms) / 1000.0)
     pipe_file = None
@@ -443,12 +449,36 @@ def load_instructions() -> str:
     return _FALLBACK_INSTRUCTIONS
 
 
+def _announce_client(pipe_name: str = PIPE_NAME):
+    """Best effort: tell a running Rainy which AI app just connected (Settings > MCP).
+
+    Runs in a background thread so a closed Rainy never slows the handshake down.
+    Skipped inside an in-process Qt app (unit tests), where the pipe client needs the GUI thread.
+    """
+    qt_core = sys.modules.get("PySide6.QtCore")
+    if qt_core is not None and qt_core.QCoreApplication.instance() is not None:
+        return
+    import threading
+
+    def _hello():
+        try:
+            _send_pipe_ipc_request(HELLO_ACTION, {}, pipe_name=pipe_name, timeout_ms=1500)
+        except Exception:
+            pass
+
+    threading.Thread(target=_hello, name="knot-mcp-hello", daemon=True).start()
+
+
 def handle_mcp_request(req: Dict[str, Any], pipe_name: str = PIPE_NAME) -> Optional[Dict[str, Any]]:
     method = req.get("method", "")
     req_id = req.get("id")
     params = req.get("params") or {}
 
     if method == "initialize":
+        info = params.get("clientInfo")
+        if isinstance(info, dict):
+            _CLIENT_INFO.clear()
+            _CLIENT_INFO.update({"name": str(info.get("name") or ""), "version": str(info.get("version") or "")})
         instructions_text = load_instructions()
         return {
             "jsonrpc": "2.0",
@@ -469,6 +499,8 @@ def handle_mcp_request(req: Dict[str, Any], pipe_name: str = PIPE_NAME) -> Optio
         }
 
     if method.startswith("notifications/"):
+        if method == "notifications/initialized":
+            _announce_client(pipe_name)
         return None
 
     if method == "resources/list":
@@ -546,10 +578,18 @@ def handle_mcp_request(req: Dict[str, Any], pipe_name: str = PIPE_NAME) -> Optio
 
 def run_stdio_mcp_server():
     """Main loop for JSON-RPC 2.0 over stdin/stdout."""
+    # MCP stdio is UTF-8. On Windows a piped stdout otherwise uses the console code page
+    # (cp1252), and the first emoji in the SOP would crash `initialize`.
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     for line in sys.stdin:
         line_str = line.strip()
         if not line_str:
             continue
+        req = None
         try:
             req = json.loads(line_str)
             resp = handle_mcp_request(req)
@@ -557,10 +597,12 @@ def run_stdio_mcp_server():
                 sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
         except Exception as e:
+            parsed = isinstance(req, dict)
             err_resp = {
                 "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": f"Parse error: {e}"},
+                "id": req.get("id") if parsed else None,
+                "error": {"code": -32603 if parsed else -32700,
+                          "message": f"{'Internal error' if parsed else 'Parse error'}: {e}"},
             }
             sys.stdout.write(json.dumps(err_resp) + "\n")
             sys.stdout.flush()

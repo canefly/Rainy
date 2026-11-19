@@ -725,7 +725,7 @@ class VOBatchTranscribeWorker(QRunnable):
             from faster_whisper import WhisperModel
         except ImportError:
             self.signals.error.emit(
-                "faster-whisper is not installed yet. Open Settings -> AI & MCP to install or update the engine."
+                "faster-whisper is not installed yet. Open Settings -> AI Models to install or update the engine."
             )
             return
 
