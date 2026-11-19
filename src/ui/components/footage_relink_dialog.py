@@ -18,11 +18,12 @@ from qfluentwidgets import (
 from ..theme import ThemeManager
 from ...core.database import db
 from ...core.parser import normalize_link
-from ...core.footage_matcher import FootageMatcher, FootageMatchItem, FootageScanWorker
+from ...core.footage_matcher import FootageMatcher, FootageMatchItem, FootageScanWorker, is_still_item
 from ...core.unfurl_engine import format_bytes_display
 from ...core.render_queue import render_queue, RenderJob
 from .widgets import safe_copy_to_clipboard, StatusDot, GpuSmoothScroller, MiddleClickAutoScroller
-from .footage import QueueStrip, FootageLibraryStage, TranscribeStage
+from .footage import QueueStrip, FootageLibraryStage, TranscribeStage, ReviewStage
+from .footage.stills import thumbnail_tooltip_html
 
 
 def _elide_middle_path(path: str, max_chars: int = 62) -> str:
@@ -218,7 +219,7 @@ class FootageRelinkDialog(MessageBoxBase):
             self.stage_tabs.slideAni.setValue(endValue)
             self.stage_tabs.update()
         self.stage_tabs.slideAni.startAnimation = _instant_stage_tab_slide
-        for key, text in (("relink", "Relink"), ("library", "Library"), ("transcribe", "Transcribe")):
+        for key, text in (("relink", "Relink"), ("library", "Library"), ("transcribe", "Transcribe"), ("review", "Review")):
             # PivotItem.itemClicked emits a bool; swallow it so it can't overwrite the route key
             self.stage_tabs.addItem(
                 routeKey=key, text=text, onClick=lambda *_, k=key: self.switch_stage(k)
@@ -407,6 +408,14 @@ class FootageRelinkDialog(MessageBoxBase):
         self.transcribe_stage.transcription_completed.connect(self._on_vo_stage_completed)
         self.stage_stack.addWidget(self.transcribe_stage)
 
+        # --- Stage D: VO Review (deterministic flags: takes, false starts, wordless sounds) ---
+        self.vo_review_open = 0
+        self.review_stage = ReviewStage(parent=self.stage_stack)
+        self.review_stage.open_count_changed.connect(self._on_review_open_count)
+        self.review_stage.timing_changed.connect(self._on_review_timing_changed)
+        self.review_stage.open_transcribe_requested.connect(lambda: self.switch_stage("transcribe"))
+        self.stage_stack.addWidget(self.review_stage)
+
         self.content_layout.addLayout(stage_wrap, 1)
 
         # =====================================================================
@@ -417,6 +426,8 @@ class FootageRelinkDialog(MessageBoxBase):
         self.viewLayout.addWidget(self.queue_strip)  # edge to edge, below the inset content
         self.vo_header_stat_lbl = self.queue_strip.vo_lbl
         self._refresh_vo_header_status()
+        if self.vo_transcript_path and os.path.isfile(self.vo_transcript_path):
+            self.review_stage.load(self.vo_transcript_path)  # waveform loads in the background
 
         # Connect global render queue completion to auto-reprobe items in place
         render_queue.job_finished.connect(self._on_queue_job_finished)
@@ -451,6 +462,10 @@ class FootageRelinkDialog(MessageBoxBase):
         elif stage_key == "transcribe":
             self.stage_stack.setCurrentWidget(self.transcribe_stage)
             self.stage_tabs.setCurrentItem("transcribe")
+        elif stage_key == "review":
+            self.stage_stack.setCurrentWidget(self.review_stage)
+            self.stage_tabs.setCurrentItem("review")
+            self.review_stage.setFocus()
         else:
             self.stage_stack.setCurrentWidget(self.relink_page)
             self.stage_tabs.setCurrentItem("relink")
@@ -461,7 +476,7 @@ class FootageRelinkDialog(MessageBoxBase):
             pct = status_text.split(":", 1)[-1].strip()
             self.queue_strip.set_vo_status("Voiceover", f"transcribing {pct}", "busy")
         elif "Ready" in status_text:
-            self.queue_strip.set_vo_status("Voiceover", "ready", "ok")
+            self._refresh_vo_header_status()
         elif "Error" in status_text:
             self.queue_strip.set_vo_status("Voiceover", "failed", "bad")
 
@@ -471,7 +486,24 @@ class FootageRelinkDialog(MessageBoxBase):
         self.vo_segments = list(segments)
         if vo_files:
             self.vo_file_path = vo_files[0]
+        self.review_stage.load(json_path)
         self._refresh_vo_header_status()
+        self.vo_linked.emit(self.vo_file_path, self.vo_segments)
+        self.vo_transcript_ready.emit(self.vo_transcript_path, self.vo_files, self.vo_segments)
+
+    def _on_review_open_count(self, n: int):
+        self.vo_review_open = int(n)
+        item = self.stage_tabs.items.get("review")
+        if item is not None:
+            item.setText(f"Review · {n}" if n else "Review")
+            item.adjustSize()
+        self._refresh_vo_header_status()
+
+    def _on_review_timing_changed(self, json_path: str, segments: list):
+        # The Review tab re-snapped the VO (silence threshold changed or v1 transcript upgraded).
+        self.vo_transcript_path = json_path
+        self.vo_segments = list(segments)
+        self.transcribe_stage.segments = list(segments)
         self.vo_linked.emit(self.vo_file_path, self.vo_segments)
         self.vo_transcript_ready.emit(self.vo_transcript_path, self.vo_files, self.vo_segments)
 
@@ -539,6 +571,11 @@ class FootageRelinkDialog(MessageBoxBase):
     def eventFilter(self, obj, e):
         if obj is getattr(self, "dir_edit", None) and e.type() == QEvent.Resize:
             self._refresh_dir_display()
+        elif e.type() == QEvent.ToolTip and isinstance(obj, QLabel) and obj.property("still_path"):
+            # First hover on a photo row: swap in the thumbnail tooltip once, then let Qt show it
+            path = obj.property("still_path")
+            obj.setProperty("still_path", None)
+            obj.setToolTip(thumbnail_tooltip_html(path, obj.toolTip()))
         return super().eventFilter(obj, e)
 
     def _refresh_vo_header_status(self):
@@ -546,7 +583,14 @@ class FootageRelinkDialog(MessageBoxBase):
             return
         if self.vo_file_path and os.path.isfile(self.vo_file_path):
             if self.vo_segments:
-                self.queue_strip.set_vo_status("Voiceover", "ready", "ok")
+                n = getattr(self, "vo_review_open", 0)
+                if n:
+                    self.queue_strip.set_vo_status(
+                        "Voiceover", f"ready · {n} to review", "warn",
+                        detail=f"{n} VO item{'s' if n != 1 else ''} not reviewed yet. Skipped items keep their waveform; silence is always deleted.",
+                    )
+                else:
+                    self.queue_strip.set_vo_status("Voiceover", "ready", "ok")
             else:
                 self.queue_strip.set_vo_status("Voiceover", "not transcribed", "warn")
         else:
@@ -630,6 +674,7 @@ class FootageRelinkDialog(MessageBoxBase):
         vfr_count = sum(
             1 for item in self.match_items
             if item.is_matched and item.matched_path and os.path.isfile(item.matched_path) and item.is_vfr
+            and not is_still_item(item)
         )
 
         local_bytes = 0
@@ -757,6 +802,7 @@ class FootageRelinkDialog(MessageBoxBase):
             c_layout.setSpacing(12)
 
             is_online = bool(item.is_matched and item.matched_path and os.path.isfile(item.matched_path))
+            still = is_still_item(item)
 
             # 1. Status dot (green linked / amber missing)
             dot = QLabel(card)
@@ -785,8 +831,14 @@ class FootageRelinkDialog(MessageBoxBase):
                 else:
                     tip = f"Not found in the footage folder. Double-click to locate.\nSource: {item.url}"
 
+            if is_online and still:
+                tip += "\nDouble-click to open in your photo viewer"
             title_lbl = QLabel(primary_text, card)
             title_lbl.setToolTip(tip)
+            if is_online and still:
+                # Thumbnail is built on first hover only (see eventFilter), never during row build
+                title_lbl.setProperty("still_path", item.matched_path)
+                title_lbl.installEventFilter(self)
             title_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             title_lbl.setMinimumWidth(60)
             title_lbl.setStyleSheet(
@@ -796,13 +848,13 @@ class FootageRelinkDialog(MessageBoxBase):
 
             if not is_online:
                 name_box.addWidget(self._chip("OFFLINE" if item.matched_path else "MISSING", card, "warn", tip))
-            if is_online and item.is_vfr:
+            if is_online and item.is_vfr and not still:
                 name_box.addWidget(self._chip(
                     "VFR", card, "warn",
                     f"Variable frame rate ({item.frame_rate:.2f} fps avg). Timecode will drift in Premiere "
                     "without a CFR transcode."
                 ))
-            if is_online and getattr(item, "is_interlaced", False):
+            if is_online and getattr(item, "is_interlaced", False) and not still:
                 name_box.addWidget(self._chip(
                     "INTERLACED", card, "warn",
                     f"Interlaced ({getattr(item, 'field_order', 'interlaced').upper()}). "
@@ -832,15 +884,21 @@ class FootageRelinkDialog(MessageBoxBase):
             folder_lbl = _cell(folder_txt, self._REL_COL_FOLDER)
             folder_lbl.setToolTip(os.path.dirname(item.matched_path) if item.matched_path else "")
             c_layout.addWidget(folder_lbl)
-            c_layout.addWidget(_cell(item.duration_display or "—", self._REL_COL_DUR, Qt.AlignRight))
+            c_layout.addWidget(_cell("Still" if still else (item.duration_display or "—"), self._REL_COL_DUR, Qt.AlignRight))
             c_layout.addWidget(_cell(item.file_size_display or "—", self._REL_COL_SIZE, Qt.AlignRight, text_col))
-            if item.frame_rate and item.frame_rate > 0:
+            if still:
+                fps_txt = "—"  # ffprobe reports a nominal 25 fps for stills; it means nothing
+            elif item.frame_rate and item.frame_rate > 0:
                 fps_txt = f"{item.frame_rate:.2f}" if item.is_vfr else f"{item.frame_rate:.3f}".rstrip("0").rstrip(".")
             else:
                 fps_txt = "—"
             c_layout.addWidget(_cell(fps_txt, self._REL_COL_FPS, Qt.AlignRight))
 
-            card.mouseDoubleClickEvent = lambda e, it=item: self._on_locate_file(it)
+            if is_online and still:
+                # Linked photo: open it in the default photo viewer (Locate stays in the right-click menu)
+                card.mouseDoubleClickEvent = lambda e, p=item.matched_path: self.library_stage._open_file_in_os(p)
+            else:
+                card.mouseDoubleClickEvent = lambda e, it=item: self._on_locate_file(it)
             card.setContextMenuPolicy(Qt.CustomContextMenu)
             card.customContextMenuRequested.connect(
                 lambda pos, it=item, c=card: self._show_card_context_menu(c.mapToGlobal(pos), it)
@@ -887,10 +945,15 @@ class FootageRelinkDialog(MessageBoxBase):
 
         if item.is_matched and item.matched_path and os.path.isfile(item.matched_path):
             menu.addSeparator()
-            preset = "cfr" if item.is_vfr else "custom"
-            tc_act = Action(FluentIcon.MOVIE, "Re-encode Clip...", menu)
-            tc_act.triggered.connect(lambda: self._launch_transcode(item, preset_mode=preset))
-            menu.addAction(tc_act)
+            if is_still_item(item):
+                ph_act = Action(FluentIcon.PHOTO, "Open in Photo Viewer", menu)
+                ph_act.triggered.connect(lambda: self.library_stage._open_file_in_os(item.matched_path))
+                menu.addAction(ph_act)
+            else:
+                preset = "cfr" if item.is_vfr else "custom"
+                tc_act = Action(FluentIcon.MOVIE, "Re-encode Clip...", menu)
+                tc_act.triggered.connect(lambda: self._launch_transcode(item, preset_mode=preset))
+                menu.addAction(tc_act)
 
         menu.addSeparator()
 
@@ -975,7 +1038,7 @@ class FootageRelinkDialog(MessageBoxBase):
     def _launch_batch_transcode(self, items: List[FootageMatchItem], preset_mode: str = "custom"):
         paths = [
             it.matched_path for it in items
-            if it and it.matched_path and os.path.isfile(it.matched_path)
+            if it and it.matched_path and os.path.isfile(it.matched_path) and not is_still_item(it)
         ]
         if not paths:
             return
@@ -1215,6 +1278,11 @@ class FootageRelinkDialog(MessageBoxBase):
         if hasattr(self, "transcribe_stage") and self.transcribe_stage:
             try:
                 self.transcribe_stage.cleanup()
+            except Exception:
+                pass
+        if hasattr(self, "review_stage") and self.review_stage:
+            try:
+                self.review_stage.cleanup()  # flushes pending review decisions, stops preview audio
             except Exception:
                 pass
         import gc

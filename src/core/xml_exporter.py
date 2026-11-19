@@ -341,11 +341,18 @@ def build_default_assembly_segments_from_locks(
     Constructs a linear list of NARRATION_PACK and AROLL_CLIP segments from the
     VO locks stored on doc_state.items and doc_state.vo_segments, accurately conforming
     and slicing narration across multi-part VO files.
+
+    With a waveform-snapped transcript (version 2) the narration is the VO clips, butted
+    together (all silence deleted), and each lock's cut/resume time is snapped onto a
+    real gap or breath point so A-roll never splits a word. Older transcripts keep the
+    continuous narration ranges.
     """
     linked_map = linked_footage or {}
     exact_fps, nominal_base, _, _ = analyze_framerate(fps)
 
+    from .vo_assembly import cut_distance, load_cut_model, narration_clips, snap_cut, snap_resume
     from .vo_engine import get_vo_manifest, slice_narration_pack_across_parts
+    model = load_cut_model(doc_state)
     vo_manifest = get_vo_manifest(doc_state)
     files_manifest = vo_manifest.get("files", [])
     vo_total_sec = float(vo_manifest.get("total_duration_sec", 0.0))
@@ -366,13 +373,29 @@ def build_default_assembly_segments_from_locks(
     cursor_sec = 0.0
     seg_idx = 1
 
+    def _narration(a: float, b: float, **meta) -> List[Dict[str, Any]]:
+        if model is not None:
+            return narration_clips(model, a, b, **meta)
+        return slice_narration_pack_across_parts(a, b, files_manifest=files_manifest, **meta)
+
     for item in locked_items:
-        cut_sec = max(cursor_sec, float(item.vo_cut_after_sec or cursor_sec))
+        requested_cut = float(item.vo_cut_after_sec or cursor_sec)
+        cut_kind = ""
+        cut_shift = 0.0
+        if model is not None:
+            # Consecutive cards in one gap snap to the same spot and play back to back.
+            spot = snap_cut(requested_cut, model.points)
+            cut_kind = spot["kind"]
+            cut_shift = cut_distance(requested_cut, spot)
+            cut_sec = max(cursor_sec, spot["cut_after_sec"])
+            snapped_resume = max(cut_sec, spot["resume_sec"])
+        else:
+            cut_sec = max(cursor_sec, requested_cut)
+            snapped_resume = cut_sec
         if cut_sec - cursor_sec > 0.04:
-            pack_slices = slice_narration_pack_across_parts(
+            pack_slices = _narration(
                 cursor_sec,
                 cut_sec,
-                files_manifest=files_manifest,
                 has_adlib=bool(getattr(item, "vo_has_adlib", False)),
                 adlib_note=getattr(item, "vo_adlib_note", ""),
                 lead_in_text=getattr(item, "vo_lead_in_text", ""),
@@ -407,17 +430,30 @@ def build_default_assembly_segments_from_locks(
             "out_frame": out_frame,
             "duration_frames": dur_frames,
             "matched_footage_path": local_matched,
+            "vo_cut_requested_sec": round(requested_cut, 3),
+            "vo_cut_sec": round(cut_sec, 3),
+            "vo_cut_kind": cut_kind,
+            "vo_cut_shift_sec": round(cut_shift, 3),
         })
         seg_idx += 1
 
         resume_sec = getattr(item, "vo_resume_sec", None)
-        cursor_sec = float(resume_sec) if (resume_sec is not None and float(resume_sec) >= cut_sec) else cut_sec
+        if model is not None:
+            # A resume past the gap means the AI skips VO there (e.g. a retake): snap it too.
+            if resume_sec is not None and float(resume_sec) > snapped_resume + 0.05:
+                cursor_sec = snap_resume(float(resume_sec), model.points, snapped_resume)
+            else:
+                cursor_sec = snapped_resume
+            segments[-1]["vo_resume_sec"] = round(cursor_sec, 3)
+        else:
+            cursor_sec = float(resume_sec) if (resume_sec is not None and float(resume_sec) >= cut_sec) else cut_sec
 
+    if model is not None:
+        vo_total_sec = max(vo_total_sec, model.total_sec)
     if vo_total_sec > cursor_sec + 0.05:
-        pack_slices = slice_narration_pack_across_parts(
+        pack_slices = _narration(
             cursor_sec,
             vo_total_sec,
-            files_manifest=files_manifest,
             has_adlib=False,
             adlib_note="",
             lead_in_text="Outro Narration",
@@ -437,6 +473,7 @@ def generate_assembled_fcp_xml(
     linked_footage: Optional[Dict[str, str]] = None,
     fps: float = 23.976,
     include_clip_markers: bool = False,
+    report: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Generates a Multi-Track Final Cut Pro 7 XML (xmeml v4) rough-cut assembly for Premiere Pro:
@@ -450,9 +487,11 @@ def generate_assembled_fcp_xml(
     is_ntsc = abs(exact_fps - 23.976) < 0.01 or abs(exact_fps - 29.97) < 0.01 or abs(exact_fps - 59.94) < 0.01
     ntsc_str = "TRUE" if is_ntsc else "FALSE"
 
+    from .vo_assembly import clip_frames, expand_narration_pack, load_cut_model
     from .vo_engine import get_vo_manifest, slice_narration_pack_across_parts
     vo_manifest = get_vo_manifest(doc_state)
     files_manifest = vo_manifest.get("files", [])
+    cut_model = load_cut_model(doc_state)
 
     raw_segments = assembly_segments
     if not raw_segments:
@@ -465,12 +504,20 @@ def generate_assembled_fcp_xml(
     seg_idx = 1
     for seg in (raw_segments or []):
         s_type = (seg.get("type") or "").upper()
-        if s_type == "NARRATION_PACK":
+        if s_type == "NARRATION_PACK" and cut_model is not None:
+            # Waveform-snapped VO: the narration is the VO clips, silence deleted
+            for sl in expand_narration_pack(seg, cut_model):
+                sl = dict(sl)
+                sl["index"] = seg_idx
+                segments.append(sl)
+                seg_idx += 1
+        elif s_type == "NARRATION_PACK":
             src_file = seg.get("source_file", "")
             # If no source_file or source_file missing from disk and we have multi-part manifest:
             if (not src_file or not os.path.isfile(src_file)) and files_manifest:
-                s_in = float(seg.get("source_in_sec", 0.0))
-                s_out = float(seg.get("source_out_sec", 0.0))
+                # Re-slice on the joined VO timeline (global time), never the part-local one
+                s_in = float(seg.get("global_in_sec", seg.get("source_in_sec", 0.0)))
+                s_out = float(seg.get("global_out_sec", seg.get("source_out_sec", 0.0)))
                 slices = slice_narration_pack_across_parts(
                     s_in,
                     s_out,
@@ -605,10 +652,13 @@ def generate_assembled_fcp_xml(
         seg_type = (seg.get("type") or "").upper()
 
         if seg_type == "NARRATION_PACK":
-            src_in_sec = float(seg.get("source_in_sec", 0.0))
-            src_out_sec = float(seg.get("source_out_sec", 0.0))
-            in_frame = max(0, int(round(src_in_sec * exact_fps)))
-            out_frame = max(in_frame + 1, int(round(src_out_sec * exact_fps)))
+            if seg.get("vo_clip"):
+                in_frame, out_frame = clip_frames(seg, exact_fps)
+            else:
+                src_in_sec = float(seg.get("source_in_sec", 0.0))
+                src_out_sec = float(seg.get("source_out_sec", 0.0))
+                in_frame = max(0, int(round(src_in_sec * exact_fps)))
+                out_frame = max(in_frame + 1, int(round(src_out_sec * exact_fps)))
             dur_frames = out_frame - in_frame
 
             tl_start = curr_timeline_frame
@@ -619,7 +669,8 @@ def generate_assembled_fcp_xml(
             a1_item = ET.SubElement(a1_vo_track, "clipitem", id=f"vo-clipitem-{vo_clip_counter}")
             part_suffix = f" (Part {seg['part_id']})" if seg.get("part_id") else ""
             label_suffix = " [AD-LIB]" if seg.get("has_adlib") else ""
-            ET.SubElement(a1_item, "name").text = f"VO Pack {vo_clip_counter}{part_suffix}{label_suffix}"
+            kind = "VO Clip" if seg.get("vo_clip") else "VO Pack"
+            ET.SubElement(a1_item, "name").text = f"{kind} {vo_clip_counter}{part_suffix}{label_suffix}"
             ET.SubElement(a1_item, "duration").text = str(dur_frames)
 
             c_rate = ET.SubElement(a1_item, "rate")
@@ -636,7 +687,7 @@ def generate_assembled_fcp_xml(
                 vo_info = _get_assembled_file_info(clip_vo)
                 vo_info["has_video"] = False
                 vo_info["has_audio"] = True
-                _attach_assembled_file(a1_item, vo_info, dur_frames + nominal_base * 10)
+                _attach_assembled_file(a1_item, vo_info, out_frame + nominal_base * 10)
 
             if seg.get("has_adlib") or seg.get("adlib_note"):
                 marker = ET.SubElement(a1_item, "marker")
@@ -780,8 +831,35 @@ def generate_assembled_fcp_xml(
                 ET.SubElement(a_link2, "groupindex").text = "1"
 
     ET.SubElement(seq, "duration").text = str(curr_timeline_frame)
+    if report is not None:
+        report.update(_assembly_report(segments, cut_model, exact_fps, curr_timeline_frame))
     xml_str = ET.tostring(xmeml, encoding="utf-8")
     return f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n{xml_str.decode("utf-8")}'
+
+
+def _assembly_report(segments: List[Dict[str, Any]], cut_model: Any, fps: float, total_frames: int) -> Dict[str, Any]:
+    """What the export did with the VO, for the MCP reply."""
+    vo = [s for s in segments if (s.get("type") or "").upper() == "NARRATION_PACK"]
+    arolls = [s for s in segments if (s.get("type") or "").upper() == "AROLL_CLIP"]
+    moved = []
+    for a in arolls:
+        req, got = a.get("vo_cut_requested_sec"), a.get("vo_cut_sec")
+        if req is not None and got is not None and float(a.get("vo_cut_shift_sec") or 0.0) >= 0.01:
+            moved.append({"row_index": a.get("row_index"), "requested_sec": req, "snapped_to_sec": got,
+                          "moved_sec": a.get("vo_cut_shift_sec"), "kind": a.get("vo_cut_kind", ""),
+                          "resume_sec": a.get("vo_resume_sec")})
+    out: Dict[str, Any] = {
+        "vo_mode": "vo_clips" if cut_model is not None else "continuous",
+        "vo_clip_count": len(vo),
+        "aroll_clip_count": len(arolls),
+        "timeline_duration_sec": round(total_frames / fps, 3) if fps else 0.0,
+        "snapped_cuts": moved,
+    }
+    if cut_model is not None:
+        out["silence_deleted_sec"] = cut_model.summary.get("silence_deleted_sec", 0.0)
+        out["dropped_by_review_sec"] = cut_model.summary.get("dropped_sec", 0.0)
+        out["open_review_flags"] = cut_model.open_flags
+    return out
 
 
 def export_assembled_fcp_xml_file(
@@ -792,8 +870,10 @@ def export_assembled_fcp_xml_file(
     linked_footage: Optional[Dict[str, str]] = None,
     fps: Optional[float] = None,
     include_clip_markers: bool = False,
+    report: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Writes the multi-track (V1/A2 A-Roll + A1 Voiceover) FCP7 XML file to disk."""
+    """Writes the multi-track (V1/A2 A-Roll + A1 Voiceover) FCP7 XML file to disk.
+    Pass a dict as `report` to get what the export did with the VO (clips, snapped cuts)."""
     if fps is None:
         fps_str = db.get_setting("timeline_framerate", "23.976")
         try:
@@ -808,6 +888,7 @@ def export_assembled_fcp_xml_file(
         linked_footage=linked_footage,
         fps=fps,
         include_clip_markers=include_clip_markers,
+        report=report,
     )
     os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as f:

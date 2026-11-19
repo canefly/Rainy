@@ -18,6 +18,7 @@ from .timecode_engine import analyze_framerate
 from .xml_exporter import parse_timecode_to_frames
 from .database import DB_DIR, db
 from .logger import get_logger
+from .vo_islands import DetectionSettings, analyze_and_snap_part, load_or_compute_envelope, slim_segments
 
 logger = get_logger("VOEngine")
 
@@ -634,6 +635,7 @@ class VOBatchTranscribeWorker(QRunnable):
         project_name: str = "",
         model_id: Optional[str] = None,
         output_json_path: Optional[str] = None,
+        detection_settings: Optional[DetectionSettings] = None,
     ):
         super().__init__()
         self.file_paths = [os.path.abspath(p) for p in file_paths if p and os.path.isfile(p)]
@@ -641,12 +643,43 @@ class VOBatchTranscribeWorker(QRunnable):
         self.model_id = model_id or WhisperModelManager.get_active_model_id()
         self.output_json_path = output_json_path
         self.signals = VOBatchTranscribeSignals()
+        self.detection_settings = detection_settings or DetectionSettings()
         self._cancelled = False
         self._model = None
 
     def cancel(self):
         self._cancelled = True
         self.cleanup()
+
+    def _snap_part_to_waveform(
+        self, vo_file: str, file_segments: List[Dict[str, Any]], duration: float
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, float]], Optional[float], Optional[str]]:
+        """
+        Measures the part's loudness, finds speech islands, and snaps Whisper's
+        segment edges to them. Never fatal: on any failure the Whisper times are
+        kept as-is (snapped=False) so transcription still completes.
+        """
+        try:
+            env_db, cache_path = load_or_compute_envelope(vo_file)
+            segs, islands, floor = analyze_and_snap_part(
+                file_segments, env_db, self.detection_settings, duration_s=duration
+            )
+            snapped = sum(1 for s in segs if s.get("snapped"))
+            logger.info(
+                "Snapped %d/%d segments of '%s' to %d speech islands (noise floor %.1f dB)",
+                snapped, len(segs), os.path.basename(vo_file), len(islands), floor,
+            )
+            return segs, islands, floor, cache_path
+        except Exception as e:
+            logger.warning("Waveform snapping skipped for '%s': %s", vo_file, e, exc_info=True)
+            fallback = []
+            for s in file_segments:
+                s = dict(s)
+                s.setdefault("whisper_in", s.get("source_in"))
+                s.setdefault("whisper_out", s.get("source_out"))
+                s["snapped"] = False
+                fallback.append(s)
+            return fallback, [], None, None
 
     def cleanup(self):
         """Immediately destroys the WhisperModel instance, unloads GPU tensors, and flushes VRAM."""
@@ -735,6 +768,7 @@ class VOBatchTranscribeWorker(QRunnable):
 
             total_files = len(self.file_paths)
             all_segments: List[Dict[str, Any]] = []
+            all_islands: List[Dict[str, Any]] = []
             files_manifest: List[Dict[str, Any]] = []
             cumulative_offset = 0.0
 
@@ -782,6 +816,17 @@ class VOBatchTranscribeWorker(QRunnable):
                             s_out = round(float(seg.end), 3)
                             max_seg_end = max(max_seg_end, s_out)
 
+                            words = [
+                                {
+                                    "w": (w.word or "").strip(),
+                                    "s": round(float(w.start), 3),
+                                    "e": round(float(w.end), 3),
+                                    "p": round(float(getattr(w, "probability", 0.0) or 0.0), 3),
+                                }
+                                for w in (getattr(seg, "words", None) or [])
+                                if (w.word or "").strip()
+                            ]
+
                             seg_dict = {
                                 "id": len(all_segments) + len(file_segments),
                                 "part_id": part_id,
@@ -792,6 +837,7 @@ class VOBatchTranscribeWorker(QRunnable):
                                 "global_in": round(s_in + cumulative_offset, 3),
                                 "global_out": round(s_out + cumulative_offset, 3),
                                 "text": clean_text,
+                                "words": words,
                             }
                             file_segments.append(seg_dict)
 
@@ -844,7 +890,19 @@ class VOBatchTranscribeWorker(QRunnable):
                         else:
                             raise trans_err
 
-                all_segments.extend(file_segments)
+                # Waveform pass: Whisper decided the words, the waveform decides the timing.
+                self.signals.file_progress.emit(part_id, 99, f"Snapping Part {part_id} to speech islands...")
+                file_segments, part_islands, noise_floor, env_cache = self._snap_part_to_waveform(
+                    vo_file, file_segments, actual_dur
+                )
+                for seg_dict in file_segments:
+                    seg_dict["id"] = len(all_segments)
+                    seg_dict["global_in"] = round(seg_dict["source_in"] + cumulative_offset, 3)
+                    seg_dict["global_out"] = round(seg_dict["source_out"] + cumulative_offset, 3)
+                    all_segments.append(seg_dict)
+                for isl in part_islands:
+                    all_islands.append({"part_id": part_id, **isl})
+
                 files_manifest.append({
                     "part_id": part_id,
                     "filename": fname,
@@ -852,6 +910,9 @@ class VOBatchTranscribeWorker(QRunnable):
                     "duration_sec": round(actual_dur, 3),
                     "global_offset_sec": round(cumulative_offset, 3),
                     "segment_count": len(file_segments),
+                    "noise_floor_db": None if noise_floor is None else round(noise_floor, 1),
+                    "island_count": len(part_islands),
+                    "envelope_cache": env_cache or "",
                 })
 
                 self.signals.file_progress.emit(part_id, 100, f"Part {part_id} Ready ({len(file_segments)} segs)")
@@ -859,7 +920,7 @@ class VOBatchTranscribeWorker(QRunnable):
                 cumulative_offset += actual_dur
 
             manifest = {
-                "version": 1,
+                "version": 2,
                 "project_name": self.project_name,
                 "created_at": time.time(),
                 "model_used": spec.id,
@@ -867,7 +928,9 @@ class VOBatchTranscribeWorker(QRunnable):
                 "total_files": len(self.file_paths),
                 "total_duration_sec": round(cumulative_offset, 3),
                 "total_segments": len(all_segments),
+                "detection": self.detection_settings.to_dict(),
                 "files": files_manifest,
+                "islands": all_islands,
                 "segments": all_segments,
             }
 
@@ -921,7 +984,7 @@ class VOTranscribeWorker(QRunnable):
         self.signals.progress.emit(pct, status_text)
 
     def _on_finished(self, json_path: str, manifest: dict):
-        segs = manifest.get("segments", [])
+        segs = slim_segments(manifest.get("segments", []))
         dur = manifest.get("total_duration_sec", 0.0)
         self.signals.finished.emit(self.vo_file_path, segs, dur)
 

@@ -38,6 +38,7 @@ When the user requests timeline assembly:
    - **Sequence Framerate:** Default to **30.0 fps** (or confirm if 23.976 / 29.97 fps is required).
    - **Sequence Markers:** Default to **clean timeline (zero markers)** unless the editor specifically requests clip markers.
 2. **Execute Assembly:** Follow the deep technical SOP in Section 4 below.
+3. **Skipped VO review:** if `get_workspace_status` or `trigger_xml_export` reports `open_review_flags > 0`, tell the editor in **one line** (use `review_note`) and export anyway. Never ask for confirmation about it: undecided review items simply keep their audio.
 
 ---
 
@@ -67,7 +68,7 @@ When the user asks to find a word, character quote, scene, or timecode:
 When the user asks for project status or troubleshooting:
 - Check for unlinked footage or missing file paths.
 - Check lock status: which A-Roll rows are `LOCKED`, `NEEDS_REVIEW`, or `PENDING`.
-- Flag potential timeline collisions or negative silence gaps between narration packs.
+- Flag potential timeline collisions, and report `open_review_flags` (VO review items the editor hasn't decided).
 
 ---
 
@@ -77,10 +78,10 @@ When the user asks for project status or troubleshooting:
 | :--- | :--- | :--- |
 | `get_workspace_status` | Returns document name, footage links, VO duration, segment count, and lock status. | None |
 | `get_masked_script_and_aroll` | Fetches numbered script paragraphs `[P0..Pn]` with URLs stripped and A-Roll tokens. | `start_block`, `end_block` |
-| `get_vo_segments` | Fetches Whisper VO segments with local and global in/out timestamps. | `start_id`, `end_id` |
+| `get_vo_segments` | Fetches Whisper VO lines (waveform-snapped in/out on both clocks), `time_clocks`, and `cut_points` (the valid A-Roll spots). | `start_id`, `end_id` |
 | `apply_script_vo_highlight` | Pushes live colored VO badge overlays into the Rainy Script Viewer GUI. | `diffs` array (`block_index`, `match_type`, `in_sec`, `out_sec`, `spoken_text`) |
-| `simulate_aroll_lock` | Checks off and locks A-Roll cards on the GUI checklist thread, saving cut times. | `locks` array (`row_index`, `vo_cut_after_sec`, `vo_resume_sec`, `vo_lead_in_text`) |
-| `trigger_xml_export` | Generates a 3-track linked FCP7 XML sequence with conformed framerate. | `output_path`, `fps` (default 30.0), `include_clip_markers` (default false) |
+| `simulate_aroll_lock` | Checks off and locks A-Roll cards on the GUI checklist thread, saving cut times. | `locks` array (`row_index`, **`after_segment_id`** (preferred), optional `resume_segment_id`, `vo_lead_in_text`; `vo_cut_after_sec` / `vo_resume_sec` only as a fallback) |
+| `trigger_xml_export` | Generates a 3-track linked FCP7 XML sequence with conformed framerate. Reports `vo_clip_count`, `silence_deleted_sec`, `snapped_cuts`, `open_review_flags`, `review_note`. | `output_path`, `fps` (default 30.0), `include_clip_markers` (default false) |
 
 ---
 
@@ -100,11 +101,33 @@ When executing **Workflow 1**, adhere strictly to the following rules:
 2. **The Mechanical Phase (Dumb Numbers):**
    - **A-Rolls are dumb numbers.** They do NOT need scene analysis, dialogue interpretation, or emotional context.
    - Timeline structure is purely linear:
-     $$\text{[Narration Pack A (ends at } T_{\text{out}}\text{)]} \longrightarrow \mathbf{\text{[A-Roll Plays]}} \longrightarrow \text{[Narration Pack B (starts at } T_{\text{in}}\text{)]}$$
-   - Any A-Roll card(s) between Narration A and Narration B simply inherit:
-     - `vo_cut_after_sec` = $T_{\text{out}}$ (end of Narration A)
-     - `vo_resume_sec` = $T_{\text{in}}$ (start of Narration B)
+     $$\text{[Narration A]} \longrightarrow \mathbf{\text{[A-Roll Plays]}} \longrightarrow \text{[Narration B]}$$
+   - Any A-Roll card(s) between Narration A and Narration B are locked with:
+     - `after_segment_id` = id of the **last VO line of Narration A** (from `get_vo_segments`). Rainy converts it to the exact cut and resume seconds from the waveform. **Prefer this over seconds.**
+     - `resume_segment_id` = only when Narration B does not start with the very next line (you are skipping a retake or stumble). Otherwise omit it.
      - `vo_lead_in_text` = last spoken words of Narration A
+   - Several A-Roll cards in a row after the same line all get the same `after_segment_id`; they play back to back.
+
+### B2. VO Clips & the Two Clocks (read this before touching any time value)
+The VO audio is already cut mechanically, before you do anything:
+- **Every speech island is a VO clip. All silence between VO clips is deleted, always.** The VO clips sit back to back on A1. You never shorten, keep or remove silence.
+- **Your only timing decision is semantic: which gaps get A-Roll**, by matching the transcript to the script. A long VO pause inside one script paragraph gets **no** A-Roll: it closes up like every other gap. Example: VO clips `A ‖ B ‖ C ‖ D`, the script puts A-Roll after B → timeline `A B [A-Roll] C D`.
+- **Two clocks:**
+
+  | Field | Clock | Use it for |
+  | :--- | :--- | :--- |
+  | `source_in` / `source_out` | Seconds inside **that part's audio file** (`source_file`) | Describing a line only. Never as a lock time. |
+  | `global_in` / `global_out` | Seconds on the **joined VO timeline** (Part 1, then Part 2…, part offset added) | All lock times. `vo_cut_after_sec` / `vo_resume_sec` are **always global**. |
+
+  Part 2's `source_in = 3.0` is **not** global second 3.0: it is `global_offset_sec` of Part 2 + 3.0.
+- **`cut_points`** (from `get_vo_segments`) are the only places A-Roll can go, in global time:
+  - `gap`: the deleted silence between two VO clips (`cut_after_sec` = end of the clip, `resume_sec` = start of the next).
+  - `breath`: two lines inside one VO clip, separated only by a breath (cut and resume are the same point).
+  - `start` / `end`: before the first or after the last VO clip.
+  Each has `after_segment_id` (the line spoken just before it) and `gap_sec`. A line's `gap_after_sec` tells you how much silence follows it.
+  A gap with `mid_line: true` is a pause **inside** one line (the line carries on after it). Only use it when the script really cuts mid-sentence; `after_segment_id` on a lock always means after the **whole** line.
+- **Snapping:** on export every lock time is snapped to the nearest cut point, so A-Roll can never split a word. Moved locks are listed in `snapped_cuts`; if one moved more than ~1 s, you probably picked the wrong line: re-check it against the script.
+- **Review decisions** (duplicate takes, false starts, wordless sounds) are the editor's, made in the Review tab. Dropped audio is already gone from the VO clips. Do not try to re-decide them.
 
 ### C. The 3 Paragraph Layers (`get_masked_script_and_aroll`)
 1. **Layer 1: Spoken Narration (`type: "TEXT"`):** The actual voiceover script. Matches Whisper VO segments.
@@ -114,12 +137,12 @@ When executing **Workflow 1**, adhere strictly to the following rules:
 ### D. Human Ad-Lib & Boundary Shift Rules
 - **Cross-Paragraph Shift:** If Take 1 finishes with the opening line of the *next* script paragraph, and Take 2 starts with the remainder of that paragraph, bind each take's timestamps to their actual spoken words. Do not let sentence boundaries break.
 - **Spoken Lead-Ins:** Keep narrator lead-in ad-libs attached to the preceding narration pack so footage cuts right on cue.
-- **Micro-Pauses:** Do NOT slice natural 300ms–1.0s breath pauses inside contiguous narration. Only slice narration where A-Roll cuts occur or where stumbles are removed.
+- **Pauses:** You never handle silence. Rainy deletes all of it; you only choose which cut points get A-Roll (and, rarely, skip lines with `resume_segment_id`).
 
 ### E. Premiere Pro XML Technical Standards (`trigger_xml_export`)
 - **Tracks:**
   - `V1`: Conformed A-Roll video clips.
-  - `A1`: Contiguous VO Narration Packs across all audio parts.
+  - `A1`: VO clips butted together across all audio parts (silence deleted; older transcripts without waveform data fall back to continuous narration packs).
   - `A2`: Native audio of each A-Roll clip.
 - **Bi-Directional Video $\longleftrightarrow$ Audio `<link>` Elements:**
   - Every camera clip with video on `V1` and audio on `A2` must contain matching `<sourcetrack>` and `<link>` elements pointing to both tracks. Without this, Premiere Pro treats them as detached clips.

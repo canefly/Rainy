@@ -260,6 +260,7 @@ class WorkspaceView(QWidget):
         # 1. Load Left Pane HTML, Blocks, Page Geometry, File Name & Headings
         file_display_name = doc.name or (os.path.basename(doc.file_path) if doc.file_path else "SCRIPT")
         self.script_viewer.set_file_name(file_display_name)
+        self.script_viewer.set_linked_footage(getattr(self, "linked_footage", {}), refresh=False)
         self.script_viewer.load_document_state(doc)
         self.outline_panel.load_headings(doc.headings)
 
@@ -443,6 +444,7 @@ class WorkspaceView(QWidget):
         if self.current_doc:
             self.links_drawer.load_links(self.current_doc.links, self.current_doc.checked_links, getattr(self, "linked_footage", {}))
             self.timeline_list.set_linked_footage(getattr(self, "linked_footage", {}))
+            self.script_viewer.set_linked_footage(getattr(self, "linked_footage", {}))
             self.footage_count_changed.emit(len(getattr(self, "linked_footage", {})))
         self._save_auto_project()
 
@@ -574,6 +576,7 @@ class WorkspaceView(QWidget):
                 getattr(self, "linked_footage", {})
             )
             self.timeline_list.set_linked_footage(getattr(self, "linked_footage", {}))
+            self.script_viewer.set_linked_footage(getattr(self, "linked_footage", {}))
             self.timeline_list.refresh_timecodes()
         if hasattr(self, "trimmer_window") and self.trimmer_window:
             self.trimmer_window.refresh_probed_metadata(source_path)
@@ -862,6 +865,7 @@ class WorkspaceView(QWidget):
         linked_map = getattr(self, "linked_footage", {}) or {}
 
         if action == "get_workspace_status":
+            from ...core.vo_assembly import load_cut_model, review_status_payload
             from ...core.vo_engine import get_vo_manifest
             vo_manifest = get_vo_manifest(self.current_doc)
             vo_segs = getattr(self.current_doc, "vo_segments", []) or []
@@ -885,6 +889,7 @@ class WorkspaceView(QWidget):
                 "total_aroll_items": len(self.current_doc.items),
                 "checked_aroll_items": checked_cnt,
                 "vo_locked_aroll_items": locked_cnt,
+                **review_status_payload(load_cut_model(self.current_doc)),
                 "pre_flight_reminder": (
                     "Before running assembly, confirm with the user whether to deliver via "
                     "(A) Export Multi-Track FCP7 XML via Rainy or (B) Push directly via Premiere Pro MCP."
@@ -916,8 +921,13 @@ class WorkspaceView(QWidget):
             s_id = int(params.get("start_id", 0))
             e_id = int(params.get("end_id", 999999))
             segs = getattr(self.current_doc, "vo_segments", []) or []
-            filtered = [s for s in segs if s_id <= int(s.get("id", 0)) <= e_id]
+            from ...core.vo_assembly import TIME_CLOCKS_NOTE, cut_points_for_segments, load_cut_model
+            from ...core.vo_islands import slim_segments
+            filtered = slim_segments([s for s in segs if s_id <= int(s.get("id", 0)) <= e_id])
+            cut_model = load_cut_model(self.current_doc)
             return {
+                "time_clocks": TIME_CLOCKS_NOTE,
+                "cut_points": cut_points_for_segments(cut_model, filtered),
                 "vo_file_path": getattr(self.current_doc, "vo_file_path", ""),
                 "vo_files": vo_manifest.get("vo_files", []),
                 "vo_files_count": vo_manifest.get("vo_files_count", 0),
@@ -955,13 +965,19 @@ class WorkspaceView(QWidget):
             }
 
         elif action == "simulate_aroll_lock":
+            from ...core.vo_assembly import load_cut_model, resolve_lock_times
             locks_list = params.get("locks") or []
             updated_rows = []
+            resolved = []
+            cut_model = None
+            if any(lk.get("after_segment_id") is not None or lk.get("resume_segment_id") is not None for lk in locks_list):
+                cut_model = load_cut_model(self.current_doc)
             for lk in locks_list:
                 r_idx = lk.get("row_index")
                 it_id = lk.get("item_id")
-                cut_sec = lk.get("vo_cut_after_sec")
-                res_sec = lk.get("vo_resume_sec")
+                cut_sec, res_sec = resolve_lock_times(lk, cut_model)
+                if lk.get("after_segment_id") is not None or lk.get("resume_segment_id") is not None:
+                    resolved.append({"row_index": r_idx, "vo_cut_after_sec": cut_sec, "vo_resume_sec": res_sec})
                 lead_txt = lk.get("vo_lead_in_text", "")
                 has_adlib = bool(lk.get("vo_has_adlib", False))
                 adlib_note = lk.get("vo_adlib_note", "")
@@ -985,6 +1001,7 @@ class WorkspaceView(QWidget):
             self._recompute_stats()
             return {
                 "locked_rows": updated_rows,
+                "resolved_from_segments": resolved,
                 "total_locked": sum(1 for it in self.current_doc.items if getattr(it, "vo_status", "PENDING") == "LOCKED"),
                 "total_items": len(self.current_doc.items),
             }
@@ -1001,6 +1018,7 @@ class WorkspaceView(QWidget):
             if explicit_segs:
                 self.current_doc.timeline_assembly = list(explicit_segs)
 
+            report: dict = {}
             saved_xml = export_assembled_fcp_xml_file(
                 file_path=out_path,
                 doc_state=self.current_doc,
@@ -1009,16 +1027,20 @@ class WorkspaceView(QWidget):
                 linked_footage=linked_map,
                 fps=fps,
                 include_clip_markers=bool(params.get("include_clip_markers", False)),
+                report=report,
             )
             self.copy_feedback_requested.emit("Exported Pre-Cut XML!")
+            from ...core.vo_assembly import review_note
             return {
                 "exported_xml_path": saved_xml,
                 "track_layout": {
                     "V1": "Bound A-Roll Video Clips",
-                    "A1": "Voiceover Narration Packs",
+                    "A1": "Voiceover clips (silence deleted)" if report.get("vo_mode") == "vo_clips" else "Voiceover Narration Packs",
                     "A2": "A-Roll Native Audio Clips",
                 },
                 "fps": fps,
+                **report,
+                "review_note": review_note(report.get("open_review_flags", 0)),
             }
 
         raise ValueError(f"Unknown Rainy MCP GUI action: {action}")

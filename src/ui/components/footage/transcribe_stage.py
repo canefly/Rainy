@@ -18,6 +18,7 @@ from ....core.vo_engine import (
     save_vo_transcript_json, load_vo_transcript_json, TRANSCRIPTS_DIR
 )
 from ....core.logger import get_logger
+from ....core.vo_islands import slim_segments
 from ..widgets import safe_copy_to_clipboard, StatusDot
 
 logger = get_logger("TranscribeStage")
@@ -56,7 +57,7 @@ class TranscribeStage(QWidget):
         if self.transcript_json_path and os.path.isfile(self.transcript_json_path):
             existing = load_vo_transcript_json(self.transcript_json_path)
             if existing:
-                self.segments = existing.get("segments", [])
+                self.segments = slim_segments(existing.get("segments", []))
                 if not self.vo_file_paths and "files" in existing:
                     self.vo_file_paths = [f["path"] for f in existing["files"] if f.get("path") and os.path.isfile(f["path"])]
 
@@ -506,7 +507,7 @@ class TranscribeStage(QWidget):
             self._active_worker.cleanup()
             self._active_worker = None
         self.transcript_json_path = saved_json_path
-        self.segments = manifest.get("segments", [])
+        self.segments = slim_segments(manifest.get("segments", []))
 
         self.start_btn.setText("Transcribe again")
         self.start_btn.setIcon(FluentIcon.SYNC)

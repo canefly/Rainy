@@ -339,7 +339,8 @@ class ProjectManager:
                         tdata = json.load(tf)
                         if isinstance(tdata, dict):
                             if "segments" in tdata:
-                                raw_segs = list(tdata["segments"])
+                                from .vo_islands import slim_segments
+                                raw_segs = slim_segments(tdata["segments"])
                             if not raw_vo_files and "files" in tdata:
                                 raw_vo_files = [f.get("path") for f in tdata["files"] if f.get("path")]
                 except Exception as e:

@@ -180,3 +180,73 @@ def test_live_gui_mcp_simulates_aroll_lock_and_script_diff(qapp, tmp_path):
     qapp.processEvents()
     if os.path.exists(auto_proj_path):
         os.remove(auto_proj_path)
+
+
+def test_mcp_locks_by_line_and_exports_vo_clips(qapp, tmp_path):
+    """Phase 3 over the real pipe: the AI names the line, Rainy supplies the seconds,
+    the export deletes the silence and reports skipped review in one note."""
+    from src.core.project_manager import project_manager
+    from tests.test_vo_assembly import _manifest, _save
+
+    auto_proj_path = project_manager.get_auto_project_path("MCP_VO_Clips.docx")
+    if os.path.exists(auto_proj_path):
+        os.remove(auto_proj_path)
+    view = WorkspaceView()
+    pipe_name = "knot-test-mcp-pipe-vo"
+    view.mcp_ipc_server.stop()
+    assert view.mcp_ipc_server.start(pipe_name=pipe_name) is True
+
+    m = _manifest(tmp_path, breath_part2=True)   # one undecided breath -> one open review item
+    item = ScriptItem(
+        id="item-vo-clip", row_index=1, raw_timestamp="10:00 - 10:02", start_timecode="00:10:00:00",
+        start_seconds=600.0, end_timecode="00:10:02:00", end_seconds=602.0, duration_seconds=2.0,
+        duration_display="2s", text="@editor play 10:00 - 10:02", meta="CLIP 1", sync_id=1, links=[],
+        is_checked=False,
+    )
+    doc = DocumentState(
+        id="doc-mcp-vo", file_signature="sig-mcp-vo", name="MCP_VO_Clips.docx",
+        file_path=str(tmp_path / "MCP_VO_Clips.docx"), raw_html="", items=[item], blocks=[], links=[],
+        vo_files=[f["path"] for f in m["files"]], vo_transcript_path=_save(tmp_path, m),
+        vo_segments=[{k: v for k, v in s.items()} for s in m["segments"]],
+    )
+    view.load_document(doc)
+
+    def call(name, args, rid):
+        resp = handle_mcp_request({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                   "params": {"name": name, "arguments": args}}, pipe_name=pipe_name)
+        return json.loads(resp["result"]["content"][0]["text"])
+
+    status = call("get_workspace_status", {}, 1)
+    assert status["vo_mode"] == "vo_clips" and status["open_review_flags"] == 1
+    assert "do not ask" in status["review_note"]
+
+    segs = call("get_vo_segments", {"start_id": 0, "end_id": 5}, 2)
+    assert "global_in / global_out" in segs["time_clocks"]
+    gap = next(p for p in segs["cut_points"] if p["after_segment_id"] == 3)
+    assert (gap["kind"], gap["cut_after_sec"], gap["resume_sec"]) == ("gap", 14.08, 20.96)
+
+    lock = call("simulate_aroll_lock", {"locks": [{"row_index": 1, "after_segment_id": 3, "vo_status": "LOCKED"}]}, 3)
+    assert lock["locked_rows"] == [1]
+    assert lock["resolved_from_segments"] == [{"row_index": 1, "vo_cut_after_sec": 14.08, "vo_resume_sec": 20.96}]
+    assert view.current_doc.items[0].vo_cut_after_sec == 14.08
+
+    out = call("trigger_xml_export", {"output_path": str(tmp_path / "vo_clips.xml"), "fps": 24.0}, 4)
+    assert os.path.isfile(out["exported_xml_path"])
+    assert out["vo_mode"] == "vo_clips" and out["vo_clip_count"] == 6 and out["snapped_cuts"] == []
+    assert out["track_layout"]["A1"].startswith("Voiceover clips")
+    assert out["open_review_flags"] == 1 and out["review_note"]
+
+    view.mcp_ipc_server.stop()
+    view.close()
+    view.deleteLater()
+    qapp.processEvents()
+    if os.path.exists(auto_proj_path):
+        os.remove(auto_proj_path)
+
+
+def test_bundled_sop_fallback_matches_instructions_md():
+    """The fallback copy in mcp_server.py ships when instructions.md is missing: keep them in sync."""
+    from src.core import mcp_server
+    md_path = os.path.join(os.path.dirname(mcp_server.__file__), "instructions.md")
+    with open(md_path, encoding="utf-8") as f:
+        assert mcp_server._FALLBACK_INSTRUCTIONS == f.read()
