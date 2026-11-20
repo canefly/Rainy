@@ -1133,6 +1133,9 @@ class MainWindow(FluentWindow):
         self.open_settings(initial_tab=5)
 
     def closeEvent(self, event):
+        lic = getattr(self, '_license', None)
+        if lic is not None and lic.live is not None:
+            lic.live.stop()  # close the live channel cleanly so the server marks us offline at once
         if hasattr(self, 'tray_icon') and self.tray_icon:
             try:
                 self.tray_icon.hide()

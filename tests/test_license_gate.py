@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -135,8 +136,17 @@ class FakeController:
         self.calls.append("local")
         return self.local
 
+    def build_hello(self):          # no hello -> the real LiveChannel never opens a socket in unit tests
+        return None
+
+    def apply_push(self, frame):
+        self.calls.append(("push", frame))
+        return self.pushed.pop(0) if getattr(self, "pushed", None) else None
+
     def refresh(self):
         self.calls.append("refresh")
+        if getattr(self, "block", None) is not None:
+            self.block.wait(5)      # lets a test hold an HTTP check "in flight"
         if self.boom:
             raise RuntimeError("kaboom")
         return self.refreshes.pop(0) if self.refreshes else snap(S.UNREACHABLE)
@@ -376,3 +386,170 @@ def test_dev_switch_skips_the_gate_for_ui_tests(qapp):
     win = MainWindow()                                    # conftest sets KNOT_SKIP_LICENSE=1
     assert win.stack.currentWidget() is win.home_view and win._license is None
     win.close()
+
+
+# -- live channel integration in the service -------------------------------------------------
+from PySide6.QtCore import QObject, Signal
+
+
+class FakeLive(QObject):
+    frame_received = Signal(dict)
+    connected_changed = Signal(bool)
+    rejected = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.running = False
+        self.log = []
+
+    def start(self):
+        self.running = True
+        self.log.append("start")
+
+    def stop(self):
+        self.running = False
+        self.log.append("stop")
+
+
+def live_service(ctl):
+    live = FakeLive()
+    svc = ls.LicenseService(controller=ctl, live=live)
+    return svc, live
+
+
+def pump(seconds=0.3):
+    end = time.time() + seconds
+    while time.time() < end:
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+
+
+def test_push_unlocks_instantly_without_any_http_call(qapp):
+    ctl = FakeController(snap(S.PENDING, device_id="d" * 32))
+    ctl.pushed = [snap(S.APPROVED, editor_name="Cane", device_id="d" * 32, seconds_left=259200)]
+    svc, live = live_service(ctl)
+    seen = collect(svc)
+    svc.start()
+    live.frame_received.emit({"t": "token", "token": "x"})
+    assert seen[-1].unlocked and svc.is_unlocked
+    assert ("push", {"t": "token", "token": "x"}) in ctl.calls
+    assert "refresh" not in ctl.calls                    # the push alone did it
+    svc._timer.stop()
+
+
+def test_push_that_changes_nothing_emits_nothing_and_duplicates_are_suppressed(qapp):
+    ctl = FakeController(snap(S.PENDING, device_id="d" * 32))
+    revoked = snap(S.REVOKED, device_id="d" * 32)
+    ctl.pushed = [None, revoked, revoked]
+    svc, live = live_service(ctl)
+    seen = collect(svc)
+    svc.start()
+    before = len(seen)
+    live.frame_received.emit({"t": "status", "status": "approved"})   # None: nothing to do
+    assert len(seen) == before
+    live.frame_received.emit({"t": "status", "status": "revoked"})
+    live.frame_received.emit({"t": "revoked"})                         # same snapshot again
+    assert [s.state for s in seen[before:]] == [S.REVOKED]
+    svc._timer.stop()
+
+
+def test_live_channel_runs_only_while_registered(qapp):
+    ctl = FakeController(snap(S.NEEDS_REGISTRATION), register_result=snap(S.PENDING, device_id="d" * 32))
+    svc, live = live_service(ctl)
+    svc.start()
+    assert live.log == ["stop"] and not live.running     # new install: nothing to connect as yet
+    svc.register("Cane")
+    assert wait_until(lambda: live.running)              # registered -> channel opens
+    svc._emit(snap(S.NEEDS_REGISTRATION))                # e.g. server forgot us
+    assert not live.running
+    svc._emit(snap(S.ERROR, device_id="d" * 32))
+    assert not live.running
+    svc._emit(snap(S.REVOKED, device_id="d" * 32))
+    assert live.running                                  # a revoked device stays connected to hear about re-approval
+    svc._timer.stop()
+
+
+@pytest.mark.parametrize("state,down,up", [
+    (S.PENDING, ls.PENDING_POLL_MS, ls.LIVE_PENDING_POLL_MS),
+    (S.APPROVED, ls.APPROVED_POLL_MS, ls.LIVE_APPROVED_POLL_MS),
+    (S.REVOKED, ls.REVOKED_POLL_MS, ls.LIVE_REVOKED_POLL_MS),
+])
+def test_polling_backs_off_while_live_and_returns_when_it_drops(qapp, state, down, up):
+    svc, live = live_service(FakeController(snap(S.CHECKING), [snap(state, device_id="d" * 32)]))
+    svc.start()
+    assert wait_until(lambda: svc.snapshot.state is state)
+    assert svc._timer.interval() == down
+    live.connected_changed.emit(True)
+    assert svc.live_connected and svc._timer.isActive() and svc._timer.interval() == up
+    live.connected_changed.emit(False)
+    assert not svc.live_connected and svc._timer.interval() == down   # back to fast polling: nothing missed
+    svc._timer.stop()
+
+
+def test_unreachable_polling_ignores_live_state(qapp):
+    svc, live = live_service(FakeController(snap(S.CHECKING), [snap(S.UNREACHABLE, device_id="d" * 32)]))
+    svc.start()
+    assert wait_until(lambda: svc.snapshot.state is S.UNREACHABLE)
+    live.connected_changed.emit(True)
+    assert svc._timer.interval() == ls.RETRY_POLL_MS
+    svc._timer.stop()
+
+
+def test_auth_rejections_trigger_one_http_check_but_replaced_does_not(qapp):
+    ctl = FakeController(snap(S.PENDING, device_id="d" * 32), [snap(S.PENDING, device_id="d" * 32)] * 5)
+    svc, live = live_service(ctl)
+    svc.start()
+    assert wait_until(lambda: not svc._busy)
+    base = ctl.calls.count("refresh")
+    for code in ("replaced", "rate_limited", "server_busy", "idle_timeout"):
+        live.rejected.emit(code)
+    pump(0.3)
+    assert ctl.calls.count("refresh") == base            # none of these are the HTTP API's business
+    live.rejected.emit("clock_skew")
+    assert wait_until(lambda: ctl.calls.count("refresh") == base + 1)
+    svc._timer.stop()
+
+
+def test_a_stale_http_answer_cannot_undo_a_newer_push(qapp):
+    """The classic race: an HTTP check starts, the owner approves, the push lands, then the old
+    HTTP answer ('still pending') arrives and would flip the app back to the gate."""
+    ctl = FakeController(snap(S.PENDING, device_id="d" * 32), [snap(S.PENDING, device_id="d" * 32)])
+    ctl.pushed = [snap(S.APPROVED, editor_name="Cane", device_id="d" * 32, seconds_left=100)]
+    svc, live = live_service(ctl)
+    seen = collect(svc)
+    svc.start()
+    assert wait_until(lambda: not svc._busy)             # settle the startup refresh first
+    ctl.block = threading.Event()
+    ctl.refreshes = [snap(S.PENDING, device_id="d" * 32)]
+    svc.check_now()                                      # HTTP check now "in flight", blocked
+    assert wait_until(lambda: svc._busy)
+    live.frame_received.emit({"t": "token", "token": "x"})   # approval arrives meanwhile
+    assert svc.snapshot.unlocked
+    ctl.block.set()                                      # the old, stale 'pending' answer finally returns
+    assert wait_until(lambda: not svc._busy)
+    assert svc.snapshot.unlocked, "stale HTTP answer dragged the state backwards"
+    assert seen[-1].unlocked
+    svc._timer.stop()
+
+
+def test_stale_protection_does_not_swallow_register_results(qapp):
+    ctl = FakeController(snap(S.NEEDS_REGISTRATION), register_result=snap(S.PENDING, device_id="d" * 32, editor_name="Cane"))
+    svc, live = live_service(ctl)
+    svc.start()
+    svc.register("Cane")
+    svc._push_gen += 1                                   # even if a push is counted during the job...
+    assert wait_until(lambda: svc.snapshot.state is S.PENDING and svc.snapshot.device_id)
+    svc._timer.stop()
+
+
+def test_window_close_stops_the_live_channel(qapp, monkeypatch):
+    from src.ui import window as window_mod
+    live = FakeLive()
+    svc = ls.LicenseService(controller=FakeController(snap(S.NEEDS_REGISTRATION)), live=live)
+    monkeypatch.setattr(ls.LicenseService, "_instance", svc)
+    monkeypatch.setattr(window_mod, "license_gate_disabled", lambda: False)
+    win = window_mod.MainWindow()
+    live.log.clear()
+    win.close()
+    assert live.log[-1] == "stop"
+    svc._timer.stop()

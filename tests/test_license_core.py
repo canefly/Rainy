@@ -636,3 +636,100 @@ def test_time_left_text():
 def test_only_approved_is_unlocked():
     for st in LicenseState:
         assert LicenseSnapshot(st).unlocked is (st is LicenseState.APPROVED)
+
+
+# -- live channel support in the core -----------------------------------------------------------
+SIG_WS = "fTytyMZ-FXdBwkeOy5jXGbCxe2jqYSLsPj04FQBxZgw5NvOyvw6Ek38nl-IYbGoL3YwP3YMotL7DoVcFRqO3DA"
+
+
+def test_vector_hello_signature_matches_server():
+    h = sign_request_headers(dev_key(), "GET", lc.WS_TARGET, b"", now=NOW0, nonce=NONCE)
+    assert h["X-Signature"] == SIG_WS and lc.WS_TARGET == "/v1/ws"
+
+
+def test_ws_url():
+    assert lc.ws_url("https://rainy.canefly.xyz") == "wss://rainy.canefly.xyz/v1/ws"
+    assert lc.ws_url("https://rainy.canefly.xyz/") == "wss://rainy.canefly.xyz/v1/ws"
+    assert lc.ws_url("http://127.0.0.1:8020") == "ws://127.0.0.1:8020/v1/ws"
+    for bad in ("ftp://x", "rainy.canefly.xyz", ""):
+        with pytest.raises(ValueError):
+            lc.ws_url(bad)
+
+
+def test_release_url_is_always_secure(monkeypatch):
+    monkeypatch.setattr(lc, "IS_COMPILED", True)
+    assert lc.ws_url(lc.api_base_url({"KNOT_API_URL": "http://evil"})).startswith("wss://")
+
+
+def test_build_hello_is_signed_like_an_http_request(env):
+    assert env.ctl.build_hello() is None                 # not registered yet
+    env.registered()
+    h = env.ctl.build_hello()
+    assert h["t"] == "hello" and h["device_id"] == "d" * 32 and h["app_version"] == "1.2.3"
+    assert isinstance(h["ts"], int) and abs(h["ts"] - env.now) <= 1
+    env.priv.public_key().verify(
+        b64u_decode(h["sig"]), canonical_request("GET", "/v1/ws", str(h["ts"]), h["nonce"], b""))
+    assert env.ctl.build_hello()["nonce"] != h["nonce"]  # fresh nonce every time
+
+
+def test_build_hello_without_a_usable_key_is_none(env):
+    env.registered()
+    env.keystore.seed = None
+    assert env.ctl.build_hello() is None
+    env.keystore.seed = "!!!"
+    assert env.ctl.build_hello() is None
+
+
+def test_push_token_unlocks_and_is_stored(env):
+    env.registered()
+    snap = env.ctl.apply_push({"t": "token", "token": issue("d" * 32, env.pub, now=env.now), "expires_at": 1})
+    assert snap.unlocked and not snap.offline and snap.seconds_left == 72 * 3600
+    assert env.store.get(lc.K_TOKEN)
+    again = LicenseController(FakeApi(), env.keystore, env.store, env.keys, specs=lambda: SPECS, clock=lambda: env.now)
+    assert again.load_local().unlocked                   # survives a restart like any refreshed token
+
+
+def test_push_revoked_and_pending_lock_and_wipe_the_token(env):
+    env.registered()
+    env.approve()
+    snap = env.ctl.apply_push({"t": "status", "status": "revoked"})
+    assert snap.state is LicenseState.REVOKED and not env.store.get(lc.K_TOKEN)
+    env.approve()
+    assert env.ctl.apply_push({"t": "revoked"}).state is LicenseState.REVOKED
+    env.approve()
+    assert env.ctl.apply_push({"t": "status", "status": "pending"}).state is LicenseState.PENDING
+    assert not env.store.get(lc.K_TOKEN)
+
+
+def test_push_approved_status_alone_changes_nothing(env):
+    env.registered()
+    assert env.ctl.apply_push({"t": "status", "status": "approved"}) is None
+    assert not env.store.get(lc.K_TOKEN) and not env.ctl.snapshot.unlocked
+
+
+def test_push_forged_tokens_are_rejected(env):
+    env.registered()
+    for label, tok in {
+        "wrong server key": issue("d" * 32, env.pub, signer=Ed25519PrivateKey.generate()),
+        "other device": issue("e" * 32, env.pub),
+        "not approved": issue("d" * 32, env.pub, status="revoked"),
+        "garbage": "x.y",
+        "not a string": 12345,
+        "missing": None,
+    }.items():
+        snap = env.ctl.apply_push({"t": "token", "token": tok})
+        assert snap.state is LicenseState.ERROR and not snap.unlocked, label
+        assert not env.store.get(lc.K_TOKEN), label
+
+
+def test_push_ignores_unknown_frames_and_unregistered_installs(env):
+    assert env.ctl.apply_push({"t": "token", "token": "x"}) is None   # not registered: nothing to apply
+    env.registered()
+    for frame in ({}, {"t": "pong"}, {"t": "announcement"}, {"t": "status"}, {"t": "status", "status": "wat"}):
+        assert env.ctl.apply_push(frame) is None
+
+
+def test_push_with_missing_key_does_not_crash(env):
+    env.registered()
+    env.keystore.seed = None
+    assert env.ctl.apply_push({"t": "token", "token": "x"}) is None

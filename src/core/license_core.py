@@ -152,6 +152,19 @@ def api_base_url(env: Optional[Mapping[str, str]] = None) -> str:
     return url.rstrip("/")
 
 
+WS_TARGET = "/v1/ws"
+
+
+def ws_url(base_url: str) -> str:
+    """The live-channel URL for an API base URL: https -> wss, http (dev only) -> ws."""
+    base = base_url.rstrip("/")
+    if base.startswith("https://"):
+        return "wss://" + base[len("https://"):] + WS_TARGET
+    if base.startswith("http://"):
+        return "ws://" + base[len("http://"):] + WS_TARGET
+    raise ValueError(f"not an http(s) URL: {base_url!r}")
+
+
 def trusted_public_keys(env: Optional[Mapping[str, str]] = None) -> Dict[str, Ed25519PublicKey]:
     """Server public keys by kid. Dev builds may add test keys via KNOT_LICENSE_KEYS=kid:key,..."""
     env = os.environ if env is None else env
@@ -545,3 +558,55 @@ class LicenseController:
             self._clear_token()
             return self._set(LicenseState.REVOKED)
         return self._set(LicenseState.ERROR, message="The server sent an unexpected reply.")
+
+    # -- live channel ----------------------------------------------------------------
+    def build_hello(self) -> Optional[dict]:
+        """The first frame on the live channel: signed with the device key exactly like an HTTP
+        request (GET /v1/ws, empty body). None if this install isn't registered yet."""
+        device_id = self.store.get(K_DEVICE) or ""
+        if not device_id:
+            return None
+        try:
+            priv = self._private_key(create=False)
+        except SecureStorageError:
+            return None
+        if priv is None:
+            return None
+        ts = int(self._clock())
+        nonce = b64u(os.urandom(16))
+        sig = priv.sign(canonical_request("GET", WS_TARGET, str(ts), nonce, b""))
+        return {"t": "hello", "device_id": device_id, "ts": ts, "nonce": nonce, "sig": b64u(sig),
+                "app_version": self.app_version}
+
+    def apply_push(self, frame: dict) -> Optional[LicenseSnapshot]:
+        """Apply a frame the server pushed over the live channel. Never touches the network, so it
+        is safe on the UI thread. Returns the new snapshot, or None if the frame changes nothing."""
+        device_id = self.store.get(K_DEVICE) or ""
+        if not device_id:
+            return None
+        kind = frame.get("t")
+        status = frame.get("status") if kind == "status" else None
+
+        if kind == "revoked" or status == "revoked":
+            self._clear_token()
+            return self._set(LicenseState.REVOKED)
+        if status == "pending":
+            self._clear_token()
+            return self._set(LicenseState.PENDING)
+        if kind == "token":
+            token = frame.get("token")
+            try:
+                priv = self._private_key(create=False)
+            except SecureStorageError as e:
+                return self._set(LicenseState.ERROR, message=str(e))
+            if priv is None:
+                return None
+            try:
+                payload = validate_token(token if isinstance(token, str) else "", self.keys, device_id,
+                                         public_key_b64(priv), self._now())
+            except TokenError as te:
+                self._clear_token()
+                return self._set(LicenseState.ERROR, message=_TOKEN_MESSAGES.get(te.code, "Invalid license."))
+            self.store.set(K_TOKEN, token)
+            return self._set(LicenseState.APPROVED, offline=False, seconds_left=int(payload["exp"] - self._now()))
+        return None  # status "approved" alone: the token frame follows, nothing to do yet
