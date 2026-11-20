@@ -8,7 +8,8 @@ The stack (Python, PySide6, faster-whisper, python-mpv, PyAV) all runs on macOS,
 
 | # | File | Problem | Mac fix |
 |---|---|---|---|
-| 1 | `src/core/auth.py` | `import winreg` at top (crashes on import) and `ctypes.windll` for RAM | Machine ID from `IOPlatformUUID` (via `ioreg`), RAM via `sysctl hw.memsize`. Keep fingerprint format stable per platform |
+| 1 | `src/core/system_specs.py` | Windows-only: `winreg` for machine id and CPU name, `ctypes.windll` for RAM, PowerShell/CIM for GPU names (imports are lazy, so it loads on a Mac but returns placeholders) | Machine ID from `IOPlatformUUID` (via `ioreg`), CPU via `sysctl machdep.cpu.brand_string`, RAM via `sysctl hw.memsize`, GPU via `system_profiler SPDisplaysDataType`. Keep the HWID format stable per platform |
+| 1b | `src/core/license_core.py` | Already portable: device key goes through `keyring`, which uses the macOS Keychain with no code change | Verify `keyring` picks the Keychain backend on a Mac; confirm Nuitka's `__compiled__` check still blocks the dev overrides in the `.app` build |
 | 2 | `src/core/engine_manager.py` | Downloads `libmpv-2.dll` / `ffmpeg.exe` into `%LOCALAPPDATA%` | Use `~/Library/Application Support/com.canefly.knot/bin`. libmpv is `libmpv.dylib`, easiest is Homebrew `mpv`. Decide: bundle or detect |
 | 3 | `src/core/ffmpeg_encoder.py` | Recycle-bin delete uses `SHFileOperationW` | `send2trash` or NSFileManager |
 | 4 | `src/core/logger.py`, `cookie_manager.py`, `media_probe.py` | `%APPDATA%` / `%LOCALAPPDATA%` paths, Windows browser profile locations | `~/Library/Logs`, `~/Library/Application Support`, macOS browser cookie paths |

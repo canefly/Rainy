@@ -21,9 +21,10 @@ from .components.titlebar import TitleBarBrandingWidget, TitleBarStatsWidget, Ti
 from .components.sidebar import SidebarDock
 from .views.home_view import HomeView
 from .views.workspace_view import WorkspaceView
+from .views.gate_view import GateView
 from ..core.models import DocumentState
 from ..core.parser import DocxParseWorker
-from ..core.auth import AuthService
+from ..core.license_core import license_gate_disabled
 from ..core.database import db
 
 class MainWindow(FluentWindow):
@@ -37,6 +38,11 @@ class MainWindow(FluentWindow):
         self.setWindowTitle("KNOT TOOLS")
         self.current_doc: Optional[DocumentState] = None
         self.thread_pool = QThreadPool.globalInstance()
+
+        # License gate: while True the whole app is replaced by the gate screen (see _set_gated)
+        self._gated = False
+        self._pre_gate_widget = None
+        self._shortcuts = []
 
         # Win32 Sizing State Machine to eliminate left-side jitter & ghosting
         self._is_resizing = False
@@ -135,11 +141,13 @@ class MainWindow(FluentWindow):
         self.title_menu.about_requested.connect(self.open_about)
 
         # Global Keyboard Accelerators
-        QShortcut(QKeySequence("Ctrl+O"), self, self._on_menu_open_doc)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._on_menu_save_project_as)
-        QShortcut(QKeySequence("Ctrl+E"), self, self._on_menu_export_xml)
-        QShortcut(QKeySequence("Ctrl+F"), self, self._on_menu_find)
-        QShortcut(QKeySequence("F1"), self, self._on_menu_shortcuts)
+        self._shortcuts = [
+            QShortcut(QKeySequence("Ctrl+O"), self, self._on_menu_open_doc),
+            QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._on_menu_save_project_as),
+            QShortcut(QKeySequence("Ctrl+E"), self, self._on_menu_export_xml),
+            QShortcut(QKeySequence("Ctrl+F"), self, self._on_menu_find),
+            QShortcut(QKeySequence("F1"), self, self._on_menu_shortcuts),
+        ]
 
         # Right stats widget (inserted right before window control buttons)
         self.title_stats = TitleBarStatsWidget(self.titleBar)
@@ -217,6 +225,14 @@ class MainWindow(FluentWindow):
         self.workspace_view.links_drawer.relink_requested.connect(self._on_menu_set_footage)
         self.workspace_view.open_settings_requested.connect(self.open_settings)
         self.stack.addWidget(self.workspace_view)
+
+        self.gate_view = GateView(self.stack)
+        self.stack.addWidget(self.gate_view)
+
+        # Refuse MCP / live-bridge calls while the app is locked
+        ipc_server = getattr(self.workspace_view, "mcp_ipc_server", None)
+        if ipc_server is not None:
+            ipc_server.set_gate(self._ipc_gate_reason)
 
         body_layout.addWidget(self.stack, 1)
         self.widgetLayout.addWidget(body_container, 1)
@@ -408,16 +424,61 @@ class MainWindow(FluentWindow):
             self.layout().activate()
 
     def _init_auth(self):
-        auth = AuthService.instance()
-        # Set cached name immediately
-        self.title_stats.set_editor_identity(auth.current_editor_name)
-        # Verify in background
-        auth.verify_async(
-            on_verified=self._on_auth_verified,
-            on_failed=self._on_auth_failed
-        )
+        """Lock the app behind the license gate until rainy-api says this device is approved."""
+        self._license = None
+        if license_gate_disabled():  # dev/test only, ignored in compiled builds
+            self.title_stats.set_editor_identity("DEV BUILD")
+            self._init_updater()
+            return
+
+        from ..core.license_service import LicenseService
+        self._set_gated(True)
+        self._license = LicenseService.instance()
+        self.gate_view.register_requested.connect(self._license.register)
+        self.gate_view.retry_requested.connect(self._license.check_now)
+        self._license.state_changed.connect(self._on_license_state)
+        self._license.start()
         # Asynchronously check for application updates (No-OTA Policy)
         self._init_updater()
+
+    def _ipc_gate_reason(self):
+        lic = getattr(self, "_license", None)
+        return lic.lock_reason() if lic is not None else None
+
+    def _on_license_state(self, snap):
+        self.gate_view.show_snapshot(snap)
+        if snap.unlocked:
+            left = snap.time_left_text() if snap.offline else ""
+            self.title_stats.set_editor_identity((snap.editor_name or "EDITOR"), snap.offline, left)
+            self._set_gated(False)
+        else:
+            self.title_stats.set_editor_identity((snap.editor_name or "UNVERIFIED"), True, "LOCKED")
+            self._set_gated(True)
+
+    def _set_gated(self, gated: bool):
+        """Swap the whole app for the gate screen (or back), and disable every way around it."""
+        if gated == self._gated:
+            return
+        self._gated = gated
+        for sc in self._shortcuts:
+            sc.setEnabled(not gated)
+        self.title_menu.setEnabled(not gated)
+        if gated:
+            current = self.stack.currentWidget()
+            self._pre_gate_widget = current if current is not self.gate_view else None
+            self.sidebar.hide()
+            self.workspace_view.close_drawers()
+            for attr in ('pref_window', 'vault_window', 'about_window'):
+                win = getattr(self, attr, None)
+                if win is not None:
+                    win.hide()
+            self.stack.setCurrentWidget(self.gate_view)
+        else:
+            target = self._pre_gate_widget or self.home_view
+            self._pre_gate_widget = None
+            self.stack.setCurrentWidget(target)
+            if target is self.workspace_view:
+                self.sidebar.show()
 
     def _init_updater(self):
         try:
@@ -429,12 +490,6 @@ class MainWindow(FluentWindow):
 
     def _on_update_available(self, version: str, url: str, changelog: list):
         self.title_stats.set_update_available(version)
-
-    def _on_auth_verified(self, name: str, is_offline: bool, time_left: str):
-        self.title_stats.set_editor_identity(name, is_offline, time_left)
-
-    def _on_auth_failed(self, reason: str):
-        self.title_stats.set_editor_identity("UNVERIFIED", True, reason)
 
     def _apply_caption_button_theme(self):
         """Bind min/max/close caption button colors to the active theme palette."""
@@ -496,6 +551,8 @@ class MainWindow(FluentWindow):
             self.workspace_view.apply_theme(variant, dark=dark)
         if hasattr(self, 'home_view') and self.home_view:
             self.home_view.apply_theme(variant, dark=dark)
+        if hasattr(self, 'gate_view') and self.gate_view:
+            self.gate_view.apply_theme()
         self._apply_backdrop_effect()
         for attr in ('pref_window', 'vault_window', 'about_window'):
             win = getattr(self, attr, None)
@@ -513,6 +570,9 @@ class MainWindow(FluentWindow):
 
     def go_home(self):
         """Switches to Home Screen: Hides Sidebar, closes floating tool drawers, & resets pending jobs."""
+        if self._gated:  # locked: remember where to land once unlocked, never leave the gate screen
+            self._pre_gate_widget = self.home_view
+            return
         self.sidebar.hide()
         self.title_stats.set_has_document(False)
         if hasattr(self, 'title_menu') and self.title_menu:
@@ -526,6 +586,9 @@ class MainWindow(FluentWindow):
 
     def open_workspace(self):
         """Switches to Workspace View: Shows Sidebar & Shows Contextual Stats."""
+        if self._gated:  # e.g. a background parse finishing while locked must not pull us off the gate
+            self._pre_gate_widget = self.workspace_view
+            return
         self.sidebar.show()
         self.title_stats.set_has_document(True)
         if hasattr(self, 'title_menu') and self.title_menu:
@@ -534,6 +597,8 @@ class MainWindow(FluentWindow):
 
     def open_settings(self, initial_tab=0):
         """Opens or focuses the independent Preferences desktop window."""
+        if self._gated:
+            return
         if not hasattr(self, 'pref_window') or self.pref_window is None:
             self.pref_window = PreferencesDialog(None, initial_tab=initial_tab)
             self.pref_window.theme_changed.connect(self.apply_palette)
@@ -553,6 +618,8 @@ class MainWindow(FluentWindow):
 
     def open_about(self):
         """Opens or focuses the independent About & Updates desktop window."""
+        if self._gated:
+            return
         if not hasattr(self, 'about_window') or self.about_window is None:
             self.about_window = AboutWindow()
         self.about_window.show()
@@ -561,6 +628,8 @@ class MainWindow(FluentWindow):
 
     def open_vault(self):
         """Opens or focuses the independent Data Vault desktop window."""
+        if self._gated:
+            return
         if hasattr(self, 'pref_window') and self.pref_window is not None:
             self.pref_window.switch_tab(1)
         if not hasattr(self, 'vault_window') or self.vault_window is None:
@@ -587,6 +656,8 @@ class MainWindow(FluentWindow):
         self.workspace_view.toggle_links_drawer()
 
     def _on_footage_clicked(self):
+        if self._gated:
+            return
         if self.stack.currentWidget() != self.workspace_view:
             self.open_workspace()
         self._on_menu_set_footage()
@@ -598,6 +669,8 @@ class MainWindow(FluentWindow):
 
     def load_docx_file(self, file_path: str):
         """Asynchronous, non-blocking DOCX parser using worker threads."""
+        if self._gated:
+            return
         if not os.path.exists(file_path):
             InfoBar.error(
                 title="File Not Found",
@@ -649,7 +722,7 @@ class MainWindow(FluentWindow):
     def open_file(self, file_path: str, force_reimport: bool = False):
         """Unified intelligent file opener. Loads standalone .rainyproj in <10ms if available,
         falling back to parsing .docx only when no project exists or user requests an explicit re-import."""
-        if not file_path or not os.path.exists(file_path):
+        if self._gated or not file_path or not os.path.exists(file_path):
             return
 
         # 1. Direct .rainyproj file selection
@@ -793,7 +866,7 @@ class MainWindow(FluentWindow):
             )
 
     def _on_menu_set_footage(self):
-        if not self.current_doc:
+        if self._gated or not self.current_doc:
             return
         from .components.footage_relink_dialog import FootageRelinkDialog
         curr_folder = getattr(self.workspace_view, "footage_folder", "")

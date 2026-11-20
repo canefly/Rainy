@@ -29,6 +29,11 @@ class GuiIpcServer(QObject):
         self._server.newConnection.connect(self._on_new_connection)
         self._clients = set()
         self._is_running = False
+        # Optional license gate: returns a reason string while the app is locked, else None.
+        self._gate: Optional[Callable[[], Optional[str]]] = None
+
+    def set_gate(self, gate: Optional[Callable[[], Optional[str]]]):
+        self._gate = gate
 
     @property
     def is_running(self) -> bool:
@@ -114,6 +119,11 @@ class GuiIpcServer(QObject):
         if action == HELLO_ACTION:
             label = mcp_activity.note_client(client, connected=True)
             return {"id": req_id, "ok": True, "result": {"pong": True, "client": label}}
+
+        if self._gate is not None:
+            locked_reason = self._gate()
+            if locked_reason:
+                return {"id": req_id, "ok": False, "error": locked_reason}
 
         if not self._handler_callback:
             return {"id": req_id, "ok": False, "error": "GUI handler not attached."}
