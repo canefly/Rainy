@@ -352,13 +352,13 @@ def test_a_failing_installer_start_is_reported(qapp, tmp_path, server):
 def test_old_installers_are_cleaned_up_when_a_new_download_starts(qapp, tmp_path, server):
     d = tmp_path / "updates"
     d.mkdir()
-    (d / "RainyTools_Setup_v1.1.0.exe").write_bytes(b"old")
+    (d / "RainySetup_v1.1.0.exe").write_bytes(b"old")
     (d / "leftover.part").write_bytes(b"half")
     (d / "notes.txt").write_text("mine")
     svc = available_service(tmp_path, server)
     svc.start_download()
     assert wait_until(lambda: not svc.is_downloading)
-    assert sorted(p.name for p in d.iterdir()) == ["RainyTools_Setup_v1.3.0.exe", "notes.txt"]
+    assert sorted(p.name for p in d.iterdir()) == ["RainySetup_v1.3.0.exe", "notes.txt"]
 
 
 # -- the live channel nudge reaches the updater ------------------------------------------------------------------------

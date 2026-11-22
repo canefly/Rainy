@@ -1,5 +1,5 @@
 # ==============================================================================
-# Rainy Tools Native - Inno Setup Installer Builder
+# Rainy - Inno Setup Installer Builder
 # ==============================================================================
 # Automates compiling the Inno Setup installer from dist_nuitka\main.dist
 # ==============================================================================
@@ -67,7 +67,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 5. Build Portable ZIP Release Archive
-$ZipPath = Join-Path $DistDir "RainyTools_v1.2.0_Portable.zip"
+$ZipPath = Join-Path $DistDir "Rainy_v1.2.0_Portable.zip"
 Write-Host ">>> Packaging portable release archive: $ZipPath..." -ForegroundColor Cyan
 if (Test-Path $ZipPath) {
     Remove-Item -Path $ZipPath -Force

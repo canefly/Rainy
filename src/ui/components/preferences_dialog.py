@@ -380,7 +380,7 @@ class PreferencesWindow(FramelessWindow):
         super().__init__(parent)
         self.setObjectName("PreferencesDialog")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self.setWindowTitle("Preferences — Rainy Tools")
+        self.setWindowTitle("Preferences — Rainy")
 
         # Responsive spawn dimensions with SQLite persistence
         saved_w = db.get_setting("pref_window_width")
@@ -658,7 +658,7 @@ class PreferencesWindow(FramelessWindow):
         self.hero_device = HomeHeroCard(
             FluentIcon.APPLICATION,
             "Canefly",
-            "Rainy Native Pro v2.4",
+            "Rainy",
             "canefly-server: Connected",
             is_accent=True,
             parent=widget
@@ -3671,7 +3671,7 @@ class PreferencesWindow(FramelessWindow):
         layout.setSpacing(12)
 
         layout.addLayout(self._create_tab_header(
-            "About Rainy Tools",
+            "About Rainy",
             "Maintainer information, community channels, and software licensing."
         ))
 

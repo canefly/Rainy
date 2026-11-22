@@ -1,10 +1,10 @@
 ; ==============================================================================
-; Rainy Tools Native - Inno Setup Packaging Script
+; Rainy - Inno Setup Packaging Script
 ; ==============================================================================
 ; Produces a standalone, signed Windows installer from dist_nuitka\main.dist\
 ; ==============================================================================
 
-#define MyAppName "Rainy Tools"
+#define MyAppName "Rainy"
 #define MyAppVersion "1.2.0"
 #define MyAppPublisher "Canefly"
 #define MyAppURL "https://github.com/canefly/knot-tool-native"
@@ -24,7 +24,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=
 OutputDir=..\\dist
-OutputBaseFilename=RainyTools_Setup_v{#MyAppVersion}
+OutputBaseFilename=RainySetup_v{#MyAppVersion}
 SetupIconFile=..\\assets\\logo.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64

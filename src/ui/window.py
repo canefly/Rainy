@@ -36,7 +36,7 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("MainWindow")
-        self.setWindowTitle("KNOT TOOLS")
+        self.setWindowTitle("RAINY")
         self.current_doc: Optional[DocumentState] = None
         self.thread_pool = QThreadPool.globalInstance()
 
@@ -1008,7 +1008,7 @@ class MainWindow(FluentWindow):
             logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"))
             icon = QIcon(logo_path) if os.path.exists(logo_path) else self.windowIcon()
             self.tray_icon = QSystemTrayIcon(icon, self)
-            self.tray_icon.setToolTip("Rainy Native Tools")
+            self.tray_icon.setToolTip("Rainy")
             self.tray_icon.messageClicked.connect(self._on_tray_message_clicked)
             self.tray_icon.show()
 

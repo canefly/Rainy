@@ -65,7 +65,7 @@ class TitleBarBrandingWidget(QWidget):
         layout.setSpacing(8)
 
         # 1. Native Flush Title Text
-        self.title_lbl = QLabel("Rainy Tool", self)
+        self.title_lbl = QLabel("Rainy", self)
         self.title_lbl.setObjectName("TitleBrandingText")
         layout.addWidget(self.title_lbl)
 

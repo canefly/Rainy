@@ -424,7 +424,7 @@ def test_installer_names_come_from_the_version_never_the_url(tmp_path):
                      ("https://x.example/a.bat", ".exe"), ("https://x.example/a", ".exe"), ("https://x.example/a.EXE?x=1", ".exe"),
                      ("https://x.example/a.exe/../../b.cmd", ".exe")]:
         p = uc.installer_path_for(manifest(url=url), tmp_path)
-        assert p.parent == tmp_path and p.name == f"RainyTools_Setup_v1.3.0{ext}", url
+        assert p.parent == tmp_path and p.name == f"RainySetup_v1.3.0{ext}", url
 
 
 def test_default_updates_dir_is_under_the_app_data_folder(monkeypatch, tmp_path):
@@ -433,12 +433,12 @@ def test_default_updates_dir_is_under_the_app_data_folder(monkeypatch, tmp_path)
 
 
 def test_prune_keeps_only_what_it_should(tmp_path):
-    (tmp_path / "RainyTools_Setup_v1.2.0.exe").write_bytes(b"old")
-    (tmp_path / "RainyTools_Setup_v1.3.0.exe").write_bytes(b"keep")
-    (tmp_path / "RainyTools_Setup_v1.3.0.exe.part").write_bytes(b"half")
+    (tmp_path / "RainySetup_v1.2.0.exe").write_bytes(b"old")
+    (tmp_path / "RainySetup_v1.3.0.exe").write_bytes(b"keep")
+    (tmp_path / "RainySetup_v1.3.0.exe.part").write_bytes(b"half")
     (tmp_path / "unrelated.txt").write_text("mine")
-    uc.prune_updates(tmp_path, keep=tmp_path / "RainyTools_Setup_v1.3.0.exe")
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["RainyTools_Setup_v1.3.0.exe", "unrelated.txt"]
+    uc.prune_updates(tmp_path, keep=tmp_path / "RainySetup_v1.3.0.exe")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["RainySetup_v1.3.0.exe", "unrelated.txt"]
     uc.prune_updates(tmp_path / "does-not-exist")                  # must not raise
 
 
@@ -494,7 +494,7 @@ def test_launch_refuses_symlinks(tmp_path):
     inside.mkdir()
     target = tmp_path / "real.exe"
     target.write_bytes(BODY)
-    link = inside / "RainyTools_Setup_v1.3.0.exe"
+    link = inside / "RainySetup_v1.3.0.exe"
     try:
         link.symlink_to(target)
     except (OSError, NotImplementedError):

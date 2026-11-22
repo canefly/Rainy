@@ -1,5 +1,5 @@
 # ==============================================================================
-# Rainy Tool Native - Nuitka Compilation Ritual Script
+# Rainy - Nuitka Compilation Ritual Script
 # ==============================================================================
 # Automates the complete standalone build process for RainyParser.exe
 # Usage:
@@ -11,7 +11,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
 
 Set-Location $ProjectRoot
-Write-Host ">>> Starting Rainy Tool Native Nuitka Build Ritual..." -ForegroundColor Cyan
+Write-Host ">>> Starting Rainy Nuitka Build Ritual..." -ForegroundColor Cyan
 
 # 1. Check Python Venv
 $PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"

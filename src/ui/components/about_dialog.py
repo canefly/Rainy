@@ -16,7 +16,7 @@ class AboutWindow(FramelessWindow):
         super().__init__(parent)
         self.setObjectName("AboutWindow")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self.setWindowTitle("About Rainy Tools")
+        self.setWindowTitle("About Rainy")
         self.resize(500, 640)
         self.setMinimumSize(440, 520)
 
@@ -131,7 +131,7 @@ class AboutWindow(FramelessWindow):
         b_layout.addWidget(legal_box)
 
         # Copyright tag
-        cr_lbl = QLabel("Rainy Tools v2.0 Native · All rights reserved", body)
+        cr_lbl = QLabel("Rainy · All rights reserved", body)
         cr_lbl.setObjectName("PrefCaption")
         cr_lbl.setAlignment(Qt.AlignCenter)
         b_layout.addWidget(cr_lbl)

@@ -210,7 +210,7 @@ def download_verified(url: str, dest, *, sha256: str, size: Optional[int] = None
     part = dest.with_name(dest.name + ".part")
     limit = min(max_bytes, size + SIZE_SLACK_BYTES) if size else max_bytes
     opener = opener or default_opener(allow_http_local)
-    req = urllib.request.Request(url, headers={"User-Agent": "RainyTools Native"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Rainy Native"})
     h, got = hashlib.sha256(), 0
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -265,14 +265,14 @@ def installer_path_for(manifest: UpdateManifest, directory: Optional[Path] = Non
     """Where this release's installer is saved. The name comes from the version, never from the URL."""
     ext = Path(urlparse(manifest.url).path).suffix.lower()
     ext = ext if ext in (".exe", ".msi") else ".exe"
-    return (directory or updates_dir()) / f"RainyTools_Setup_v{manifest.version}{ext}"
+    return (directory or updates_dir()) / f"RainySetup_v{manifest.version}{ext}"
 
 
 def prune_updates(directory: Path, keep: Optional[Path] = None) -> None:
     """Delete leftovers from earlier updates (best effort)."""
     try:
         for p in directory.iterdir():
-            if p.is_file() and p != keep and (p.name.startswith("RainyTools_Setup_v") or p.name.endswith(".part")):
+            if p.is_file() and p != keep and (p.name.startswith("RainySetup_v") or p.name.endswith(".part")):
                 _remove_quietly(p)
     except OSError:
         pass

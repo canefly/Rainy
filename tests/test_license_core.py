@@ -223,7 +223,7 @@ def test_api_sends_signed_request_and_parses_reply():
     assert seen["data"] == b""
     h = {k.lower(): v for k, v in seen["headers"].items()}
     assert h["x-device-id"] == "a" * 32 and h["x-timestamp"] == str(NOW0)
-    assert h["user-agent"] == "RainyTools/9.9 Native"
+    assert h["user-agent"] == "Rainy/9.9 Native"
     # signature really verifies against the canonical bytes for what was sent
     k = dev_key().public_key()
     k.verify(b64u_decode(h["x-signature"]),

@@ -21,7 +21,7 @@ class DataVaultWindow(FramelessWindow):
         super().__init__(parent)
         self.setObjectName("DataVaultWindow")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self.setWindowTitle("Data Vault & Storage - Rainy Tools")
+        self.setWindowTitle("Data Vault & Storage - Rainy")
         self.resize(760, 540)
         self.setMinimumSize(640, 440)
 

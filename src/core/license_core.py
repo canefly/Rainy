@@ -311,7 +311,7 @@ class LicenseApi:
                  opener: Callable = urllib.request.urlopen, clock: Callable[[], float] = time.time):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.user_agent = f"RainyTools/{app_version} Native"
+        self.user_agent = f"Rainy/{app_version} Native"
         self._open = opener
         self._clock = clock
 
