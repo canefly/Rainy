@@ -8,6 +8,7 @@ from typing import Optional, List, Tuple
 import numpy as np
 from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
 
+from . import app_paths
 from .ffmpeg_encoder import get_ffmpeg_path
 from .logger import get_logger
 
@@ -27,7 +28,7 @@ def get_waveform_cache_path(footage_path: str, target_fps: int = 100) -> Optiona
         fsize = os.path.getsize(footage_path)
         key_str = f"v2_{footage_path}_{mtime}_{fsize}_{target_fps}"
         cache_hash = hashlib.md5(key_str.encode("utf-8")).hexdigest()
-        cache_dir = os.path.join(os.path.expanduser("~"), ".knot_cache", "waveforms")
+        cache_dir = os.path.join(app_paths.cache_dir(), "waveforms")
         os.makedirs(cache_dir, exist_ok=True)
         return os.path.join(cache_dir, f"{cache_hash}.npy"), cache_hash
     except Exception as e:

@@ -34,7 +34,7 @@ def preserve_user_theme():
 def test_mainwindow_initialization(qapp):
     window = MainWindow()
     assert window is not None
-    assert "KNOT TOOLS" in window.windowTitle()
+    assert "RAINY" in window.windowTitle()
     assert window.title_branding is not None
     assert window.title_stats is not None
     assert window.sidebar is not None

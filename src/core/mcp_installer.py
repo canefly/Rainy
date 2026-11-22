@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 SERVER_KEY = "knot-tool"
-KNOWN_KEYS = (SERVER_KEY, "knot")  # "knot" = older "Copy config JSON" button
+KNOWN_KEYS = (SERVER_KEY,)
 BACKUP_SUFFIX = ".knot.bak"
 
 # States

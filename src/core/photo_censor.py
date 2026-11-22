@@ -18,7 +18,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, QSize, QThreadPool, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader
 
-from .database import DB_DIR, db
+from . import app_paths
+from .database import db
 from .logger import get_logger
 
 logger = get_logger("PhotoCensor")
@@ -39,7 +40,7 @@ MODEL_MANIFEST = (
 )
 MODEL_TOTAL_BYTES = sum(size for _, size, _ in MODEL_MANIFEST)
 MODEL_SIZE_DISPLAY = "about 155 MB"
-MODEL_DIR = os.environ.get("KNOT_CENSOR_MODEL_DIR") or os.path.join(DB_DIR, "models", "photo_censor")
+MODEL_DIR = os.environ.get("KNOT_CENSOR_MODEL_DIR") or os.path.join(app_paths.models_dir(), "photo_censor")
 
 # What counts as sensitive is just text: edit these lists to retune, no retraining involved.
 SENSITIVE_PROMPTS = [

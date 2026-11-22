@@ -6,6 +6,8 @@ import zipfile
 import shutil
 from typing import List, Optional
 
+from . import app_paths
+
 
 LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
 LOG_BACKUP_COUNT = 3             # Keep 3 rotated archives (max 15 MB total)
@@ -14,14 +16,8 @@ DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def get_log_dir() -> str:
-    """Returns the persistent logs directory under %LOCALAPPDATA% or Documents."""
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        log_dir = os.path.join(local_appdata, "com.canefly.knot", "logs")
-    else:
-        log_dir = os.path.join(os.path.expanduser("~"), "Documents", "Rainy", "Logs")
-    os.makedirs(log_dir, exist_ok=True)
-    return log_dir
+    """Returns the persistent logs directory inside the app home (see app_paths)."""
+    return app_paths.logs_dir(create=True)
 
 
 def get_log_file_path() -> str:
@@ -35,7 +31,7 @@ _is_initialized: bool = False
 
 
 def init_logging(level: int = logging.INFO) -> None:
-    """Initializes the root Rainy logger with a thread-safe rotating file handler."""
+    """Initializes the root Knot logger with a thread-safe rotating file handler."""
     global _file_handler, _console_handler, _is_initialized
     if _is_initialized:
         return
@@ -43,7 +39,7 @@ def init_logging(level: int = logging.INFO) -> None:
     log_path = get_log_file_path()
     formatter = logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
 
-    root_logger = logging.getLogger("Rainy")
+    root_logger = logging.getLogger("Knot")
     root_logger.setLevel(level)
     root_logger.propagate = False
 
@@ -73,12 +69,12 @@ def init_logging(level: int = logging.INFO) -> None:
 
 
 def get_logger(sub_name: Optional[str] = None) -> logging.Logger:
-    """Returns a named sub-logger under the 'Rainy' namespace."""
+    """Returns a named sub-logger under the 'Knot' namespace."""
     if not _is_initialized:
         init_logging()
     if not sub_name:
-        return logging.getLogger("Rainy")
-    return logging.getLogger(f"Rainy.{sub_name}")
+        return logging.getLogger("Knot")
+    return logging.getLogger(f"Knot.{sub_name}")
 
 
 def set_log_level(level_name: str) -> None:
@@ -90,7 +86,7 @@ def set_log_level(level_name: str) -> None:
         "ERROR": logging.ERROR,
     }
     lvl = level_map.get(level_name.upper(), logging.INFO)
-    root_logger = logging.getLogger("Rainy")
+    root_logger = logging.getLogger("Knot")
     root_logger.setLevel(lvl)
     if _file_handler:
         _file_handler.setLevel(lvl)

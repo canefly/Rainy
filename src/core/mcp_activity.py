@@ -19,7 +19,7 @@ HELLO_ACTION = "__hello"
 # Substring of the MCP clientInfo.name -> friendly app name. Order matters
 # ("cursor-vscode" is Cursor, "claude-code" is not Claude Desktop).
 _CLIENT_NAMES = (
-    ("knot", "Rainy self-test"),
+    ("knot-self-test", "Rainy self-test"),
     ("cursor", "Cursor"),
     ("claude-code", "Claude Code"),
     ("claude code", "Claude Code"),

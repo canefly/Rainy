@@ -5,13 +5,14 @@ import time
 from typing import List, Optional, Dict, Any
 from .models import DocumentState, ScriptItem, EditorNote, GamificationStats
 from .logger import get_logger
+from .app_paths import app_home
 
 logger = get_logger("Database")
 
-DB_DIR = os.path.expanduser("~/.knot")
+DB_DIR = app_home()
 DB_PATH = os.environ.get("KNOT_DB_PATH") or os.path.join(DB_DIR, "knot.db")
 # Folder holding the DB plus its backups; follows the override so isolated runs
-# never write snapshots into the real ~/.knot (DB_DIR still hosts models).
+# never write snapshots into the real app home.
 STATE_DIR = os.path.dirname(os.path.abspath(DB_PATH))
 
 class Database:

@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
+from . import app_paths
 from .license_core import dev_overrides_allowed
 from .logger import get_logger
 from .update_core import (
@@ -71,47 +72,14 @@ SUPPORTED_ENGINES: Dict[str, EngineSpec] = {
 
 
 def get_writable_bin_dir() -> str:
-    """
-    Returns the primary directory where downloaded binaries should be stored:
-    1. Local Dev: knot-tool-native/bin/ if we are in dev mode.
-    2. Frozen / Installed: %LOCALAPPDATA%/com.canefly.knot/bin/ to guarantee write access without UAC elevation.
-    """
-    # If in local development workspace, prefer the project's bin folder
-    root_dev = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    dev_bin = os.path.join(root_dev, "bin")
-    if os.path.isdir(dev_bin) and not getattr(sys, "frozen", False):
-        return dev_bin
-
-    # For frozen Nuitka / PyInstaller executable, write to persistent AppData
-    appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    target = os.path.join(appdata, "com.canefly.knot", "bin")
-    os.makedirs(target, exist_ok=True)
-    return target
+    """Where downloaded engines go: the app home's bin folder (see app_paths), or the repo's own bin
+    folder when running from a source checkout that has one."""
+    return app_paths.writable_bin_dir()
 
 
 def get_engine_search_dirs() -> List[str]:
-    """Returns candidate directories where binaries may live, ordered by priority."""
-    dirs = []
-    
-    # 1. Dev workspace bin
-    root_dev = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    dev_bin = os.path.join(root_dev, "bin")
-    if os.path.isdir(dev_bin):
-        dirs.append(dev_bin)
-
-    # 2. Frozen executable directory
-    if getattr(sys, "frozen", False):
-        base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-        dirs.append(os.path.join(base_dir, "bin"))
-        dirs.append(base_dir)
-
-    # 3. User AppData runtime directory
-    appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    user_bin = os.path.join(appdata, "com.canefly.knot", "bin")
-    if os.path.isdir(user_bin):
-        dirs.append(user_bin)
-
-    return dirs
+    """Returns the directories where engine binaries may live, ordered by priority (see app_paths)."""
+    return app_paths.engine_search_dirs()
 
 
 def register_engine_dll_directories():

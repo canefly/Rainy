@@ -428,6 +428,7 @@ def test_installer_names_come_from_the_version_never_the_url(tmp_path):
 
 
 def test_default_updates_dir_is_under_the_app_data_folder(monkeypatch, tmp_path):
+    monkeypatch.delenv("KNOT_HOME", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert uc.updates_dir() == tmp_path / "com.canefly.knot" / "updates"
 

@@ -41,7 +41,7 @@ Code: `VOBatchTranscribeWorker` in [`src/core/vo_engine.py`](../src/core/vo_engi
 
 ## Step 2: Snap to the waveform (automatic, right after each part)
 
-1. **Loudness map.** FFmpeg decodes the part in memory to mono 16 kHz. Loudness is measured every 10 ms and cached in `~/.knot_cache/vo_envelopes/`.
+1. **Loudness map.** FFmpeg decodes the part in memory to mono 16 kHz. Loudness is measured every 10 ms and cached in `<app home>cheo_envelopes` (see docs/app-folder.md).
 2. **Room tone.** The measured noise level of *this* file; your packs read about −102 dB. For detection the engine never assumes a floor lower than −90 dB, so dither and reverb tails on pitch-black VO don't count as speech.
 3. **Speech islands = VO clips.** Runs of sound louder than *room tone + noise sensitivity* (default +12 dB).
    - Gaps shorter than 0.3 s (between words) don't split an island.

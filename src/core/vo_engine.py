@@ -16,7 +16,8 @@ from .models import DocumentState, ScriptItem, VOSegment
 from .parser import normalize_link
 from .timecode_engine import analyze_framerate
 from .xml_exporter import parse_timecode_to_frames
-from .database import DB_DIR, db
+from . import app_paths
+from .database import db
 from .logger import get_logger
 from .vo_islands import DetectionSettings, analyze_and_snap_part, load_or_compute_envelope, slim_segments
 
@@ -24,7 +25,7 @@ logger = get_logger("VOEngine")
 
 DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Rainy")
 TRANSCRIPTS_DIR = os.path.join(DOCUMENTS_DIR, "Transcripts")
-WHISPER_MODELS_DIR = os.path.join(DB_DIR, "models", "whisper")
+WHISPER_MODELS_DIR = os.path.join(app_paths.models_dir(), "whisper")
 
 
 def ensure_cuda_dlls_registered() -> List[str]:
@@ -332,7 +333,7 @@ class ModelDownloadSignals(QObject):
 
 
 class ModelDownloadWorker(QRunnable):
-    """Downloads a faster-whisper CTranslate2 model from HuggingFace Hub into ~/.knot/models/whisper/."""
+    """Downloads a faster-whisper CTranslate2 model from HuggingFace Hub into <app home>/models/whisper/."""
     def __init__(self, model_id: str):
         super().__init__()
         self.model_id = model_id

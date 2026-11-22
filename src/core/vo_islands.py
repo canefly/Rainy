@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from . import app_paths
 from .logger import get_logger
 
 logger = get_logger("vo_islands")
@@ -119,7 +120,7 @@ def get_envelope_cache_path(audio_path: str, hop_s: float = HOP_S) -> Optional[s
         key = f"{ENVELOPE_CACHE_VERSION}_{os.path.abspath(audio_path)}_{os.path.getmtime(audio_path)}_{os.path.getsize(audio_path)}_{hop_s}"
         digest = hashlib.md5(key.encode("utf-8")).hexdigest()
         cache_dir = os.environ.get("KNOT_VO_ENVELOPE_DIR") or os.path.join(
-            os.path.expanduser("~"), ".knot_cache", "vo_envelopes"
+            app_paths.cache_dir(), "vo_envelopes"
         )
         os.makedirs(cache_dir, exist_ok=True)
         return os.path.join(cache_dir, f"{digest}.npy")

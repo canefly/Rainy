@@ -71,14 +71,14 @@ def test_json_install_keeps_other_servers_and_backs_up(fake_home):
 def test_moved_install_is_outdated_and_update_reuses_the_key(fake_home):
     cfg = fake_home / ".gemini" / "config" / "mcp_config.json"
     cfg.parent.mkdir(parents=True)
-    cfg.write_text(json.dumps({"mcpServers": {"knot": {"command": "C:/old/python.exe", "args": ["C:/old/mcp_server.py"], "disabled": True}}}))
+    cfg.write_text(json.dumps({"mcpServers": {"knot-tool": {"command": "C:/old/python.exe", "args": ["C:/old/mcp_server.py"], "disabled": True}}}))
     t = _t("antigravity")
     assert t.path == str(cfg)
     st = mi.status(t)
-    assert st["state"] == mi.OUTDATED and st["key"] == "knot"
+    assert st["state"] == mi.OUTDATED and st["key"] == "knot-tool"
 
     assert mi.install(t).startswith("Updated")
-    entry = json.loads(cfg.read_text())["mcpServers"]["knot"]
+    entry = json.loads(cfg.read_text())["mcpServers"]["knot-tool"]
     assert entry["disabled"] is False
     assert mi.status(t)["state"] == mi.INSTALLED
 

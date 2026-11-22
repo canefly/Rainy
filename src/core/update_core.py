@@ -30,6 +30,8 @@ from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from . import app_paths
+
 from .license_core import (
     ApiRejected, ApiUnreachable, ManifestError, dev_overrides_allowed, verify_manifest,
 )
@@ -257,8 +259,7 @@ def download_verified(url: str, dest, *, sha256: str, size: Optional[int] = None
 
 # ---------------------------------------------------------------------------- installer files
 def updates_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".knot")
-    return Path(base) / "com.canefly.knot" / "updates"
+    return Path(app_paths.updates_dir())
 
 
 def installer_path_for(manifest: UpdateManifest, directory: Optional[Path] = None) -> Path:

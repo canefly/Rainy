@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from PySide6.QtCore import QObject, Signal, QRunnable
 
 from .database import db
+from .app_paths import find_binary
 from .logger import get_logger
 from .media_inspector import format_duration_display, format_resolution, inspect_mp4_metadata
 from .timecode_engine import analyze_framerate
@@ -72,44 +73,10 @@ def _extract_timecode_tag(tags: Any) -> str:
 
 
 def get_ffprobe_path() -> Optional[str]:
-    """
-    Resolves the standalone ffprobe binary in priority order:
-    1. Bundled frozen executable directory (PyInstaller / Nuitka bundle)
-    2. Integrated application bin folder (knot-tool-native/bin/ffprobe.exe)
-    3. User AppData runtime cache (%LOCALAPPDATA%\com.canefly.knot\bin\ffprobe.exe)
-    4. System PATH fallback
-    """
+    """Resolves the standalone ffprobe binary: the app home's bin folder (plus the repo's bin in a
+    source checkout, and the install folder's bundled copy for now). See app_paths.find_binary."""
     binary_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
-
-    # 1. Bundled Frozen Distribution
-    if getattr(sys, "frozen", False):
-        base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-        bundled = os.path.join(base_dir, "bin", binary_name)
-        if os.path.isfile(bundled):
-            return bundled
-        direct = os.path.join(base_dir, binary_name)
-        if os.path.isfile(direct):
-            return direct
-
-    # 2. Integrated Dev Workspace (knot-tool-native/bin/ffprobe.exe)
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    dev_bin = os.path.join(root_dir, "bin", binary_name)
-    if os.path.isfile(dev_bin):
-        return dev_bin
-
-    # 3. User AppData Runtime Cache
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        appdata_bin = os.path.join(local_appdata, "com.canefly.knot", "bin", binary_name)
-        if os.path.isfile(appdata_bin):
-            return appdata_bin
-
-    # 4. System PATH Fallback
-    which_path = shutil.which("ffprobe")
-    if which_path and os.path.isfile(which_path):
-        return which_path
-
-    return None
+    return find_binary(binary_name)
 
 
 def get_ffprobe_status() -> Tuple[bool, str, str]:

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from PySide6.QtCore import QObject, Signal, QThread
 
+from .app_paths import find_binary
 from .logger import get_logger
 
 logger = get_logger("FFmpegEncoder")
@@ -24,44 +25,10 @@ _ENCODER_LOCK = threading.Lock()
 
 
 def get_ffmpeg_path() -> Optional[str]:
-    """
-    Resolves the standalone ffmpeg binary in priority order:
-    1. Bundled frozen executable directory (PyInstaller / Nuitka bundle)
-    2. Integrated application bin folder (knot-tool-native/bin/ffmpeg.exe)
-    3. User AppData runtime cache (%LOCALAPPDATA%\\com.canefly.knot\\bin\\ffmpeg.exe)
-    4. System PATH fallback (Chocolatey / WinGet / Manual PATH)
-    """
+    """Resolves the standalone ffmpeg binary: the app home's bin folder (plus the repo's bin in a
+    source checkout, and the install folder's bundled copy for now). See app_paths.find_binary."""
     binary_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-
-    # 1. Bundled Frozen Distribution
-    if getattr(sys, "frozen", False):
-        base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-        bundled = os.path.join(base_dir, "bin", binary_name)
-        if os.path.isfile(bundled):
-            return bundled
-        direct = os.path.join(base_dir, binary_name)
-        if os.path.isfile(direct):
-            return direct
-
-    # 2. Integrated Dev Workspace (knot-tool-native/bin/ffmpeg.exe)
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    dev_bin = os.path.join(root_dir, "bin", binary_name)
-    if os.path.isfile(dev_bin):
-        return dev_bin
-
-    # 3. User AppData Runtime Cache
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        appdata_bin = os.path.join(local_appdata, "com.canefly.knot", "bin", binary_name)
-        if os.path.isfile(appdata_bin):
-            return appdata_bin
-
-    # 4. System PATH Fallback
-    which_path = shutil.which("ffmpeg")
-    if which_path and os.path.isfile(which_path):
-        return which_path
-
-    return None
+    return find_binary(binary_name)
 
 
 def get_ffmpeg_status() -> Tuple[bool, str, str]:
