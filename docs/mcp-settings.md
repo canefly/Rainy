@@ -52,7 +52,7 @@ The old **AI & MCP** item is now two items:
 | **Can't read config** | The file isn't valid JSON/TOML; it's never written |
 
 **What a write does:**
-- It only touches our entry. An older entry named `knot` is updated in place rather than duplicated.
+- It only touches our entry (`knot-tool`) and updates it in place rather than duplicating it. Entries from before the rebrand (`knot-tool`, `knot`) are not touched; remove them by hand.
 - It saves `<file>.knot.bak` first, then replaces the file atomically.
 - It sets `"disabled": false` if the app had turned the entry off.
 

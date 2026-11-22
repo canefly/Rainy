@@ -8,11 +8,11 @@
 #define MyAppVersion "1.2.0"
 #define MyAppPublisher "Canefly"
 #define MyAppURL "https://github.com/canefly/knot-tool-native"
-#define MyAppExeName "RainyParser.exe"
+#define MyAppExeName "Rainy.exe"
 #define SourceDist "..\\dist_nuitka\\main.dist"
 
 [Setup]
-AppId={{9F82A4D1-5C9B-4D56-829E-3C5D8B49071E}
+AppId={{0A22D4BD-DF6A-45DC-85D7-4C0A87D84F70}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

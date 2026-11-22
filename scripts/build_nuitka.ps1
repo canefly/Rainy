@@ -1,7 +1,7 @@
 # ==============================================================================
 # Rainy - Nuitka Compilation Ritual Script
 # ==============================================================================
-# Automates the complete standalone build process for RainyParser.exe
+# Automates the complete standalone build process for Rainy.exe
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\build_nuitka.ps1
 # ==============================================================================
@@ -56,7 +56,7 @@ if (Test-Path $MetaReader) {
 }
 
 # 3. Clean any orphaned compiler or running application instances
-Get-Process -Name "RainyParser", "cl" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name "Rainy", "cl" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 # 4. Run Nuitka Compilation
 Write-Host ">>> Invoking Nuitka compiler..." -ForegroundColor Green
@@ -72,7 +72,7 @@ Write-Host ">>> Invoking Nuitka compiler..." -ForegroundColor Green
     --include-data-dir=assets=assets `
     --windows-icon-from-ico=assets/logo.ico `
     --output-dir=dist_nuitka `
-    --output-filename=RainyParser.exe `
+    --output-filename=Rainy.exe `
     src/main.py
 
 if ($LASTEXITCODE -ne 0) {
@@ -90,11 +90,11 @@ if (Test-Path $SourceBin) {
     Copy-Item -Path "$SourceBin\*" -Destination $DestBin -Recurse -Force
 }
 
-$ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\RainyParser.exe"
+$ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\Rainy.exe"
 if (Test-Path $ExePath) {
     $item = Get-Item $ExePath
     Write-Host "=================================================================" -ForegroundColor Green
-    Write-Host " SUCCESS: RainyParser.exe compiled and bundled successfully!" -ForegroundColor Green
+    Write-Host " SUCCESS: Rainy.exe compiled and bundled successfully!" -ForegroundColor Green
     Write-Host " Location : $ExePath" -ForegroundColor White
     Write-Host " Size     : $([math]::Round($item.Length / 1MB, 2)) MB" -ForegroundColor White
     Write-Host "=================================================================" -ForegroundColor Green

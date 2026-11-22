@@ -11,8 +11,20 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 Set-Location $ProjectRoot
 Write-Host ">>> Starting Rainy Setup Installer Build..." -ForegroundColor Cyan
 
+# 0. The installer version and the version the app reports must be the same number,
+#    or the app would offer its own release as an update forever.
+$IssText = Get-Content (Join-Path $ProjectRoot "installer\setup.iss") -Raw
+$AppText = Get-Content (Join-Path $ProjectRoot "src\core\updater.py") -Raw
+if ($IssText -notmatch '#define MyAppVersion "([^"]+)"') { Write-Error "MyAppVersion not found in installer\setup.iss" }
+$Version = $Matches[1]
+if ($AppText -notmatch 'APP_VERSION = "([^"]+)"') { Write-Error "APP_VERSION not found in src\core\updater.py" }
+if ($Matches[1] -ne $Version) {
+    Write-Error "Version mismatch: the installer says $Version but src\core\updater.py says $($Matches[1]). Make them match, then build again."
+}
+Write-Host ">>> Building version $Version" -ForegroundColor Cyan
+
 # 1. Verify that the standalone distribution exists
-$ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\RainyParser.exe"
+$ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\Rainy.exe"
 if (-not (Test-Path $ExePath)) {
     Write-Host ">>> Standalone distribution not found. Running Nuitka build first..." -ForegroundColor Yellow
     & "$ScriptDir\build_nuitka.ps1"
@@ -67,7 +79,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 5. Build Portable ZIP Release Archive
-$ZipPath = Join-Path $DistDir "Rainy_v1.2.0_Portable.zip"
+$ZipPath = Join-Path $DistDir "Rainy_v${Version}_Portable.zip"
 Write-Host ">>> Packaging portable release archive: $ZipPath..." -ForegroundColor Cyan
 if (Test-Path $ZipPath) {
     Remove-Item -Path $ZipPath -Force

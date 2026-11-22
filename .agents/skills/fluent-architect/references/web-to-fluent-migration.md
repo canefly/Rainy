@@ -38,7 +38,7 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("MainWindow")
-        self.setWindowTitle("KNOT TOOLS")
+        self.setWindowTitle("RAINY")
         
         # 1. Enable native Mica backdrop (samples desktop wallpaper)
         self.setMicaEffectEnabled(True)
