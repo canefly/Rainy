@@ -33,7 +33,10 @@ DEFAULT_API_URL = "https://rainy.canefly.xyz"
 # kid -> base64url Ed25519 public key. Filled in at release time with the output of
 # `python -m app.cli gen-key` from rainy-api. While empty, a release build cannot verify any
 # token, so it stays locked (fails closed) instead of silently trusting something.
-EMBEDDED_PUBLIC_KEYS: Dict[str, str] = {}
+EMBEDDED_PUBLIC_KEYS: Dict[str, str] = {
+    # Production server key, generated on the server 2026-11-22. The private half never leaves the server.
+    "k1": "-0A00XJoYWSQerzgXgkHX3H4myXzGsU_AVMg20Hejrw",
+}
 
 REQUEST_PREFIX = b"RAINY-REQ-1\n"
 TOKEN_PREFIX = b"RAINY-TOKEN-1\n"
