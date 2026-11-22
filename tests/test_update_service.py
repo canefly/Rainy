@@ -770,3 +770,16 @@ def test_a_verified_libmpv_archive_is_extracted_then_runtime_checked(qapp, tmp_p
         assert not any(p.name.startswith("_temp_") for p in bin_dir.iterdir())
     finally:
         s.close()
+
+
+def test_an_ffmpeg_archive_missing_ffprobe_is_a_failure_not_a_half_install(qapp, tmp_path, monkeypatch):
+    """FFmpeg is only installed when BOTH of its programs arrive, so the app never ends up with a probe-less setup."""
+    half = zip_with({"ffmpeg-n7/bin/ffmpeg.exe": b"FFMPEG-BINARY", "readme.txt": b"hi"})
+    s = FileServer({"/ff.zip": {"body": half}})
+    try:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _, done, _ = run_worker("ffmpeg", EngineController([entry("ffmpeg", s.url("/ff.zip"), half)]), bin_dir, monkeypatch)
+        assert done[0][1] is False and "ffmpeg.exe and ffprobe.exe" in done[0][2]
+    finally:
+        s.close()

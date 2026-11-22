@@ -78,18 +78,19 @@ def test_a_source_checkout_prefers_its_own_bin_then_the_home(clean_env, monkeypa
     assert ap.writable_bin_dir() == str(dev)
 
 
-def test_an_installed_build_ignores_the_repo_bin_and_the_system_path(clean_env, monkeypatch, tmp_path):
+def test_an_installed_build_only_uses_the_app_home(clean_env, monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(tmp_path / "app" / "Rainy.exe"))
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "app"), raising=False)
     monkeypatch.setattr(ap, "dev_bin_dir", lambda: str(_touch(tmp_path / "repo" / "bin" / "ffmpeg.exe") and tmp_path / "repo" / "bin"))
     on_path = _touch(tmp_path / "pathdir" / "ffmpeg.exe")
     monkeypatch.setenv("PATH", str(Path(on_path).parent))
-    assert ap.find_binary("ffmpeg.exe") is None                       # neither the repo copy nor PATH counts
-    bundled = _touch(tmp_path / "app" / "bin" / "ffmpeg.exe")        # the install folder's copy (for now) does
-    assert ap.find_binary("ffmpeg.exe") == bundled
-    homed = _touch(Path(ap.bin_dir()) / "ffmpeg.exe")                # and the app home wins over it
-    assert ap.find_binary("ffmpeg.exe") == homed
+    _touch(tmp_path / "app" / "bin" / "ffmpeg.exe")                  # a copy next to the exe does not count either
+    _touch(tmp_path / "app" / "ffmpeg.exe")
+    assert ap.find_binary("ffmpeg.exe") is None                       # not the repo copy, not PATH, not the install folder
+    assert ap.engine_search_dirs() == []                              # nothing to look in until the first download
+    homed = _touch(Path(ap.bin_dir()) / "ffmpeg.exe")                # only the app home
+    assert ap.find_binary("ffmpeg.exe") == homed and ap.engine_search_dirs() == [ap.bin_dir()]
     assert ap.writable_bin_dir() == ap.bin_dir()
 
 

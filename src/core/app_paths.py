@@ -76,19 +76,6 @@ def dev_bin_dir() -> str:
     return os.path.join(_source_root(), "bin")
 
 
-def bundled_bin_dirs() -> list:
-    """Engines shipped inside the install folder.
-
-    TRANSITIONAL: the installer still packs libmpv and ffprobe, so a fresh install works before the
-    signed engine list (phase 5) downloads them. Once every engine is pinned and downloaded into
-    ``bin_dir()`` this goes away and the app home is the only place engines live.
-    """
-    if not getattr(sys, "frozen", False):
-        return []
-    base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    return [os.path.join(base, "bin"), base]
-
-
 def engine_search_dirs() -> list:
     """Where engine binaries are looked up, in priority order."""
     dirs = []
@@ -97,7 +84,6 @@ def engine_search_dirs() -> list:
     home_bin = bin_dir()
     if os.path.isdir(home_bin):
         dirs.append(home_bin)
-    dirs.extend(bundled_bin_dirs())
     return dirs
 
 

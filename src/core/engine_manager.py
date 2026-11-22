@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
 from . import app_paths
+from .archive_extract import extract_wanted
 from .license_core import dev_overrides_allowed
 from .logger import get_logger
 from .update_core import (
@@ -452,7 +453,9 @@ class EngineDownloadWorker(QThread):
         wanted = (["libmpv-2.dll", "mpv-2.dll", "libmpv-1.dll", "mpv-1.dll"] if entry.engine == "libmpv"
                   else ["ffmpeg.exe", "ffprobe.exe"])
         try:
-            extracted = (self._extract_7z if entry.format == "7z" else self._extract_zip)(temp_archive, target_bin_dir, wanted)
+            landed = extract_wanted(temp_archive, target_bin_dir, wanted)
+            # libmpv ships under one of several names (any one will do); FFmpeg needs both of its programs.
+            extracted = bool(landed) if entry.engine == "libmpv" else set(landed) == set(wanted)
         finally:
             try:
                 os.remove(temp_archive)
@@ -512,62 +515,7 @@ class EngineDownloadWorker(QThread):
                     self.progress.emit(self.engine_id, pct, f"Downloading: {mb_cur:.1f} MB / {mb_tot:.1f} MB ({pct}%)")
 
     def _extract_zip(self, archive_path: str, target_dir: str, target_filenames: List[str]) -> bool:
-        found = False
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            for member in zf.infolist():
-                base = os.path.basename(member.filename)
-                if base.lower() in [f.lower() for f in target_filenames]:
-                    source = zf.open(member)
-                    out_path = os.path.join(target_dir, base)
-                    with open(out_path, "wb") as f_out:
-                        shutil.copyfileobj(source, f_out)
-                    found = True
-                    logger.info("Extracted %s -> %s", base, out_path)
-        return found
+        return bool(extract_wanted(archive_path, target_dir, target_filenames))
 
     def _extract_7z(self, archive_path: str, target_dir: str, target_filenames: List[str]) -> bool:
-        # 1. Try py7zr
-        try:
-            import py7zr
-            with py7zr.SevenZipFile(archive_path, mode="r") as z:
-                allfiles = z.getnames()
-                targets_in_archive = {}
-                for name in allfiles:
-                    base = os.path.basename(name)
-                    if base.lower() in [f.lower() for f in target_filenames]:
-                        targets_in_archive[name] = base
-
-                if targets_in_archive:
-                    z.extract(path=target_dir, targets=list(targets_in_archive.keys()))
-                    # Move extracted files from nested path to target_dir root if needed
-                    for orig_name, base_name in targets_in_archive.items():
-                        extracted_full = os.path.join(target_dir, orig_name)
-                        desired_full = os.path.join(target_dir, base_name)
-                        if os.path.isfile(extracted_full) and extracted_full != desired_full:
-                            shutil.move(extracted_full, desired_full)
-                    return True
-        except Exception as e:
-            logger.warning("py7zr extraction error: %s, falling back to tar.exe", e)
-
-        # 2. Fallback to Windows system tar.exe (bsdtar)
-        tar_exe = shutil.which("tar") or r"C:\Windows\System32\tar.exe"
-        if os.path.isfile(tar_exe):
-            proc = subprocess.run(
-                [tar_exe, "-xf", archive_path, "-C", target_dir],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=CREATE_NO_WINDOW
-            )
-            # Find and flatten target files
-            found = False
-            for root, _, files in os.walk(target_dir):
-                for f in files:
-                    if f.lower() in [tf.lower() for tf in target_filenames]:
-                        src = os.path.join(root, f)
-                        dst = os.path.join(target_dir, f)
-                        if src != dst:
-                            shutil.move(src, dst)
-                        found = True
-            return found
-
-        return False
+        return bool(extract_wanted(archive_path, target_dir, target_filenames))

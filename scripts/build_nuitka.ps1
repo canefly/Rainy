@@ -79,16 +79,10 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Nuitka compilation failed with exit code $LASTEXITCODE"
 }
 
-# 5. Copy Binary Sidecars (ffprobe, libmpv, etc.)
-$SourceBin = Join-Path $ProjectRoot "bin"
-$DestBin = Join-Path $ProjectRoot "dist_nuitka\main.dist\bin"
-if (Test-Path $SourceBin) {
-    Write-Host ">>> Bundling native binaries from bin/ to main.dist/bin/..." -ForegroundColor Cyan
-    if (-not (Test-Path $DestBin)) {
-        New-Item -ItemType Directory -Path $DestBin -Force | Out-Null
-    }
-    Copy-Item -Path "$SourceBin\*" -Destination $DestBin -Recurse -Force
-}
+# 5. Engines (libmpv, FFmpeg, FFprobe) are NOT bundled any more. After the license check passes the app
+#    downloads them once into %LOCALAPPDATA%\com.canefly.knot\bin from the files the server has pinned
+#    (see docs/app-folder.md). The repo's bin\ folder is only for running from source.
+Write-Host ">>> Not bundling engines: the app downloads and verifies them on first run." -ForegroundColor Cyan
 
 $ExePath = Join-Path $ProjectRoot "dist_nuitka\main.dist\Rainy.exe"
 if (Test-Path $ExePath) {

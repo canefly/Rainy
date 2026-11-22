@@ -446,6 +446,7 @@ class MainWindow(FluentWindow):
         self._license.state_changed.connect(self._on_license_state)
         self._license.update_nudged.connect(self._on_update_nudge)
         self._init_extras()
+        self._init_engine_setup()
         self._license.start()
         # Asynchronously check for application updates (No-OTA Policy)
         self._init_updater()
@@ -464,6 +465,15 @@ class MainWindow(FluentWindow):
             analytics.start()
         except Exception:
             self._extras = None
+
+    def _init_engine_setup(self):
+        """First-run setup of the video player and tools. A problem here must never stop the app starting."""
+        self._engine_setup = None
+        try:
+            from .engine_setup_controller import EngineSetupController
+            self._engine_setup = EngineSetupController(self)
+        except Exception:
+            self._engine_setup = None
 
     def open_bug_report(self):
         """Help > Report a Problem."""
@@ -492,6 +502,9 @@ class MainWindow(FluentWindow):
         extras = getattr(self, "_extras", None)
         if extras is not None:
             extras.on_license_state(snap)
+        setup = getattr(self, "_engine_setup", None)
+        if setup is not None:
+            setup.on_license_state(snap)
 
     def _on_update_required(self, required: bool):
         self._update_required = bool(required)
@@ -528,6 +541,9 @@ class MainWindow(FluentWindow):
         extras = getattr(self, "_extras", None)
         if extras is not None:
             extras.set_gated(gated)
+        setup = getattr(self, "_engine_setup", None)
+        if setup is not None:
+            setup.set_gated(gated)
         for sc in self._shortcuts:
             sc.setEnabled(not gated)
         self.title_menu.setEnabled(not gated)
@@ -1211,6 +1227,9 @@ class MainWindow(FluentWindow):
         extras = getattr(self, '_extras', None)
         if extras is not None:
             extras.shutdown()  # send any waiting usage events (only if opted in), but never hold the window long
+        setup = getattr(self, '_engine_setup', None)
+        if setup is not None:
+            setup.shutdown()  # stop a running engine download so the window can close at once
         if hasattr(self, 'tray_icon') and self.tray_icon:
             try:
                 self.tray_icon.hide()
