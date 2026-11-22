@@ -90,6 +90,7 @@ class _Job(QRunnable):
 
 class LicenseService(QObject):
     state_changed = Signal(object)  # LicenseSnapshot
+    update_nudged = Signal(str)     # the live channel says a newer version exists (version number only)
 
     _instance: Optional["LicenseService"] = None
 
@@ -172,6 +173,11 @@ class LicenseService(QObject):
 
     # -- live channel ----------------------------------------------------------------
     def _on_push(self, frame: dict) -> None:
+        if frame.get("t") == "update_available":
+            version = frame.get("version")
+            if isinstance(version, str):
+                self.update_nudged.emit(version[:32])  # a hint only: the updater fetches the signed feed itself
+            return
         snap = self.controller.apply_push(frame)
         if snap is None:
             return

@@ -132,6 +132,57 @@ def verify_token(token: str, keys: Mapping[str, Ed25519PublicKey], now: float) -
     return payload
 
 
+MANIFEST_PREFIX = b"RAINY-MANIFEST-1\n"
+MANIFEST_VERSION = 1
+
+
+class ManifestError(Exception):
+    """code: malformed, unknown_kid, bad_signature, unsupported, wrong_kind, stale, from_future."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def verify_manifest(token: str, keys: Mapping[str, Ed25519PublicKey], now: float, *, kind: str,
+                    max_age_seconds: Optional[float] = None, future_slack_seconds: float = 86400) -> dict:
+    """Verify a signed manifest (the update feed, the engine list) and return its payload.
+
+    Same server key as licenses but its own signature prefix, so a license can never pass as a
+    manifest or the reverse. `kind` must match what we asked for, and `max_age_seconds` bounds how
+    old a replayed feed may be, so an attacker can't freeze us on an old version."""
+    try:
+        payload_b64, sig_b64 = token.split(".")
+        payload_bytes = b64u_decode(payload_b64)
+        sig = b64u_decode(sig_b64)
+        payload = json.loads(payload_bytes)
+        if not isinstance(payload, dict):
+            raise ValueError
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        raise ManifestError("malformed") from None
+
+    key = keys.get(payload.get("kid"))
+    if key is None:
+        raise ManifestError("unknown_kid")
+    try:
+        key.verify(sig, MANIFEST_PREFIX + payload_bytes)
+    except InvalidSignature:
+        raise ManifestError("bad_signature") from None
+
+    if payload.get("v") != MANIFEST_VERSION:
+        raise ManifestError("unsupported")
+    if payload.get("kind") != kind:
+        raise ManifestError("wrong_kind")
+    iat = payload.get("iat")
+    if not isinstance(iat, int):
+        raise ManifestError("malformed")
+    if max_age_seconds is not None and now - iat > max_age_seconds:
+        raise ManifestError("stale")
+    if iat - now > future_slack_seconds:
+        raise ManifestError("from_future")
+    return payload
+
+
 def validate_token(token: str, keys: Mapping[str, Ed25519PublicKey], device_id: str,
                    device_public_b64: str, now: float) -> dict:
     """verify_token plus: it must be for this device and say 'approved'."""
@@ -262,11 +313,13 @@ class LicenseApi:
         self._clock = clock
 
     def _post(self, path: str, body: bytes, headers: Dict[str, str]) -> dict:
-        req = urllib.request.Request(
-            self.base_url + path, data=body, method="POST",
-            headers={"Content-Type": "application/json", "Accept": "application/json",
-                     "User-Agent": self.user_agent, **headers},
-        )
+        return self._send("POST", path, body, headers)
+
+    def _send(self, method: str, path: str, body: Optional[bytes], headers: Dict[str, str]) -> dict:
+        base_headers = {"Accept": "application/json", "User-Agent": self.user_agent}
+        if body is not None:
+            base_headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base_url + path, data=body, method=method, headers={**base_headers, **headers})
         try:
             with self._open(req, timeout=self.timeout) as res:
                 raw = res.read(1_000_000)
@@ -303,6 +356,16 @@ class LicenseApi:
         headers = sign_request_headers(private_key, "POST", "/v1/license/refresh", b"",
                                        device_id=device_id, now=self._clock())
         return self._post("/v1/license/refresh", b"", headers)
+
+    def get_version(self) -> dict:
+        """The public, signed update feed. Needs no login, so it works even while locked out."""
+        return self._send("GET", "/v1/version", None, {})
+
+    def get_engine_manifest(self, device_id: str, private_key: Ed25519PrivateKey) -> dict:
+        """The signed list of pinned engine downloads. Approved devices only."""
+        headers = sign_request_headers(private_key, "GET", "/v1/engines/manifest", b"",
+                                       device_id=device_id, now=self._clock())
+        return self._send("GET", "/v1/engines/manifest", None, headers)
 
 
 # --------------------------------------------------------------------------- state machine
@@ -610,3 +673,16 @@ class LicenseController:
             self.store.set(K_TOKEN, token)
             return self._set(LicenseState.APPROVED, offline=False, seconds_left=int(payload["exp"] - self._now()))
         return None  # status "approved" alone: the token frame follows, nothing to do yet
+
+    # -- engines ---------------------------------------------------------------------
+    def fetch_engine_manifest(self) -> dict:
+        """The raw reply of GET /v1/engines/manifest (signed by us with the device key). Blocking.
+        Raises ApiUnreachable, or ApiRejected (code `not_registered` if there is no device key yet)."""
+        device_id = self.store.get(K_DEVICE) or ""
+        try:
+            priv = self._private_key(create=False) if device_id else None
+        except SecureStorageError:
+            priv = None
+        if not device_id or priv is None:
+            raise ApiRejected(401, "not_registered", "This install isn't registered.")
+        return self.api.get_engine_manifest(device_id, priv)

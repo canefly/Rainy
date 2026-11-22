@@ -17,6 +17,8 @@ os.environ["KNOT_NO_AUTO_DOWNLOAD"] = "1"   # no first-launch model download fro
 # MainWindow-based UI tests must not hit the license server or sit behind the gate screen.
 # (License tests build their own controller and never go through this switch.)
 os.environ["KNOT_SKIP_LICENSE"] = "1"
+# ...and no MainWindow-based test may reach out to the update server either.
+os.environ["KNOT_NO_UPDATE_CHECK"] = "1"
 # VO loudness-envelope cache (speech-island detection) stays out of ~/.knot_cache.
 os.environ["KNOT_VO_ENVELOPE_DIR"] = os.path.join(_TEMP_DIR.name, "vo_envelopes")
 os.environ["KNOT_CUT_PREVIEW_DIR"] = os.path.join(_TEMP_DIR.name, "cut_preview")

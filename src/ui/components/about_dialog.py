@@ -6,9 +6,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 )
 from qframelesswindow import FramelessWindow, StandardTitleBar
-from qfluentwidgets import FluentIcon, IconWidget, PushButton, ToolButton, SmoothScrollArea
+from qfluentwidgets import FluentIcon, PushButton, SmoothScrollArea
 from ..theme import ThemeManager
-from ...core.updater import UpdateService, APP_VERSION
+from .update_card import UpdateCard
 
 class AboutWindow(FramelessWindow):
     """Independent desktop window for About & Updates matching OBS Studio / Premiere Pro architecture."""
@@ -46,65 +46,14 @@ class AboutWindow(FramelessWindow):
         b_layout.setContentsMargins(20, 16, 20, 16)
         b_layout.setSpacing(12)
 
-        # 0. Version & Release Updates Card
-        ver_box = QFrame(body)
-        ver_box.setObjectName("PrefCard")
-        vb_layout = QVBoxLayout(ver_box)
-        vb_layout.setContentsMargins(16, 14, 16, 14)
-        vb_layout.setSpacing(10)
-
-        vh_row = QHBoxLayout()
-        vh_row.setContentsMargins(0, 0, 0, 0)
-        v_title = QLabel("VERSION & RELEASE UPDATES", ver_box)
-        v_title.setObjectName("PrefSectionTitle")
-        vh_row.addWidget(v_title)
-        vh_row.addStretch(1)
-
-        self.ver_badge = QLabel("Up to Date", ver_box)
-        self.ver_badge.setStyleSheet("""
-            background-color: rgba(52, 211, 153, 0.15);
-            color: #34d399;
-            font-size: 11px;
-            font-weight: 700;
-            padding: 3px 8px;
-            border-radius: 4px;
-            border: 1px solid rgba(52, 211, 153, 0.35);
-        """)
-        vh_row.addWidget(self.ver_badge)
-        vb_layout.addLayout(vh_row)
-
-        self.ver_desc = QLabel(f"Installed: v{APP_VERSION} (Native Standalone x64)", ver_box)
-        self.ver_desc.setWordWrap(True)
-        self.ver_desc.setObjectName("PrefCaption")
-        vb_layout.addWidget(self.ver_desc)
-
-        # Action Buttons
-        act_row = QHBoxLayout()
-        act_row.setContentsMargins(0, 2, 0, 0)
-        act_row.setSpacing(8)
-
-        self.check_btn = PushButton("Check for Updates", ver_box)
-        self.check_btn.setIcon(FluentIcon.SYNC)
-        self.check_btn.clicked.connect(self._check_for_updates)
-        act_row.addWidget(self.check_btn)
-
-        self.download_btn = PushButton("Download Installer (.exe)", ver_box)
-        self.download_btn.setIcon(FluentIcon.DOWNLOAD)
-        self.download_btn.clicked.connect(self._open_download)
-        self.download_btn.hide()
-        act_row.addWidget(self.download_btn)
-
-        act_row.addStretch(1)
-        vb_layout.addLayout(act_row)
-
-        # Changelog Preview
-        self.changelog_lbl = QLabel(ver_box)
-        self.changelog_lbl.setWordWrap(True)
-        self.changelog_lbl.setObjectName("PrefCaption")
-        self.changelog_lbl.hide()
-        vb_layout.addWidget(self.changelog_lbl)
-
-        b_layout.addWidget(ver_box)
+        # 0. Version & Release Updates Card (shared with Preferences and the "update required" screen)
+        self.update_card = UpdateCard(parent=body)
+        self.ver_badge = self.update_card.ver_badge
+        self.ver_desc = self.update_card.ver_desc
+        self.check_btn = self.update_card.check_btn
+        self.download_btn = self.update_card.download_btn
+        self.changelog_lbl = self.update_card.changelog_lbl
+        b_layout.addWidget(self.update_card)
 
         # 1. Maintained by Canefly Box
         box1 = QFrame(body)
@@ -191,64 +140,11 @@ class AboutWindow(FramelessWindow):
         root_layout.addWidget(scroll, 1)
 
     def _check_for_updates(self):
-        self.check_btn.setEnabled(False)
-        self.check_btn.setText("Checking...")
+        self.update_card._on_check()
 
-        def _on_available(latest_v, url, changelog):
-            self.check_btn.setEnabled(True)
-            self.check_btn.setText("Check Again")
-            self.ver_badge.setText(f"Update: v{latest_v}")
-            pal = ThemeManager.get_palette()
-            rgb = pal.get("accent_rgb", "56, 189, 248")
-            accent = pal.get("accent", "#38bdf8")
-            self.ver_badge.setStyleSheet(f"""
-                background-color: rgba({rgb}, 0.18);
-                color: {accent};
-                font-size: 11px;
-                font-weight: 700;
-                padding: 3px 8px;
-                border-radius: 4px;
-                border: 1px solid rgba({rgb}, 0.35);
-            """)
-            self.ver_desc.setText(f"A newer version (v{latest_v}) is available for download.")
-            self.download_btn.show()
-            self._download_url = url
-            if changelog:
-                ch_text = "<b>What's New:</b><br>" + "<br>".join(f"• {c}" for c in changelog)
-                self.changelog_lbl.setText(ch_text)
-                self.changelog_lbl.show()
-
-        def _on_latest(curr_v):
-            self.check_btn.setEnabled(True)
-            self.check_btn.setText("Check for Updates")
-            self.ver_badge.setText("Up to Date")
-            self.ver_badge.setStyleSheet("""
-                background-color: rgba(52, 211, 153, 0.15);
-                color: #34d399;
-                font-size: 11px;
-                font-weight: 700;
-                padding: 3px 8px;
-                border-radius: 4px;
-                border: 1px solid rgba(52, 211, 153, 0.35);
-            """)
-            self.ver_desc.setText(f"You have the latest version installed (v{curr_v}).")
-            self.download_btn.hide()
-            self.changelog_lbl.hide()
-
-        def _on_failed(err):
-            self.check_btn.setEnabled(True)
-            self.check_btn.setText("Check for Updates")
-            self.ver_desc.setText(f"Update check failed: {err}")
-
-        UpdateService.instance().check_for_updates(
-            on_available=_on_available,
-            on_latest=_on_latest,
-            on_failed=_on_failed
-        )
-
-    def _open_download(self):
-        url = getattr(self, "_download_url", "https://rainy.canefly.xyz/download/RainyTools_Setup_v1.2.0.exe")
-        webbrowser.open(url)
+    def apply_theme(self):
+        self.update_card.apply_theme()
+        self.update()
 
     def paintEvent(self, e):
         painter = QPainter(self)

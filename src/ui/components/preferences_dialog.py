@@ -3675,6 +3675,11 @@ class PreferencesWindow(FramelessWindow):
             "Maintainer information, community channels, and software licensing."
         ))
 
+        # Card 0: version and updates (the same card the About window and the update-required screen use)
+        from .update_card import UpdateCard
+        self.update_card = UpdateCard(parent=widget)
+        layout.addWidget(self.update_card)
+
         # Card 1: Maintained by Canefly
         m_card = PrefCardFrame()
         mc_layout = QVBoxLayout(m_card)

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 import shutil
 import ctypes
 import zipfile
@@ -9,7 +10,11 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
+from .license_core import dev_overrides_allowed
 from .logger import get_logger
+from .update_core import (
+    DownloadError, EngineManifestError, download_verified, friendly_download_error, load_engine_entries, pick_engine,
+)
 
 logger = get_logger("engine_manager")
 
@@ -282,6 +287,14 @@ class EngineDownloadWorker(QThread):
             self.finished.emit(self.engine_id, False, str(e))
 
     def _download_libmpv(self):
+        entry, problem = self._pinned_entry()
+        if entry is not None:
+            self._install_pinned(entry)
+            return
+        if not self._legacy_unpinned_allowed():
+            self.finished.emit(self.engine_id, False, problem)
+            return
+        # Developer opt-in only (KNOT_ALLOW_UNPINNED_ENGINES=1): the old unverified GitHub path.
         import urllib.request
         self.progress.emit(self.engine_id, 5, "Checking GitHub releases for libmpv...")
         
@@ -361,6 +374,14 @@ class EngineDownloadWorker(QThread):
             self.finished.emit(self.engine_id, False, "libmpv DLL extracted but failed runtime verification.")
 
     def _download_ffmpeg(self):
+        entry, problem = self._pinned_entry()
+        if entry is not None:
+            self._install_pinned(entry)
+            return
+        if not self._legacy_unpinned_allowed():
+            self.finished.emit(self.engine_id, False, problem)
+            return
+        # Developer opt-in only (KNOT_ALLOW_UNPINNED_ENGINES=1): the old unverified GitHub path.
         import urllib.request
         self.progress.emit(self.engine_id, 5, "Checking GitHub releases for FFmpeg...")
 
@@ -413,6 +434,77 @@ class EngineDownloadWorker(QThread):
             self.finished.emit(self.engine_id, True, f"FFmpeg ({tag}) installed successfully.")
         else:
             self.finished.emit(self.engine_id, False, "Failed to extract FFmpeg binaries from archive.")
+
+    # ------------------------------------------------------------------ pinned (verified) downloads
+    def _legacy_unpinned_allowed(self) -> bool:
+        """Dev only: fetch 'latest' straight from GitHub with no integrity check. Never in a shipped build."""
+        return dev_overrides_allowed() and os.environ.get("KNOT_ALLOW_UNPINNED_ENGINES") == "1"
+
+    def _get_controller(self):
+        from .license_service import LicenseService
+        return LicenseService.instance().controller
+
+    def _pinned_entry(self):
+        """(entry, None) when the server's signed list has this engine for this computer,
+        else (None, message fit to show the user)."""
+        try:
+            entries = load_engine_entries(self._get_controller(), time.time())
+        except EngineManifestError as e:
+            return None, e.message
+        except Exception as e:
+            logger.warning("Engine list failed: %s", e)
+            return None, "Couldn't get the verified download list."
+        entry = pick_engine(entries, self.engine_id)
+        if entry is None:
+            return None, (f"No verified {self.engine_id} download has been published for this computer yet. "
+                          "Ask Cane to publish one.")
+        return entry, None
+
+    def _install_pinned(self, entry):
+        """Download exactly the file the signed list names, refuse it unless its SHA-256 and size match,
+        and only then extract anything from it."""
+        self.progress.emit(self.engine_id, 5, f"Downloading verified {entry.engine} build {entry.version}...")
+        target_bin_dir = get_writable_bin_dir()
+        temp_archive = os.path.join(target_bin_dir, f"_temp_{entry.engine}.{entry.format}")
+
+        def on_progress(got, total):
+            if total:
+                pct = 10 + int(got / total * 75)
+                self.progress.emit(self.engine_id, pct, f"Downloading: {got / (1024 * 1024):.1f} MB / {total / (1024 * 1024):.1f} MB ({pct}%)")
+
+        try:
+            download_verified(entry.url, temp_archive, sha256=entry.sha256, size=entry.size, progress=on_progress,
+                              cancelled=lambda: self._is_cancelled)
+        except DownloadError as e:
+            msg = "Download cancelled by user." if e.code == "cancelled" else friendly_download_error(e)
+            self.finished.emit(self.engine_id, False, msg)
+            return
+
+        self.progress.emit(self.engine_id, 88, "Verified. Extracting...")
+        wanted = (["libmpv-2.dll", "mpv-2.dll", "libmpv-1.dll", "mpv-1.dll"] if entry.engine == "libmpv"
+                  else ["ffmpeg.exe", "ffprobe.exe"])
+        try:
+            extracted = (self._extract_7z if entry.format == "7z" else self._extract_zip)(temp_archive, target_bin_dir, wanted)
+        finally:
+            try:
+                os.remove(temp_archive)
+            except OSError:
+                pass
+
+        if entry.engine == "libmpv":
+            register_engine_dll_directories()
+            if not (extracted or is_mpv_available()):
+                self.finished.emit(self.engine_id, False, "The verified archive did not contain libmpv.")
+            elif is_mpv_available():
+                self.progress.emit(self.engine_id, 100, f"libmpv {entry.version} installed and verified.")
+                self.finished.emit(self.engine_id, True, f"libmpv ({entry.version}) installed and verified.")
+            else:
+                self.finished.emit(self.engine_id, False, "libmpv was extracted but failed its runtime check.")
+        elif extracted:
+            self.progress.emit(self.engine_id, 100, "FFmpeg installed successfully.")
+            self.finished.emit(self.engine_id, True, f"FFmpeg ({entry.version}) installed and verified.")
+        else:
+            self.finished.emit(self.engine_id, False, "The verified archive did not contain ffmpeg.exe and ffprobe.exe.")
 
     def _update_whisper(self):
         self.progress.emit(self.engine_id, 10, "Updating faster-whisper package...")

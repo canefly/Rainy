@@ -25,22 +25,7 @@ def test_updater_service_singleton():
     assert s1.current_version == APP_VERSION
 
 
-def test_live_version_endpoint_payload():
-    from src.core.updater import UpdateCheckWorker, VERSION_ENDPOINT
-    import urllib.request
-    import json
-
-    req = urllib.request.Request(
-        VERSION_ENDPOINT,
-        headers={"User-Agent": "RainyTools/2.0 Native"}
-    )
-    with urllib.request.urlopen(req, timeout=5) as res:
-        assert res.status == 200
-        data = json.loads(res.read().decode("utf-8"))
-        assert "latest_version" in data
-        assert "download_url" in data
-        assert "changelog" in data
-        assert isinstance(data["changelog"], list)
+# (The feed itself is covered offline in test_update_core.py and test_update_service.py: it is now a signed manifest.)
 
 
 def test_about_window_updates_ui(qapp):

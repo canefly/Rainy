@@ -22,6 +22,7 @@ from .components.sidebar import SidebarDock
 from .views.home_view import HomeView
 from .views.workspace_view import WorkspaceView
 from .views.gate_view import GateView
+from .views.update_required_view import UpdateRequiredView
 from ..core.models import DocumentState
 from ..core.parser import DocxParseWorker
 from ..core.license_core import license_gate_disabled
@@ -41,6 +42,8 @@ class MainWindow(FluentWindow):
 
         # License gate: while True the whole app is replaced by the gate screen (see _set_gated)
         self._gated = False
+        self._license_locked = False    # the license says locked
+        self._update_required = False   # this version is below the minimum supported one
         self._pre_gate_widget = None
         self._shortcuts = []
 
@@ -228,6 +231,8 @@ class MainWindow(FluentWindow):
 
         self.gate_view = GateView(self.stack)
         self.stack.addWidget(self.gate_view)
+        self.update_view = UpdateRequiredView(parent=self.stack)
+        self.stack.addWidget(self.update_view)
 
         # Refuse MCP / live-bridge calls while the app is locked
         ipc_server = getattr(self.workspace_view, "mcp_ipc_server", None)
@@ -432,16 +437,20 @@ class MainWindow(FluentWindow):
             return
 
         from ..core.license_service import LicenseService
-        self._set_gated(True)
+        self._license_locked = True
+        self._apply_lock()
         self._license = LicenseService.instance()
         self.gate_view.register_requested.connect(self._license.register)
         self.gate_view.retry_requested.connect(self._license.check_now)
         self._license.state_changed.connect(self._on_license_state)
+        self._license.update_nudged.connect(self._on_update_nudge)
         self._license.start()
         # Asynchronously check for application updates (No-OTA Policy)
         self._init_updater()
 
     def _ipc_gate_reason(self):
+        if self._update_required:
+            return "Rainy needs an update before it can be used. Open the app to install it."
         lic = getattr(self, "_license", None)
         return lic.lock_reason() if lic is not None else None
 
@@ -450,12 +459,39 @@ class MainWindow(FluentWindow):
         if snap.unlocked:
             left = snap.time_left_text() if snap.offline else ""
             self.title_stats.set_editor_identity((snap.editor_name or "EDITOR"), snap.offline, left)
-            self._set_gated(False)
         else:
             self.title_stats.set_editor_identity((snap.editor_name or "UNVERIFIED"), True, "LOCKED")
-            self._set_gated(True)
+        self._license_locked = not snap.unlocked
+        self._apply_lock()
 
-    def _set_gated(self, gated: bool):
+    def _on_update_required(self, required: bool):
+        self._update_required = bool(required)
+        if required:
+            self.update_view.apply_theme()
+        self._apply_lock()
+        if required:
+            self.update_view.start_if_needed()
+
+    def _on_update_nudge(self, version: str):
+        try:
+            from ..core.updater import UpdateService
+            UpdateService.instance().on_nudge(version)
+        except Exception:
+            pass
+
+    def _apply_lock(self):
+        """One place that decides what the user sees: the update screen beats the license gate,
+        which beats the app. Either reason is enough to keep the app locked."""
+        want = self._license_locked or self._update_required
+        target = self.update_view if self._update_required else self.gate_view
+        if want and not self._gated:
+            self._set_gated(True, target)
+        elif want:
+            self.stack.setCurrentWidget(target)   # already locked: just switch which screen explains why
+        elif self._gated:
+            self._set_gated(False)
+
+    def _set_gated(self, gated: bool, target=None):
         """Swap the whole app for the gate screen (or back), and disable every way around it."""
         if gated == self._gated:
             return
@@ -465,14 +501,14 @@ class MainWindow(FluentWindow):
         self.title_menu.setEnabled(not gated)
         if gated:
             current = self.stack.currentWidget()
-            self._pre_gate_widget = current if current is not self.gate_view else None
+            self._pre_gate_widget = current if current not in (self.gate_view, self.update_view) else None
             self.sidebar.hide()
             self.workspace_view.close_drawers()
             for attr in ('pref_window', 'vault_window', 'about_window'):
                 win = getattr(self, attr, None)
                 if win is not None:
                     win.hide()
-            self.stack.setCurrentWidget(self.gate_view)
+            self.stack.setCurrentWidget(target or self.gate_view)
         else:
             target = self._pre_gate_widget or self.home_view
             self._pre_gate_widget = None
@@ -484,6 +520,8 @@ class MainWindow(FluentWindow):
         try:
             from ..core.updater import UpdateService
             updater = UpdateService.instance()
+            updater.required_changed.connect(self._on_update_required)
+            updater.start_periodic()
             updater.check_for_updates(on_available=self._on_update_available)
         except Exception:
             pass
@@ -553,6 +591,8 @@ class MainWindow(FluentWindow):
             self.home_view.apply_theme(variant, dark=dark)
         if hasattr(self, 'gate_view') and self.gate_view:
             self.gate_view.apply_theme()
+        if hasattr(self, 'update_view') and self.update_view:
+            self.update_view.apply_theme()
         self._apply_backdrop_effect()
         for attr in ('pref_window', 'vault_window', 'about_window'):
             win = getattr(self, attr, None)
