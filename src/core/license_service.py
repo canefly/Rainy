@@ -91,6 +91,7 @@ class _Job(QRunnable):
 class LicenseService(QObject):
     state_changed = Signal(object)  # LicenseSnapshot
     update_nudged = Signal(str)     # the live channel says a newer version exists (version number only)
+    announcements_nudged = Signal()  # the live channel says there is something new to read (no text)
 
     _instance: Optional["LicenseService"] = None
 
@@ -177,6 +178,9 @@ class LicenseService(QObject):
             version = frame.get("version")
             if isinstance(version, str):
                 self.update_nudged.emit(version[:32])  # a hint only: the updater fetches the signed feed itself
+            return
+        if frame.get("t") == "announcements":
+            self.announcements_nudged.emit()  # a hint only: the list is fetched and verified over HTTPS
             return
         snap = self.controller.apply_push(frame)
         if snap is None:

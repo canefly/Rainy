@@ -153,6 +153,7 @@ class TitleBarMenuWidget(QWidget):
     shortcuts_requested = Signal()
     settings_requested = Signal()
     about_requested = Signal()
+    report_problem_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,6 +282,10 @@ class TitleBarMenuWidget(QWidget):
         pref_act = Action(FluentIcon.SETTING, "Cookie & Auth Settings...", self)
         pref_act.triggered.connect(self.settings_requested.emit)
         menu.addAction(pref_act)
+
+        report_act = Action(FluentIcon.FEEDBACK, "Report a Problem...", self)
+        report_act.triggered.connect(self.report_problem_requested.emit)
+        menu.addAction(report_act)
 
         menu.addSeparator()
 

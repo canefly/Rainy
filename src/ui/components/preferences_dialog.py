@@ -3680,6 +3680,11 @@ class PreferencesWindow(FramelessWindow):
         self.update_card = UpdateCard(parent=widget)
         layout.addWidget(self.update_card)
 
+        # Card 0b: report a problem + the opt-in usage-sharing choice
+        from .feedback_card import FeedbackCard
+        self.feedback_card = FeedbackCard(parent=widget)
+        layout.addWidget(self.feedback_card)
+
         # Card 1: Maintained by Canefly
         m_card = PrefCardFrame()
         mc_layout = QVBoxLayout(m_card)

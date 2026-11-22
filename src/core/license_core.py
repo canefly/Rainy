@@ -367,6 +367,12 @@ class LicenseApi:
                                        device_id=device_id, now=self._clock())
         return self._send("GET", "/v1/engines/manifest", None, headers)
 
+    def signed_call(self, method: str, path: str, body: Optional[bytes], device_id: str,
+                    private_key: Ed25519PrivateKey) -> dict:
+        """Any device-authenticated request. `body` is sent exactly as given (it is what gets signed)."""
+        headers = sign_request_headers(private_key, method, path, body or b"", device_id=device_id, now=self._clock())
+        return self._send(method, path, body, headers)
+
 
 # --------------------------------------------------------------------------- state machine
 class LicenseState(str, Enum):
@@ -686,3 +692,18 @@ class LicenseController:
         if not device_id or priv is None:
             raise ApiRejected(401, "not_registered", "This install isn't registered.")
         return self.api.get_engine_manifest(device_id, priv)
+
+    def signed_call(self, method: str, path: str, body: Optional[bytes] = None) -> dict:
+        """Blocking device-signed request to rainy-api (announcements, bug reports, analytics).
+        Raises ApiUnreachable, or ApiRejected (code `not_registered` if there is no device key yet)."""
+        device_id = self.store.get(K_DEVICE) or ""
+        try:
+            priv = self._private_key(create=False) if device_id else None
+        except SecureStorageError:
+            priv = None
+        if not device_id or priv is None:
+            raise ApiRejected(401, "not_registered", "This install isn't registered.")
+        return self.api.signed_call(method, path, body, device_id, priv)
+
+    def fetch_announcements(self) -> dict:
+        return self.signed_call("GET", "/v1/announcements")

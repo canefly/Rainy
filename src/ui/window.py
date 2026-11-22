@@ -142,6 +142,7 @@ class MainWindow(FluentWindow):
         self.title_menu.shortcuts_requested.connect(self._on_menu_shortcuts)
         self.title_menu.settings_requested.connect(self.open_settings)
         self.title_menu.about_requested.connect(self.open_about)
+        self.title_menu.report_problem_requested.connect(self.open_bug_report)
 
         # Global Keyboard Accelerators
         self._shortcuts = [
@@ -444,9 +445,34 @@ class MainWindow(FluentWindow):
         self.gate_view.retry_requested.connect(self._license.check_now)
         self._license.state_changed.connect(self._on_license_state)
         self._license.update_nudged.connect(self._on_update_nudge)
+        self._init_extras()
         self._license.start()
         # Asynchronously check for application updates (No-OTA Policy)
         self._init_updater()
+
+    def _init_extras(self):
+        """Announcements, the usage-sharing question and crash reporting. A problem here must never
+        stop the app from starting, so any failure just leaves these features off."""
+        self._extras = None
+        try:
+            from ..core.extras_service import AnalyticsService, AnnouncementService
+            from ..core.updater import APP_VERSION
+            from .extras_controller import ExtrasController
+            analytics = AnalyticsService.instance()
+            self._extras = ExtrasController(self, AnnouncementService.instance(), analytics, APP_VERSION)
+            self._license.announcements_nudged.connect(self._extras.announcements.refresh)
+            analytics.start()
+        except Exception:
+            self._extras = None
+
+    def open_bug_report(self):
+        """Help > Report a Problem."""
+        extras = getattr(self, "_extras", None)
+        if extras is not None:
+            extras.open_bug_report()
+            return
+        from .components.bug_report_dialog import BugReportDialog
+        BugReportDialog(self).exec()
 
     def _ipc_gate_reason(self):
         if self._update_required:
@@ -463,6 +489,9 @@ class MainWindow(FluentWindow):
             self.title_stats.set_editor_identity((snap.editor_name or "UNVERIFIED"), True, "LOCKED")
         self._license_locked = not snap.unlocked
         self._apply_lock()
+        extras = getattr(self, "_extras", None)
+        if extras is not None:
+            extras.on_license_state(snap)
 
     def _on_update_required(self, required: bool):
         self._update_required = bool(required)
@@ -496,6 +525,9 @@ class MainWindow(FluentWindow):
         if gated == self._gated:
             return
         self._gated = gated
+        extras = getattr(self, "_extras", None)
+        if extras is not None:
+            extras.set_gated(gated)
         for sc in self._shortcuts:
             sc.setEnabled(not gated)
         self.title_menu.setEnabled(not gated)
@@ -1176,6 +1208,9 @@ class MainWindow(FluentWindow):
         lic = getattr(self, '_license', None)
         if lic is not None and lic.live is not None:
             lic.live.stop()  # close the live channel cleanly so the server marks us offline at once
+        extras = getattr(self, '_extras', None)
+        if extras is not None:
+            extras.shutdown()  # send any waiting usage events (only if opted in), but never hold the window long
         if hasattr(self, 'tray_icon') and self.tray_icon:
             try:
                 self.tray_icon.hide()
