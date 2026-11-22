@@ -151,12 +151,12 @@ def test_footage_relink_dialog_vo_binding_and_no_cfr_badge(qapp, tmp_path):
 
 
 def test_non_repeating_card_name_and_missing_sorted_first(qapp, tmp_path):
-    linked_clip = tmp_path / "Pat Interview.mp4-redacted.mp4"
+    linked_clip = tmp_path / "Interview A.mp4-redacted.mp4"
     linked_clip.write_bytes(b"\x00" * 4096)
 
     links = [
-        "https://example.com/assets/Pat%20Interview.mp4-redacted.mp4",
-        "https://example.com/assets/Missing_Bodycam_02.mp4",
+        "https://example.com/assets/Interview%20A.mp4-redacted.mp4",
+        "https://example.com/assets/Missing_Clip_02.mp4",
     ]
     dlg = FootageRelinkDialog(
         links=links,
@@ -169,7 +169,7 @@ def test_non_repeating_card_name_and_missing_sorted_first(qapp, tmp_path):
     item_linked = FootageMatchItem(
         url=links[0],
         norm_url=links[0],
-        title="Pat Interview.mp4-redacted.mp4",
+        title="Interview A.mp4-redacted.mp4",
         file_type="video",
         is_matched=True,
         match_tier="EXACT_NAME",
@@ -184,7 +184,7 @@ def test_non_repeating_card_name_and_missing_sorted_first(qapp, tmp_path):
     item_missing = FootageMatchItem(
         url=links[1],
         norm_url=links[1],
-        title="Missing_Bodycam_02.mp4",
+        title="Missing_Clip_02.mp4",
         file_type="video",
         is_matched=False,
         match_tier="MISSING",
@@ -207,8 +207,8 @@ def test_non_repeating_card_name_and_missing_sorted_first(qapp, tmp_path):
     assert "MISSING" not in second_card_labels
     assert any(w.toolTip() == "Linked" for w in dlg.card_widgets[1].findChildren(QLabel))
 
-    # Verify the filename "Pat Interview.mp4-redacted.mp4" appears ONLY ONCE on the linked card
-    occurrences = sum(1 for txt in second_card_labels if txt == "Pat Interview.mp4-redacted.mp4")
+    # Verify the filename "Interview A.mp4-redacted.mp4" appears ONLY ONCE on the linked card
+    occurrences = sum(1 for txt in second_card_labels if txt == "Interview A.mp4-redacted.mp4")
     assert occurrences == 1
     dlg.close()
 
@@ -355,10 +355,10 @@ def test_interlaced_detection_and_decomb_settings(qapp, tmp_path):
     from src.core.ffmpeg_encoder import TranscodeConfig
     from src.ui.components.transcode_dialog import TranscodeDialog
 
-    clip_int = tmp_path / "Legacy_Dashcam_Interlaced.mp4"
+    clip_int = tmp_path / "Legacy_Interlaced_Clip.mp4"
     clip_int.write_bytes(b"\x00" * 2048)
 
-    links = ["https://example.com/Legacy_Dashcam_Interlaced.mp4"]
+    links = ["https://example.com/Legacy_Interlaced_Clip.mp4"]
     dlg = FootageRelinkDialog(
         links=links,
         current_footage_dir="",
@@ -372,7 +372,7 @@ def test_interlaced_detection_and_decomb_settings(qapp, tmp_path):
     it_int = FootageMatchItem(
         url=links[0],
         norm_url=links[0],
-        title="Legacy_Dashcam_Interlaced.mp4",
+        title="Legacy_Interlaced_Clip.mp4",
         file_type="video",
         is_matched=True,
         match_tier="EXACT_NAME",
@@ -420,7 +420,7 @@ def test_aroll_trimmer_refreshes_vfr_badge_after_transcode(qapp, tmp_path, monke
     from src.ui.components.aroll_trimmer_window import ARollTrimmerWindow
     from src.core.media_probe import ProbedMediaItem
 
-    clip_path = str(tmp_path / "ch03_20200101000000.mp4")
+    clip_path = str(tmp_path / "cam03_20200101000000.mp4")
     with open(clip_path, "wb") as f:
         f.write(b"\x00" * 4096)
 

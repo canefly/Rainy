@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QUrl
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from sample_script import CLIP_COUNT, sample_docx_path
 from src.ui.window import MainWindow
 from src.ui.components.timeline_card import TimelineCard
 from src.core.parser import parse_docx_file
@@ -92,29 +93,29 @@ def test_split_and_drawer_toggles(qapp):
     window.close()
 
 def test_document_load_and_stats_parity(qapp):
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     assert os.path.exists(sample_docx)
 
     doc_state = parse_docx_file(sample_docx)
-    assert len(doc_state.items) == 165
+    assert len(doc_state.items) == CLIP_COUNT
 
     window = MainWindow()
     window.workspace_view.load_document(doc_state)
 
     # Check that cards were populated
-    assert len(window.workspace_view.timeline_list.card_list) == 165
+    assert len(window.workspace_view.timeline_list.card_list) == CLIP_COUNT
     assert window.workspace_view.script_viewer.title_label.text() == doc_state.name
     assert hasattr(window.workspace_view.script_viewer, "middle_scroller")
     assert hasattr(window.workspace_view.timeline_list, "middle_scroller")
 
     # Check stats label contains A-Roll and total count
     assert "A-Roll" in window.title_stats.a_roll_pill.text()
-    assert "165" in window.title_stats.a_roll_pill.text()
+    assert str(CLIP_COUNT) in window.title_stats.a_roll_pill.text()
 
     # Check checking off an item updates stats
     first_card = window.workspace_view.timeline_list.card_list[0]
     first_card.set_checked(True)
-    assert "165" in window.title_stats.a_roll_pill.text()
+    assert str(CLIP_COUNT) in window.title_stats.a_roll_pill.text()
 
     # Check top notification suppression per Cane's instruction
     window.title_stats.trigger_copied("00:01:23:00")
@@ -204,7 +205,7 @@ def test_preferences_dialog_modal(qapp):
     window.close()
 
 def test_notes_and_links_drawer_checklist(qapp):
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     window = MainWindow()
@@ -258,7 +259,7 @@ def test_notes_and_links_drawer_checklist(qapp):
     window.close()
 
 def test_timeline_card_responsive_domain(qapp):
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     card = TimelineCard(doc_state.items[0], doc_state.file_signature)
@@ -359,7 +360,7 @@ def test_independent_windows_and_non_modal_spawning(qapp):
     window.close()
 
 def test_timestamp_click_and_graphic_highlight(qapp):
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     window = MainWindow()
@@ -520,7 +521,7 @@ def test_fluent_smooth_scrolling_and_micro_interactions(qapp):
 def test_gpu_smooth_scroll_on_timestamp_click(qapp):
     from src.ui.components.widgets import GpuSmoothScroller, GpuGlowSplitter, GpuGlowSplitterHandle
     from PySide6.QtGui import QImage
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     window = MainWindow()
@@ -695,7 +696,7 @@ def test_middle_click_autoscroll_and_pane_titles(qapp):
     from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QLabel
     from src.ui.components.widgets import MiddleClickAutoScroller
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     window = MainWindow()
@@ -921,7 +922,7 @@ def test_script_viewer_dual_modes_and_direct_editing(qapp):
     import tempfile
     from PySide6.QtGui import QImage
 
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     assert os.path.exists(sample_docx)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1012,7 +1013,7 @@ def test_script_viewer_dual_modes_and_direct_editing(qapp):
         qapp.processEvents()
 
         assert sv.is_edit_mode is False
-        assert len(window.workspace_view.current_doc.items) >= 165
+        assert len(window.workspace_view.current_doc.items) >= CLIP_COUNT
         assert window.workspace_view.current_doc.items[0].is_checked is True
 
         window.close()
@@ -1021,7 +1022,7 @@ def test_script_viewer_dual_modes_and_direct_editing(qapp):
 def test_bidirectional_timestamp_sync_and_doc_mode_highlight(qapp):
     """Verifies that clicking timestamps in script auto-scrolls to timeline card without focus outlines,
     and clicking timeline cards in Document Mode auto-scrolls and animates the exact timestamp highlight."""
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     assert os.path.exists(sample_docx)
 
     doc_state = parse_docx_file(sample_docx)
@@ -1065,7 +1066,7 @@ def test_bidirectional_timestamp_sync_and_doc_mode_highlight(qapp):
 def test_splitter_drag_reflow_hold_and_zero_lag_rebake(qapp):
     """Verifies that dragging the GpuGlowSplitter holds text reflow and timeline card cache invalidation
     during drag ticks for 144Hz fluidity, and cleanly rebakes to settled width upon release."""
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     assert os.path.exists(sample_docx)
 
     doc_state = parse_docx_file(sample_docx)
@@ -1156,7 +1157,7 @@ def test_workspace_mark_all_done_and_reset_checklists(qapp):
     from src.ui.window import MainWindow
     from src.core.parser import parse_docx_file
 
-    sample_docx = os.path.abspath(r"d:\Codes\knot-parser\test_docs\Every Time Family Guy Felt Like Another Show.docx")
+    sample_docx = sample_docx_path()
     doc_state = parse_docx_file(sample_docx)
 
     window = MainWindow()

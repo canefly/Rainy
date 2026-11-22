@@ -25,7 +25,14 @@ os.environ["KNOT_NO_UPDATE_CHECK"] = "1"
 # VO loudness-envelope cache (speech-island detection) stays out of the real cache folder.
 os.environ["KNOT_VO_ENVELOPE_DIR"] = os.path.join(_TEMP_DIR.name, "vo_envelopes")
 os.environ["KNOT_CUT_PREVIEW_DIR"] = os.path.join(_TEMP_DIR.name, "cut_preview")
-atexit.register(lambda: _TEMP_DIR.cleanup())
+def _cleanup_temp_home():
+    import logging
+    logging.shutdown()                      # release knot.log, which lives in the temp app home
+    import shutil
+    shutil.rmtree(_TEMP_DIR.name, ignore_errors=True)
+
+
+atexit.register(_cleanup_temp_home)
 
 
 @pytest.fixture(autouse=True, scope="session")

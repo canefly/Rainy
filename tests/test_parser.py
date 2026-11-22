@@ -4,6 +4,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from sample_script import CLIP_COUNT, FIRST_SECTION, LINK_COUNT, S10E20_CLIPS, SAMPLE_NAME, TITLE, sample_docx_path
 from src.core.parser import (
     parse_time_single, process_time_span, normalize_link,
     parse_docx_file, save_blocks_to_docx, update_timecode_in_docx, compute_file_hash,
@@ -67,17 +68,17 @@ def test_link_normalization():
     assert normalize_link(gdrive) == "https://drive.google.com/file/d/1B2C3D4E5F6G7H8I9J"
 
 def test_real_docx_parsing():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "knot-parser", "test_docs", "Every Time Family Guy Felt Like Another Show.docx"))
-    if os.path.exists(sample_path):
+    sample_path = sample_docx_path()
+    if True:
         doc = parse_docx_file(sample_path)
-        assert len(doc.items) == 165
-        assert len(doc.links) == 11
-        assert len(doc.link_colors) == 11
-        assert doc.name == "Every Time Family Guy Felt Like Another Show.docx"
+        assert len(doc.items) == CLIP_COUNT
+        assert len(doc.links) == LINK_COUNT
+        assert len(doc.link_colors) == LINK_COUNT
+        assert doc.name == SAMPLE_NAME
 
         # Check that clips sharing the same drive file have the EXACT same link color
         s10e20_items = [it for it in doc.items if it.meta == "S10E20"]
-        assert len(s10e20_items) >= 5
+        assert len(s10e20_items) == S10E20_CLIPS
         first_col = doc.link_colors.get(s10e20_items[0].links[0])
         assert first_col is not None
         for it in s10e20_items:
@@ -97,13 +98,11 @@ def test_real_docx_parsing():
         assert "<span style=" in doc.raw_html
         assert "width_pt" in doc.page_geometry
         assert doc.page_geometry["width_pt"] > 300
-        assert len(doc.blocks) > 50
+        assert len(doc.blocks) > 30
 
 
 def test_two_way_docx_edit_and_stateful_reparse():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "knot-parser", "test_docs", "Every Time Family Guy Felt Like Another Show.docx"))
-    if not os.path.exists(sample_path):
-        pytest.skip("Sample docx not found")
+    sample_path = sample_docx_path()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_docx = os.path.join(tmpdir, "editable_script.docx")
@@ -113,7 +112,7 @@ def test_two_way_docx_edit_and_stateful_reparse():
         doc_initial = parse_docx_file(temp_docx)
         old_sig = doc_initial.file_signature
         initial_count = len(doc_initial.items)
-        assert initial_count == 165
+        assert initial_count == CLIP_COUNT
 
         # 2. Mark item #0 as checked and add a custom note
         doc_initial.items[0].is_checked = True
@@ -123,9 +122,9 @@ def test_two_way_docx_edit_and_stateful_reparse():
 
         # 3. Edit the first heading AND append a new @editor timestamp block
         edited_blocks = copy.deepcopy(doc_initial.blocks)
-        edited_blocks[0]["text"] = "Every Time Family Guy Felt Like Another Showwwssss"
+        edited_blocks[0]["text"] = TITLE + "wwssss"
         edited_blocks[0]["spans"] = [{
-            "text": "Every Time Family Guy Felt Like Another Showwwssss",
+            "text": TITLE + "wwssss",
             "color": None,
             "bold": True,
             "italic": False,
@@ -146,13 +145,13 @@ def test_two_way_docx_edit_and_stateful_reparse():
         doc_updated = save_blocks_to_docx(temp_docx, edited_blocks, previous_doc=doc_initial)
 
         # Verify modified heading did NOT double!
-        assert doc_updated.blocks[0]["text"] == "Every Time Family Guy Felt Like Another Showwwssss"
-        assert doc_updated.headings[0]["text"] == "Every Time Family Guy Felt Like Another Showwwssss"
+        assert doc_updated.blocks[0]["text"] == TITLE + "wwssss"
+        assert doc_updated.headings[0]["text"] == TITLE + "wwssss"
 
         # Verify untouched headings (with double spaces in original DOCX) did NOT double!
-        leggo_blocks = [b for b in doc_updated.blocks if "Leggo My Meg-O" in b["text"]]
+        leggo_blocks = [b for b in doc_updated.blocks if FIRST_SECTION in b["text"]]
         assert len(leggo_blocks) == 1
-        assert leggo_blocks[0]["text"].count("Leggo My Meg-O") == 1
+        assert leggo_blocks[0]["text"].count(FIRST_SECTION) == 1
 
         # Verify SHA256 changed on disk and migrated in SQLite
         assert doc_updated.file_signature != old_sig
@@ -171,9 +170,7 @@ def test_two_way_docx_edit_and_stateful_reparse():
 
 
 def test_timeline_timecode_sync_to_docx():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "knot-parser", "test_docs", "Every Time Family Guy Felt Like Another Show.docx"))
-    if not os.path.exists(sample_path):
-        pytest.skip("Sample docx not found")
+    sample_path = sample_docx_path()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_docx = os.path.join(tmpdir, "timecode_sync.docx")
@@ -357,7 +354,7 @@ def test_background_unfurl_engine_and_cookie_integration(monkeypatch):
         # 6. Test Persistent SQLite Link Metadata Cache (0ms Startup Hydration & Selective Restricted Eviction)
         meta_to_store = LinkMetadata(
             url=test_drive_url,
-            title="Bodycam_Footage_01.mp4",
+            title="Sample_Footage_01.mp4",
             description="Google Drive • VIDEO",
             provider="Google Drive",
             domain="drive.google.com",
@@ -372,7 +369,7 @@ def test_background_unfurl_engine_and_cookie_integration(monkeypatch):
         engine._cache.clear()
         hydrated = engine.get_cached(test_drive_url)
         assert hydrated is not None
-        assert hydrated.title == "Bodycam_Footage_01.mp4"
+        assert hydrated.title == "Sample_Footage_01.mp4"
         assert hydrated.file_type == "VIDEO"
         assert hydrated.thumbnail_bytes == b"sqlite_cached_thumb_bytes"
 
@@ -550,8 +547,8 @@ def test_project_manager_atomic_saves_and_recovery(tmp_path):
     assert loaded.notes_data[0]["id"] == "custom-1"
 
     # 3. Test managed folder path resolver
-    auto_path = project_manager.get_auto_project_path("Family Guy Episode 1.docx")
-    assert auto_path.endswith("Family Guy Episode 1.rainyproj")
+    auto_path = project_manager.get_auto_project_path("Lighthouse Episode 1.docx")
+    assert auto_path.endswith("Lighthouse Episode 1.rainyproj")
     assert "Rainy" in auto_path
     assert "Projects" in auto_path
 
