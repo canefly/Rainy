@@ -11,29 +11,45 @@
 - **Where:** a "User guide" entry in the existing **Help** menu (title bar), and a link from the first-run "Rainy is ready" note. Opens a normal Rainy window (same theme and look as About / Settings), not a browser.
 - **Layout:** a list of topics on the left, the page on the right, with a search box (the Settings window already has a "Find a setting" box to copy the pattern from).
 - **Content:** plain pages written as text files shipped inside the app (`assets/guide/*.md` or one structured file). Plain text only, no network needed, works offline. It is the app's own bundled content, so a bad update to the text can never break the app.
-- **Later option (not for 1.3.1):** load the guide text from the server for approved devices only (like announcements), so the text can change without a release. Only worth it if the guide changes often.
+- **Later option (not for this build):** load the guide text from the server for approved devices only (like announcements), so the text can change without a release. Only worth it if the guide changes often.
 
-## Draft outline (to be filled in with the owner)
+## Decided content (owner's answers, 2026-11-23)
 
-1. Getting started (install, name, waiting for approval, the first-run download)
+**Tone:** short and practical. Less noise, easy to follow. **Text only**, no screenshots. Not visible before approval (the app is private, which is the whole reason there is no public manual).
+
+**Links inside the guide:** key phrases are links that jump straight to the matching section (for example "set up MCP" jumps to that page), and where it helps, to the matching Settings tab.
+
+**Every page ends with:** "Stuck? Message Cane." plus the @yow_ph handle already shown on the About page.
+
+### Part 1: The basics
+1. Getting started (install, editor name, waiting for approval, the first-run download)
 2. Opening a script (drop a .docx or .rainyproj) and what the parser reads
 3. A-roll cards (timestamps, durations, checking cards off)
-4. The clip player (looping, editing In/Out, shortcuts)
-5. Editor Notes (script notes vs your own notes, delete, jump to line)
-6. Source links and linking footage
-7. Voiceover pipeline and the script-vs-VO check
-8. Exporting (Premiere XML / sending to Premiere)
-9. The Rainy MCP bridge (using it with an AI assistant)
-10. Settings, themes, and where your files live
-11. Shortcuts and tips
-12. If something goes wrong (Report a Problem, the log folder)
+4. Editor Notes (script notes vs your own notes, delete, jump to line)
+5. Source links (only the source links part of linking)
+6. Export Premiere XML on its own: just the flat A-roll, with no voiceover, no assistance, no smart matching. Says so plainly.
 
-## Open questions for the owner
+### Part 2: Configuration
+7. The clip player (looping, editing In/Out)
+8. Settings and themes, and where your files live
+9. Shortcuts and tips
+10. If something goes wrong (Report a Problem, the log folder)
 
-- Which of the topics above are really worth writing, and which features should NOT be explained in detail at all?
-- Tone: short and practical, or friendly and chatty?
-- Screenshots in the guide, or text only? (Screenshots make the installer bigger and go out of date.)
-- Should the guide be visible before approval? (Currently no: the app shows only the waiting screen until you approve, so it would be unreachable anyway.)
+### Part 3: The automation pipeline (A-roll and voiceover), one linear walkthrough
+11. Set up a footage workspace
+12. Link footage
+13. Transcribe the voiceover
+14. Check the script against the voiceover (the VO check)
+15. Connect an AI assistant over MCP, then run the automation. Includes how to set up MCP.
+
+Must say plainly in part 3:
+- An AI assistant that can talk to a local MCP server is required: Claude Code, Antigravity, Codex or similar.
+- Some need a paid plan, some have a free tier with limits, and users should check each one. **Do not put prices or limits in the guide** (they change and go stale); the owner may name a free tier himself once confirmed.
+- Some prompting skill helps, but the MCP tool itself carries guidance for the assistant, so users do not need to write long prompts.
+
+## Still to decide before writing
+- Exact wording of each page: to be drafted by Claude in small batches and approved by the owner before it goes in the app.
+- Whether the first-run "Rainy is ready" note links to the guide.
 
 ## Steps once the content is decided
 
