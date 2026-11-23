@@ -24,7 +24,7 @@ Open **Settings** from the left bar or the Home screen. The sections:
 | Section | What it is for |
 |---|---|
 | **Home** | A summary and quick switches |
-| **Data Vault** | Stored data and statistics. **CONFIRM: please check what you want said here** |
+| **Data Vault** | Your saved projects, the activity log, the media cache and the list of scripts you opened. See below |
 | **Media & Transcoding** | The video encoder used when Rainy converts clips |
 | **Core Engines** | The helper programs (video player, video tools, speech engine). Check, download or fix them here |
 | **Personalization** | Themes and looks (below) |
@@ -41,6 +41,13 @@ There is a search box at the top: type what you are looking for and it jumps to 
 - **Dark Mode** switch. The first time you open Rainy it starts in dark.
 - **Color Palette Preset:** Femboy Pink, Cloudy Blue, Matcha Green, Adobe Gray or OLED Black. **Adobe Gray is the default.**
 - **Ambient Mica Orb Glow** and **Window Glass Transparency** sliders for the coloured glow and see-through look. They apply to the glassy palettes (Pink, Blue, Green). Adobe Gray and OLED Black are solid.
+
+**Data Vault**
+
+- **Memory File Save (.rainyproj):** Rainy saves your checklist progress, your own notes and your linked footage paths into a project file as you work. Your project lives on without the original .docx, so losing the document does not lose your work. **Open Projects Folder** takes you to the files.
+- **Activity & Diagnostics Logs:** a small log (it never grows past 5 MB) that helps when something goes wrong. **Open Folder**, **View Live Log…**, **Export (.zip)** and **Clear** are here. Use the **Level** dropdown to choose how much it records.
+- **Integrated Media Probe Engine:** shows the video tools Rainy uses to read your clips, and how many clips it remembers. **Clear Media Cache** forgets them, and Rainy re-reads them when needed.
+- **Cached Scripts:** every script you have opened. The folder button opens its saved project.
 
 **Where Rainy keeps your things**
 
@@ -82,5 +89,5 @@ There is a search box at the top: type what you are looking for and it jumps to 
 1. **Report a Problem.** **Help, Report a Problem…** Say what you were doing and what happened. Keep **Include my recent app log** ticked, it helps a lot. Press **Show what will be sent** to see exactly what goes. Nothing is sent until you press **Send report**.
 2. **Helper programs missing or broken.** Open **Settings, Core Engines**. They can be checked and downloaded again there.
 3. **It will not connect or unlock.** The screen tells you why (offline, clock wrong, access revoked). Fix that and press **Retry**.
-4. **Need the log yourself?** It is a text file: `%LOCALAPPDATA%\com.canefly.knot\logs\knot.log`. There is also a one-click **Export Diagnostics Bundle (.zip)** in Settings. **CONFIRM: please say which Settings section that button lives in** (I found it on the page with the shortcuts card, which I believe is the Home page).
+4. **Need the log yourself?** Go to **Settings, Data Vault, Activity & Diagnostics Logs**. **Open Folder** shows it, and **Export (.zip)** bundles the logs into one file you can send to Cane. The log itself is a text file: `%LOCALAPPDATA%\com.canefly.knot\logs\knot.log`.
 5. **Still stuck?** Message Cane.
