@@ -4,20 +4,7 @@ DRAFT for the owner to review. Text only, short and practical. `[[link: ...]]` m
 
 ---
 
-## P1. Getting started
-
-1. **Install Rainy** and open it.
-2. On the **Welcome to Rainy** screen, type the name you edit under and press **Request access**. Cane approves every editor before the app unlocks.
-3. You will see **Waiting for approval**. Leave Rainy open. It unlocks by itself when Cane approves you (or press **Check now**).
-4. The first time after approval, a small window called **Getting Rainy ready** appears. Rainy downloads the helper programs it needs (a video player and video tools, plus an optional photo-censoring model). This happens once. You can keep using Rainy while it works.
-
-If you see **Access revoked**, **Can't reach the server** or **Your clock is off**, the screen tells you what to do. Anything else: message Cane.
-
-Next: [[link: Open a script]]
-
----
-
-## P2. Open a script
+## P1. Open a script
 
 Drop a **.docx** script or a **.rainyproj** project anywhere on the Home screen, or click the **Script Parser** card to browse. You can also use **File, Open Document…** or **File, Open Project (.rainyproj)…**. Scripts you opened before are listed under **Recent scripts**.
 
@@ -34,16 +21,33 @@ Next: [[link: A-roll cards]]
 
 ---
 
-## P3. A-roll cards
+## P2. A-roll cards
 
 Each A-roll becomes a card on the right of the workspace, in order.
 
 | On the card | What it does |
 |---|---|
 | Round box at the left | Tick it when you have finished that cue |
-| Number and label chip | The cue's row number and its label **CONFIRM: where the label (for example S10E20) comes from** |
-| **▶** (Play clip on loop) | Opens the [[link: clip player]] to watch the cut on a loop. Needs the footage to be linked |
+| Number and label chip | The cue's row number and its show label, for example **S10E20** (Season 10, Episode 20) |
+| **▶** (Play clip on loop) | Opens the clip player and plays the cut on a loop. **Needs the footage to be linked** |
 | Start time, **DUR**, end time | The cut's In point, its length and its Out point. **Click a time to copy it** for Premiere Pro |
+
+**Times are conformed for you.** Once your footage is linked, Rainy automatically converts each time to the exact frame (HH:MM:SS:FF) of your clip, so what you copy is what Premiere expects. This is on by default (**Settings, Timecode Conforming Engine, Auto-Conform to SMPTE Timecode**). Without linked footage, the cards show the raw times from the script and the player cannot play the clip. To link your footage: [[link: Link your footage]].
+
+**Fix a wrong cut precisely.** Press **▶** to open the clip player, then **Edit**. Now you can move the cut exactly where it should be:
+
+| Do this | Keys |
+|---|---|
+| Set the In point at the playhead | **I** |
+| Set the Out point at the playhead | **O** |
+| Step one frame back or forward | **←** and **→** |
+| Play or pause | **Space** |
+| Undo the last change | **Ctrl+Z** |
+| Go back to the script writer's original times | **R** |
+| Move to the previous or next card | **↑ / P** and **↓ / N** |
+| Apply the change and go back to looping | **Edit** button, **Ctrl+S**, **E** or **Esc** |
+
+The timeline strip under the video shows the cut as brackets that you can see and adjust, with zoom, so a wrong cut is easy to spot and fix. The card updates by itself when you apply.
 
 Handy: **Edit, Mark All Items Done** ticks everything, and **Edit, Reset All Checklists** clears it.
 
@@ -51,7 +55,7 @@ Next: [[link: Editor Notes]]
 
 ---
 
-## P4. Editor Notes
+## P3. Editor Notes
 
 Open them with the pencil icon in the left bar. Notes are the instructions from the script that are not a cue, plus any note you add yourself.
 
@@ -66,7 +70,7 @@ Next: [[link: Source links]]
 
 ---
 
-## P5. Source links
+## P4. Source links
 
 Open them with the link icon in the left bar. It lists every link found in your script, as a checklist.
 
@@ -82,7 +86,7 @@ Next: [[link: Export Premiere XML on its own]]
 
 ---
 
-## P6. Export Premiere XML on its own
+## P5. Export Premiere XML on its own
 
 The simple export. Choose **Export, Premiere Pro XML Sequence (.xml)…** (shortcut **Ctrl+E**) with a script open.
 

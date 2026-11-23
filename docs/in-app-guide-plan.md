@@ -22,7 +22,7 @@
 **Every page ends with:** "Stuck? Message Cane." plus the @yow_ph handle already shown on the About page.
 
 ### Part 1: The basics
-1. Getting started (install, editor name, waiting for approval, the first-run download)
+1. ~~Getting started~~ (removed from the guide: see the startup help below)
 2. Opening a script (drop a .docx or .rainyproj) and what the parser reads
 3. A-roll cards (timestamps, durations, checking cards off)
 4. Editor Notes (script notes vs your own notes, delete, jump to line)
@@ -46,6 +46,10 @@ Must say plainly in part 3:
 - An AI assistant that can talk to a local MCP server is required: Claude Code, Antigravity, Codex or similar.
 - Some need a paid plan, some have a free tier with limits, and users should check each one. **Do not put prices or limits in the guide** (they change and go stale); the owner may name a free tier himself once confirmed.
 - Some prompting skill helps, but the MCP tool itself carries guidance for the assistant, so users do not need to write long prompts.
+
+## Startup help (decided 2026-11-23)
+
+"Getting started" (request access, waiting for approval, the one-time download) is **not** a page of the full guide: it is too basic. Instead, the Welcome screen gets a small **"?" button**. Someone who has just installed Rainy, sees the editor-name box and does not know what to do clicks it and gets a short, plain explanation: pick your name, press Request access, wait for approval, then the first-run download. This is a separate small piece of work from the guide window.
 
 ## Still to decide before writing
 - Exact wording of each page: to be drafted by Claude in small batches and approved by the owner before it goes in the app.
