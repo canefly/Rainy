@@ -57,6 +57,37 @@ def disable_menu_animations():
 disable_menu_animations()
 
 
+def style_fluent_tooltips():
+    """The hover tips on buttons are qfluentwidgets ToolTip frames. They carry their own widget-level style, which
+    beat the app style and left dark text on a dark box in light mode. Re-style each one with the Rainy palette
+    just before it is shown, so the box and the text always contrast."""
+    try:
+        from qfluentwidgets.components.widgets.tool_tip import ToolTip
+    except Exception:  # noqa: BLE001
+        return
+    if getattr(ToolTip, "_rainy_styled", False):
+        return
+    original = ToolTip.showEvent
+
+    def show_event(self, e):
+        try:
+            pal = ThemeManager.get_palette()
+            self.setStyleSheet(
+                f"ToolTip > QFrame {{ background-color: {pal['surface']}; border: 1px solid {pal['border']}; "
+                f"border-radius: 6px; }} "
+                f"ToolTip QLabel {{ color: {pal['text']}; background: transparent; border: none; "
+                f"font-size: 12px; }}")
+        except Exception:  # noqa: BLE001  (cosmetic)
+            pass
+        original(self, e)
+
+    ToolTip.showEvent = show_event
+    ToolTip._rainy_styled = True
+
+
+style_fluent_tooltips()
+
+
 class ThemeVariant(Enum):
     PINK = "pink"
     BLUE = "blue"
@@ -205,7 +236,7 @@ PALETTES: Dict[ThemeVariant, Dict[str, Any]] = {
 }
 
 class ThemeManager:
-    current_variant = ThemeVariant.PINK
+    current_variant = ThemeVariant.GRAY
     is_dark = True
     orb_glow_intensity: int = 25              # 0..100% (Default: 25% Subtle preset)
     glass_transparency: int = 65              # 0..100% (Default: 65% Balanced DWM glass preset)
@@ -552,6 +583,12 @@ class ThemeManager:
         QLabel {{
             color: {text};
             background: transparent;
+        }}
+        QToolTip {{
+            color: {text};
+            background-color: {surface};
+            border: 1px solid {border};
+            padding: 4px 8px;
         }}
 
         /* Subtle Fluent Window Chrome */

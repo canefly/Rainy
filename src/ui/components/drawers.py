@@ -372,6 +372,7 @@ class NotesDrawer(DrawerFrame):
         self.note_cards: List[QFrame] = []
         self.checked_state: Dict[str, bool] = {}
         self.empty_lbl = None
+        self._custom_ids: set = set()
 
         target_parent = self.parentWidget() or QApplication.activeWindow()
         parent_w = target_parent.width() if target_parent else 900
@@ -433,9 +434,10 @@ class NotesDrawer(DrawerFrame):
         self.note_input.returnPressed.connect(self._on_add_note)
         add_row.addWidget(self.note_input, 1, Qt.AlignVCenter)
 
+        # plain text, no icon: the icon was painted over the label inside the custom padding
         self.add_btn = PushButton("Add Note", self.widget)
-        self.add_btn.setIcon(FluentIcon.ADD)
         self.add_btn.setFixedHeight(32)
+        self.add_btn.setMinimumWidth(96)
         self.add_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.add_btn.clicked.connect(self._on_add_note)
         add_row.addWidget(self.add_btn, 0, Qt.AlignVCenter)
@@ -540,6 +542,10 @@ class NotesDrawer(DrawerFrame):
             is_checked = bool(card.property("is_checked"))
             self._apply_note_style(card, is_checked)
 
+    def set_custom_ids(self, ids) -> None:
+        """Which notes the editor typed themselves: only those get a delete button."""
+        self._custom_ids = set(ids)
+
     def load_notes(self, notes: List[EditorNote], checked_notes: Optional[Dict[str, bool]] = None):
         self.notes = notes
         self.checked_state = checked_notes.copy() if checked_notes else {}
@@ -604,6 +610,15 @@ class NotesDrawer(DrawerFrame):
             copy_btn.clicked.connect(lambda _, t=note.text: self._copy_text(t))
             top_row.addWidget(copy_btn)
 
+            delete_btn = None
+            if note.id in self._custom_ids:
+                delete_btn = ToolButton(FluentIcon.DELETE, card)
+                delete_btn.setObjectName("NoteDeleteButton")
+                delete_btn.setFixedSize(24, 24)
+                delete_btn.setToolTip("Delete this note")
+                delete_btn.clicked.connect(lambda _, nid=note.id: self.note_deleted.emit(nid))
+                top_row.addWidget(delete_btn)
+
             c_layout.addLayout(top_row)
 
             # Note text
@@ -619,6 +634,7 @@ class NotesDrawer(DrawerFrame):
             card.setProperty("text_label", lbl)
             card.setProperty("jump_btn", jump_btn)
             card.setProperty("copy_btn", copy_btn)
+            card.setProperty("delete_btn", delete_btn)
 
             self._apply_note_style(card, is_checked)
 
@@ -669,7 +685,7 @@ class NotesDrawer(DrawerFrame):
                 background-color: rgba({rgb}, 0.22);
             }}
         """
-        for b_name in ("jump_btn", "copy_btn"):
+        for b_name in ("jump_btn", "copy_btn", "delete_btn"):
             btn = card.property(b_name)
             if btn is not None:
                 btn.setStyleSheet(btn_qss)

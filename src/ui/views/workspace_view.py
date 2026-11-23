@@ -123,6 +123,7 @@ class WorkspaceView(QWidget):
         win = self.window() if self.window() else self
         self.notes_drawer = NotesDrawer(win)
         self.notes_drawer.note_added.connect(self._on_add_custom_note)
+        self.notes_drawer.note_deleted.connect(self._on_delete_custom_note)
         self.notes_drawer.note_checked_changed.connect(self._on_note_checked_changed)
         self.notes_drawer.jump_to_block_requested.connect(self._on_jump_to_block)
         self.notes_drawer.copy_feedback_requested.connect(self.copy_feedback_requested.emit)
@@ -273,6 +274,7 @@ class WorkspaceView(QWidget):
             from ...core.waveform_engine import waveform_precache_manager
             waveform_precache_manager.queue_footage(list(self.linked_footage.values()))
         all_notes = doc.notes + doc.custom_notes
+        self.notes_drawer.set_custom_ids([n.id for n in doc.custom_notes])
         self.notes_drawer.load_notes(all_notes, doc.checked_notes)
         self.links_drawer.load_links(doc.links, doc.checked_links, getattr(self, "linked_footage", {}))
 
@@ -473,6 +475,7 @@ class WorkspaceView(QWidget):
         self.schedule_save()
         self.timeline_list.load_items(self.current_doc.items, self.current_doc.file_signature, self.current_doc.link_colors)
         all_notes = self.current_doc.notes + self.current_doc.custom_notes
+        self.notes_drawer.set_custom_ids([n.id for n in self.current_doc.custom_notes])
         self.notes_drawer.load_notes(all_notes, self.current_doc.checked_notes)
         self.links_drawer.load_links(self.current_doc.links, self.current_doc.checked_links, getattr(self, "linked_footage", {}))
         self._recompute_stats()
@@ -780,7 +783,23 @@ class WorkspaceView(QWidget):
         self.schedule_save()
         
         all_notes = self.current_doc.notes + self.current_doc.custom_notes
-        self.notes_drawer.load_notes(all_notes)
+        self.notes_drawer.set_custom_ids([n.id for n in self.current_doc.custom_notes])
+        self.notes_drawer.load_notes(all_notes, self.current_doc.checked_notes)
+        self.notes_count_changed.emit(len(all_notes))
+
+    def _on_delete_custom_note(self, note_id: str):
+        """Remove a note the editor typed themselves (notes that come from the script cannot be deleted here)."""
+        if not self.current_doc:
+            return
+        before = len(self.current_doc.custom_notes)
+        self.current_doc.custom_notes = [n for n in self.current_doc.custom_notes if n.id != note_id]
+        if len(self.current_doc.custom_notes) == before:
+            return
+        self.current_doc.checked_notes.pop(note_id, None)
+        self.schedule_save()
+        all_notes = self.current_doc.notes + self.current_doc.custom_notes
+        self.notes_drawer.set_custom_ids([n.id for n in self.current_doc.custom_notes])
+        self.notes_drawer.load_notes(all_notes, self.current_doc.checked_notes)
         self.notes_count_changed.emit(len(all_notes))
 
     def _recompute_stats(self):

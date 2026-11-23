@@ -399,7 +399,7 @@ class TimecodeScrubBar(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
         pal = ThemeManager.get_palette()
-        is_dark = pal.get("is_dark", True)
+        is_dark = True        # a video player stays dark whatever theme the app uses
         accent = QColor(pal.get("accent", "#38bdf8"))
 
         # Background surfaces
@@ -766,6 +766,9 @@ class ARollTrimmerWindow(QWidget):
         super().__init__(parent)
         self.setObjectName("ARollTrimmerWindow")
         self.setWindowTitle("Clip Player")
+        from ..logo import LOGO_PATH
+        from PySide6.QtGui import QIcon
+        self.setWindowIcon(QIcon(LOGO_PATH))
         self.resize(760, 520)
         self.setMinimumSize(560, 380)
 
@@ -823,12 +826,11 @@ class ARollTrimmerWindow(QWidget):
 
     def _setup_ui(self):
         pal = ThemeManager.get_palette()
-        is_dark = pal["is_dark"]
-        bg_col = "#111114" if is_dark else "#f8f9fa"
+        bg_col = "#111114"       # always dark: a video player does not follow the light theme
         self.setStyleSheet(f"""
             QWidget#ARollTrimmerWindow {{
                 background-color: {bg_col};
-                color: {pal['text']};
+                color: #f4f4f5;
             }}
         """)
 
@@ -973,7 +975,7 @@ class ARollTrimmerWindow(QWidget):
         #    LEFT  = Mark In / Mark Out
         #    CENTER = [ < Play > ] transport cluster
         #    RIGHT = Prev / Next card | Undo / Reset
-        is_dark_ui = pal["is_dark"]
+        is_dark_ui = True
         icon_col = QColor("#e4e4e7") if is_dark_ui else QColor("#27272a")
         btn_size = QSize(34, 32)
 

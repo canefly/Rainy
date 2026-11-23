@@ -78,14 +78,14 @@ class MainWindow(FluentWindow):
         self.setMinimumSize(1024, 640)
 
         # Early Theme Loading from SQLite so child widgets construct with correct palette
-        saved_var_str = db.get_setting("theme_variant", "pink")
+        saved_var_str = db.get_setting("theme_variant", "gray")
         saved_dark_str = db.get_setting("theme_dark", "true")
         saved_orb_str = db.get_setting("orb_glow_intensity", "25")
         saved_glass_str = db.get_setting("glass_transparency", "65")
         try:
             self._saved_variant = ThemeVariant(saved_var_str)
         except ValueError:
-            self._saved_variant = ThemeVariant.PINK
+            self._saved_variant = ThemeVariant.GRAY
         self._saved_dark = (saved_dark_str.lower() != "false")
         try:
             ThemeManager.orb_glow_intensity = max(0, min(100, int(saved_orb_str)))
@@ -95,6 +95,8 @@ class MainWindow(FluentWindow):
             ThemeManager.glass_transparency = max(0, min(100, int(saved_glass_str)))
         except ValueError:
             ThemeManager.glass_transparency = 65
+        from .tooltips import install_tooltips
+        install_tooltips()
         ThemeManager.current_variant = self._saved_variant
         ThemeManager.is_dark = self._saved_dark
 
@@ -260,12 +262,15 @@ class MainWindow(FluentWindow):
         photo_censor.model_state_changed.connect(self._sync_censor_download_notice)
         photo_censor.model_download_progress.connect(self._on_censor_download_progress)
         photo_censor.model_download_finished.connect(self._on_censor_download_finished)
-        QTimer.singleShot(4000, photo_censor.maybe_auto_download)
+        if license_gate_disabled():     # installed builds start it after approval, inside the first-run window
+            QTimer.singleShot(4000, photo_censor.maybe_auto_download)
 
     # --- Photo auto-censor model download notice ---
     def _sync_censor_download_notice(self):
         """Shows a small persistent notice while the censor model downloads, wherever it was started."""
         from ..core.photo_censor import photo_censor
+        if self._first_run_owns_censor_download():
+            return
         if not photo_censor.is_downloading() or self._censor_dl_bar is not None:
             return
         bar = InfoBar.new(
@@ -294,8 +299,14 @@ class MainWindow(FluentWindow):
             bar.content = f"Downloading a small on-device model\u2026 {pct}%  ({status})"
             bar._adjustText()
 
+    def _first_run_owns_censor_download(self) -> bool:
+        setup = getattr(self, "_engine_setup", None)
+        return bool(setup is not None and setup.owns_censor_download)
+
     def _on_censor_download_finished(self, outcome: str, message: str):
         from ..core import photo_censor as pc
+        if self._first_run_owns_censor_download():
+            return                                  # the first-run window reports it
         bar, self._censor_dl_bar = self._censor_dl_bar, None
         if bar is not None:
             try:
@@ -469,8 +480,11 @@ class MainWindow(FluentWindow):
         """First-run setup of the video player and tools. A problem here must never stop the app starting."""
         self._engine_setup = None
         try:
-            from .engine_setup_controller import EngineSetupController
-            self._engine_setup = EngineSetupController(self)
+            from .first_run_controller import FirstRunController
+            self._engine_setup = FirstRunController(self)
+            extras = getattr(self, "_extras", None)
+            if extras is not None:
+                self._engine_setup.quiet_changed.connect(extras.set_quiet)    # one thing at a time on a first start
         except Exception:
             self._engine_setup = None
 

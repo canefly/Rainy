@@ -643,10 +643,6 @@ class PreferencesWindow(FramelessWindow):
 
             title = QLabel(title_text)
             title.setObjectName("PrefTabTitle")
-            title.setStyleSheet(
-                f"font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; "
-                f"font-size: 28px; font-weight: 700; color: {text_col};"
-            )
             title_row.addWidget(title)
 
             # Standard Windows 11 Blue badge (NOT theme accent)
@@ -669,18 +665,10 @@ class PreferencesWindow(FramelessWindow):
         else:
             title = QLabel(title_text)
             title.setObjectName("PrefTabTitle")
-            title.setStyleSheet(
-                f"font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; "
-                f"font-size: 28px; font-weight: 700; color: {text_col};"
-            )
             header_layout.addWidget(title)
 
         sub = QLabel(subtitle_text)
         sub.setObjectName("PrefTabSubtitle")
-        sub.setStyleSheet(
-            f"font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; "
-            f"font-size: 13.5px; color: {muted_col};"
-        )
         sub.setWordWrap(True)
         header_layout.addWidget(sub)
         return header_layout
