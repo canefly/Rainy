@@ -1,0 +1,31 @@
+WHAT RAINY NEEDS, AND WHY
+
+Rainy turns a script into a ready-to-edit timeline: A-roll cards, voiceover cuts and B-roll. To do that it uses a few helper programs. They are not part of this installer, which keeps the installer small and lets the helpers stay up to date.
+
+WHAT HAPPENS AFTER YOU INSTALL
+
+1. Open Rainy and enter the name you edit under.
+2. Wait for Cane to approve you. Until then Rainy shows a waiting screen and downloads nothing.
+3. Once you are approved, a small window appears and Rainy downloads what it needs. You can keep using Rainy while that happens.
+
+THE HELPER PROGRAMS (about 57 MB, downloaded once)
+
+- Video player (libmpv, about 30 MB): plays your footage frame by frame so you can check a clip before it goes on the timeline.
+- Video tools (FFmpeg and FFprobe, about 27 MB): read the details of your video files and prepare footage for editing.
+
+Each one comes from its official public download page. Rainy checks every file against a fingerprint signed by Cane's server and throws it away if it does not match, so a changed or damaged file is never used.
+
+OPTIONAL EXTRAS
+
+- Automatic photo censoring (about 155 MB): a small model that runs on your own computer and blurs graphic photos in your scripts until you click to view them. It is downloaded in the same window, and you can skip it or remove it later in Settings > AI Models.
+- Voiceover transcription models: only downloaded if you choose them in Settings > AI Models.
+
+WHERE THINGS ARE KEPT
+
+Everything Rainy downloads or saves lives in one folder, so it is easy to back up or delete:
+
+%LOCALAPPDATA%\com.canefly.knot
+
+Your projects are saved as .rainyproj files in Documents\Rainy.
+
+If a download fails (for example you are offline), Rainy tells you what went wrong and lets you try again. It never stops you using the rest of the app.

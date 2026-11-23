@@ -2,11 +2,10 @@
 import sys
 
 import pytest
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication
 
 from src.core import engine_setup as es
-from src.ui.engine_setup_controller import EngineSetupController
 
 
 class FakeWorker(QObject):
@@ -160,89 +159,14 @@ def test_missing_engines_reports_what_the_app_cannot_find(qapp, monkeypatch):
     assert es.missing_engines() == []
 
 
-# -- the notice ---------------------------------------------------------------------------------------
-class Snap:
-    def __init__(self, unlocked):
-        self.unlocked = unlocked
-
-
-@pytest.fixture
-def ctl(qapp):
-    win = QWidget()
-    win.resize(900, 600)
-    win.show()
-    svc, need, _ = make(["libmpv", "ffmpeg"])
-    c = EngineSetupController(win, svc)
-    yield c, svc, win
-    c.shutdown()
-    win.close()
-
-
-def test_nothing_starts_until_the_install_is_unlocked_and_then_only_once(ctl):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(False))
-    assert FakeWorker.made == []
-    c.on_license_state(Snap(True))
-    c.on_license_state(Snap(True))
-    assert len(FakeWorker.made) == 1
-
-
-def test_a_later_license_update_never_restarts_a_finished_or_failed_setup(ctl, qapp):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(True))
-    FakeWorker.made[0].done(False, "network down")
-    assert svc.state.phase == es.FAILED and len(FakeWorker.made) == 1
-    for _ in range(3):
-        c.on_license_state(Snap(True))                           # the license layer reports every few seconds
-    assert len(FakeWorker.made) == 1 and svc.state.phase == es.FAILED    # only the person pressing Try again retries
-
-
-def test_progress_shows_a_notice_with_a_bar_and_cancel(ctl, qapp):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(True))
-    qapp.processEvents()
-    assert c._bar is not None and c._bar.title == "Setting up Rainy" and c._progress is not None
-    FakeWorker.made[0].report(60, "Downloading: 18.0 MB / 30.0 MB (60%)")
-    qapp.processEvents()
-    assert c._progress.value() == 30 and "18.0 MB" in c._bar.content and "only happens once" in c._bar.content
-
-
-def test_a_failure_shows_the_message_as_plain_text_with_try_again(ctl, qapp):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(True))
-    FakeWorker.made[0].done(False, "Couldn't download <b>bold</b> & <img src=x onerror=alert(1)>")
-    qapp.processEvents()
-    bar = c._bar
-    assert bar.title.startswith("Couldn't finish") and "<b>bold</b>" in bar.content
-    assert bar.contentLabel.textFormat() == Qt.PlainText         # never rendered as rich text
-    from qfluentwidgets import PushButton
-    retry = [b for b in bar.findChildren(PushButton) if b.text() == "Try again"]
-    assert len(retry) == 1
-    retry[0].click()
-    qapp.processEvents()
-    assert svc.running and len(FakeWorker.made) == 2 and c._bar.title == "Setting up Rainy"
-
-
-def test_success_shows_a_short_ready_notice(ctl, qapp):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(True))
-    FakeWorker.made[0].done(True)
-    FakeWorker.made[1].done(True)
-    qapp.processEvents()
-    assert svc.state.phase == es.DONE and c._bar.title == "Rainy is ready"
-
-
-def test_the_lock_screen_hides_the_notice_and_keeps_it_hidden(ctl, qapp):
-    c, svc, _ = ctl
-    c.on_license_state(Snap(True))
-    qapp.processEvents()
-    assert c._bar is not None
-    c.set_gated(True)
-    assert c._bar is None
+def test_the_service_reports_each_engines_own_progress_and_what_is_queued(qapp):
+    svc, _, _ = make(["libmpv", "ffmpeg"])
+    assert svc.pending() == ["libmpv", "ffmpeg"] and svc.queue == []        # asking starts nothing
+    svc.start()
+    assert svc.queue == ["libmpv", "ffmpeg"]
     FakeWorker.made[0].report(40)
-    qapp.processEvents()
-    assert c._bar is None                                        # still locked: nothing is shown
-    c.set_gated(False)
-    FakeWorker.made[0].report(50)
-    qapp.processEvents()
-    assert c._bar is not None
+    assert svc.state.engine_percent == 40 and svc.state.percent == 20
+    FakeWorker.made[0].report(10)                                           # never backwards
+    assert svc.state.engine_percent == 40
+    FakeWorker.made[0].done(True)
+    assert svc.state.engine == "ffmpeg" and svc.state.engine_percent == 0   # the next engine starts from zero

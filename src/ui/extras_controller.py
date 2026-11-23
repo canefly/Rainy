@@ -27,6 +27,7 @@ class ExtrasController(QObject):
         self._suppress = False          # True while we close notices ourselves (that is not "read")
         self._unlocked = False
         self._gated = True
+        self._quiet = False            # True while the first-run window is busy: hold notices so they don't pile up
         self._started_session = False
         self._ask_timer = QTimer(self)
         self._ask_timer.setSingleShot(True)
@@ -43,7 +44,7 @@ class ExtrasController(QObject):
             if not self._started_session:
                 self._started_session = True
                 self.analytics.track("app_start", version=self.app_version)
-            if not self.analytics.asked:
+            if not self.analytics.asked and not self._quiet:
                 self._ask_timer.start(ASK_DELAY_MS)
         self._sync_bars()
 
@@ -53,7 +54,18 @@ class ExtrasController(QObject):
         if self._gated:
             self._ask_timer.stop()
             self._close_ask_bar()
-        elif self._unlocked and not self.analytics.asked:
+        elif self._unlocked and not self._quiet and not self.analytics.asked:
+            self._ask_timer.start(ASK_DELAY_MS)
+
+    def set_quiet(self, quiet: bool) -> None:
+        """Hold the announcements and the sharing question while something bigger (the first-run window) is on
+        screen, then bring them back. Nothing is marked read and nothing is answered by being held."""
+        self._quiet = bool(quiet)
+        self._sync_bars()
+        if self._quiet:
+            self._ask_timer.stop()
+            self._close_ask_bar()
+        elif self._unlocked and not self._gated and not self.analytics.asked:
             self._ask_timer.start(ASK_DELAY_MS)
 
     def open_bug_report(self) -> None:
@@ -72,7 +84,7 @@ class ExtrasController(QObject):
     def _sync_bars(self, items=None) -> None:
         if items is None:
             items = self.announcements.items
-        wanted: Dict[str, Announcement] = {} if (self._gated or not self._unlocked) else {a.id: a for a in items}
+        wanted: Dict[str, Announcement] = {} if (self._gated or self._quiet or not self._unlocked) else {a.id: a for a in items}
         self._suppress = True
         try:
             for id_ in [i for i in self._bars if i not in wanted]:
@@ -101,7 +113,7 @@ class ExtrasController(QObject):
 
     # -- the one-time question ---------------------------------------------------------------
     def _ask_about_sharing(self) -> None:
-        if self.analytics.asked or self._gated or not self._unlocked or self._ask_bar is not None:
+        if self.analytics.asked or self._gated or self._quiet or not self._unlocked or self._ask_bar is not None:
             return
         # Built first and shown last: the bar is placed using its size at the moment it is shown, so the
         # buttons must already be in it or it would grow past the bottom edge of the window.

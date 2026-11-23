@@ -22,7 +22,8 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-LicenseFile=
+LicenseFile=agreement.txt
+InfoBeforeFile=what_rainy_needs.txt
 OutputDir=..\\dist
 OutputBaseFilename=RainySetup_v{#MyAppVersion}
 SetupIconFile=..\\assets\\logo.ico
@@ -37,6 +38,16 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+WizardLicense=Approval and your information
+LicenseLabel=Please read how Rainy approves editors and what it sends.
+LicenseLabel3=Please read the following. To install Rainy you need to agree to it.
+LicenseAccepted=I &understand and agree
+LicenseNotAccepted=I &do not agree
+WizardInfoBefore=What Rainy needs
+InfoBeforeLabel=Please read this before you continue.
+InfoBeforeClickLabel=When you are ready to continue with Setup, click Next.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

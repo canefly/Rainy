@@ -597,14 +597,19 @@ class PhotoCensorService(QObject):
         if outcome == DOWNLOAD_OK:
             self.all_photos_changed.emit()
 
+    def auto_download_pending(self) -> bool:
+        """True when maybe_auto_download() would start a download right now. Starts nothing, so the first-run
+        window can list the step before it begins."""
+        if os.environ.get("KNOT_NO_AUTO_DOWNLOAD"):
+            return False
+        if self._downloading or model_ready() or not self.auto_enabled():
+            return False
+        return db.get_setting("photo_censor_autodownload", AUTODL_PENDING) != AUTODL_DECLINED
+
     def maybe_auto_download(self) -> bool:
         """First-launch behaviour: fetch the model unprompted, once. Skipped if the user turned
         auto-censor off, already has the model, or previously cancelled / deleted it."""
-        if os.environ.get("KNOT_NO_AUTO_DOWNLOAD"):
-            return False
-        if model_ready() or not self.auto_enabled():
-            return False
-        if db.get_setting("photo_censor_autodownload", AUTODL_PENDING) == AUTODL_DECLINED:
+        if not self.auto_download_pending():
             return False
         return self.download_model()
 

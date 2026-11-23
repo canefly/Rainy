@@ -42,6 +42,7 @@ class SetupState:
     step: int = 0             # 1-based position in the queue
     total: int = 0
     percent: int = 0          # 0-100 over the whole queue
+    engine_percent: int = 0   # 0-100 of the engine being downloaded right now
     message: str = ""         # a sentence fit to show
 
     @property
@@ -70,6 +71,15 @@ class EngineSetupService(QObject):
     @property
     def running(self) -> bool:
         return self._state.phase == RUNNING
+
+    @property
+    def queue(self) -> List[str]:
+        """The engines of the current run, in order."""
+        return list(self._queue)
+
+    def pending(self) -> List[str]:
+        """What would be downloaded if start() ran now. Starts nothing."""
+        return list(self._missing())
 
     def _set(self, **kw) -> None:
         self._state = SetupState(**{**self._state.__dict__, **kw})
@@ -102,7 +112,7 @@ class EngineSetupService(QObject):
         engine = self._queue[self._index]
         total = len(self._queue)
         self._set(phase=RUNNING, engine=engine, step=self._index + 1, total=total,
-                  percent=int(self._index * 100 / total),
+                  percent=int(self._index * 100 / total), engine_percent=0,
                   message=f"Downloading {LABELS.get(engine, engine)}" + (f" ({self._index + 1} of {total})" if total > 1 else ""))
         worker = self._factory(engine)
         self._worker = worker
@@ -116,6 +126,7 @@ class EngineSetupService(QObject):
         total = max(1, len(self._queue))
         overall = int((self._index * 100 + max(0, min(100, pct))) / total)
         self._set(percent=max(self._state.percent, overall),
+                  engine_percent=max(self._state.engine_percent, max(0, min(100, pct))),
                   message=(text or self._state.message))
 
     def _on_finished(self, engine: str, ok: bool, message: str) -> None:

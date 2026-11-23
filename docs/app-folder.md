@@ -25,11 +25,19 @@ Not in there on purpose:
 
 ## How engines (libmpv, FFmpeg, FFprobe) get here and are found
 
-**Nothing is bundled in the installer.** The first time an installed Rainy is approved and unlocked, it checks
-for the video player (libmpv) and the video tools (FFmpeg and FFprobe). Whatever is missing is downloaded once
-(about 60 MB in total) into `app home\bin`, and a small notice in the corner shows the progress, with Cancel
-while it runs and Try again if it fails (offline, blocked, file changed). It never blocks the app, and
-Preferences > Engines can install them later.
+**Nothing is bundled in the installer.** The installer only shows two pages before installing: "What Rainy needs"
+(what the helper programs are for and what gets downloaded) and "Approval and your information" (what Rainy sends so
+Cane can approve you, who sees it, how it is protected, ownership), which the person must agree to.
+
+The downloads start only once the install is **approved and unlocked**, never before. Then one calm window,
+"Getting Rainy ready", explains what and why, lists each step (video player libmpv, video tools FFmpeg/FFprobe,
+and the optional ~155 MB photo-censor model) and shows progress. It never blocks the app, "Hide" or the X just hides it,
+and it closes itself a few seconds after everything is ready. While it is busy the other first-start notices
+(announcements, the "help improve Rainy?" question) are held and come back afterwards, so a first start is not a wall
+of pop-ups. If a required download fails the window comes back with the reason and **Try again**; the optional
+photo-censor step may be skipped or fail without failing the setup (it can be fetched later in Settings > AI Models).
+The photo-censor model used to start downloading silently 4 seconds after launch, even before approval; it now only
+runs from this window. Preferences > Engines can still install things later.
 
 What makes the download safe: the server keeps a **signed list** of the exact files to fetch (address, SHA-256
 fingerprint, size). The app downloads only what that list names, discards anything whose fingerprint or size

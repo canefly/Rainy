@@ -1,0 +1,43 @@
+RAINY - APPROVAL AND YOUR INFORMATION
+
+Rainy is a private tool made by Cane for video editors. Every editor is approved by Cane personally before the app unlocks. Please read how that works and what Rainy sends, then agree to continue.
+
+WHAT RAINY SENDS TO GET YOU APPROVED
+
+The first time you open Rainy it asks for the name you edit under. To verify you, Rainy then sends Cane's server:
+
+- the editor name you typed
+- a hardware summary: your processor (CPU), graphics card (GPU), amount of memory (RAM) and Windows version
+- a code that identifies this computer (the Windows machine ID), so the same computer is recognised next time
+- your public IP address, which the server turns into a rough city and region
+- the version of Rainy you are using
+
+Later, each time Rainy checks that you are still approved, it sends the same install identity and the app version.
+
+WHAT RAINY DOES NOT SEND
+
+No GPS location. No files. No scripts, footage, projects, file names, passwords, browser history or screenshots.
+
+WHY IT IS COLLECTED
+
+Only so Cane can decide who may use Rainy, tell your computer apart from someone else's, and look into problems. It is not used for advertising and it is not sold or shared.
+
+WHO CAN SEE IT, AND HOW IT IS PROTECTED
+
+- It travels over an encrypted HTTPS connection.
+- It is stored on Cane's own server. Only Cane can read it, through an admin page that needs a login.
+- Cane also gets a private notification when a new computer asks for access, which shows the same details.
+- It is kept until Cane deletes your device. To have yours removed, message Cane and it will be deleted.
+
+No system is perfectly secure, so nobody can promise that. This is the care taken: encryption in transit, a private server and a protected admin page.
+
+THINGS THAT ARE OPTIONAL
+
+- Sharing which features you use and what kinds of crashes happen is OFF unless you say yes inside the app. It never includes your scripts, footage, file names or IP address, and you can change your mind in Settings.
+- A bug report is only sent when you press the button yourself, and you see what it contains first.
+
+OWNERSHIP
+
+Rainy is made and owned by Cane. It is shared with you personally, so please do not copy it, share it or pass it on to anyone else.
+
+By choosing "I understand and agree", you confirm that you have read this and are happy for Rainy to send the information above for approval.
