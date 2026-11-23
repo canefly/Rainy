@@ -1,4 +1,5 @@
 """The guide window: opens, shows every page, links and history work, search works, bad input never crashes."""
+import gc
 import os
 import sys
 
@@ -26,11 +27,24 @@ def restore_theme():
     ThemeManager.current_variant, ThemeManager.is_dark = v, d
 
 
+def switch_theme(dark: bool) -> None:
+    """qfluentwidgets walks a weak registry of widgets while it restyles them; if Python's garbage collector frees an
+    old test window in the middle of that walk, the walk fails ("dictionary changed size"). Collect first, then keep
+    the collector off for the moment the theme changes."""
+    gc.collect()
+    gc.disable()
+    try:
+        ThemeManager.apply_theme(ThemeVariant.GRAY, dark)
+    finally:
+        gc.enable()
+
+
 @pytest.fixture
 def win(qapp):
     w = gw.GuideWindow()
     yield w
     w.close()
+    w.deleteLater()
 
 
 def topic_ids(w):
@@ -162,7 +176,7 @@ def test_clicking_a_search_result_opens_it(win):
 # -- look and robustness -------------------------------------------------------------------------------
 @pytest.mark.parametrize("dark", [True, False])
 def test_it_follows_light_and_dark(win, dark):
-    ThemeManager.apply_theme(ThemeVariant.GRAY, dark)
+    switch_theme(dark)
     win.apply_theme()
     pal = ThemeManager.get_palette()
     assert win.browser.palette().color(QPalette.Text).name() == pal["text"]
@@ -193,7 +207,7 @@ def test_a_page_always_opens_at_the_top(qapp):
 
 @pytest.mark.parametrize("dark", [True, False])
 def test_links_use_the_theme_accent_so_they_are_readable(win, dark):
-    ThemeManager.apply_theme(ThemeVariant.GRAY, dark)
+    switch_theme(dark)
     win.apply_theme()
     win.show_page("aroll-cards")
     doc = win.browser.document()
