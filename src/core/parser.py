@@ -559,6 +559,27 @@ def build_raw_html(
 
     return "".join(html_parts)
 
+def _count_lifetime_stats_once(file_name: str, doc: DocumentState) -> None:
+    """The Data Vault's fun lifetime numbers (parse time, total cuts, duration).
+
+    A script is counted the first time it is opened, by its file name, so opening it again or editing and re-importing
+    it never adds it twice. A counter must never stop a script from opening, so any failure here is swallowed."""
+    try:
+        import json
+        seen = json.loads(db.get_setting("stats_counted_scripts", "[]") or "[]")
+        key = (file_name or "").strip().lower()
+        if not key or key in seen:
+            return
+        db.increment_stats(
+            duration_seconds=int(sum(max(0.0, float(i.duration_seconds or 0)) for i in doc.items)),
+            aroll_count=len(doc.items),
+        )
+        seen.append(key)
+        db.set_setting("stats_counted_scripts", json.dumps(seen[-2000:]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Optional[DocumentState] = None) -> DocumentState:
     """
     Parses a DOCX file using the authentic Python sidecar engine logic from the original React app.
@@ -1045,6 +1066,8 @@ def parse_docx_file(file_path: str, progress_callback=None, previous_doc: Option
     )
 
     db.save_document(new_doc_state)
+    if previous_doc is None:
+        _count_lifetime_stats_once(file_name, new_doc_state)
     from .project_manager import project_manager
     proj_path = project_manager.get_auto_project_path(file_name)
     db.add_recent_file(proj_path if os.path.exists(proj_path) else file_path, file_name)
