@@ -28,7 +28,7 @@ from .update_core import (
 
 logger = get_logger("Updater")
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "2.0.0"
 CHECK_INTERVAL_MS = 6 * 3600 * 1000   # re-check every 6 hours while the app stays open
 
 __all__ = ["APP_VERSION", "UpdateService", "UpdateStatus", "parse_version", "update_checks_disabled"]
