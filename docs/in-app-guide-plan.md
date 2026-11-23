@@ -61,3 +61,18 @@ Must say plainly in part 3:
 2. Build the guide window and the Help entry, with tests (opens, search finds a page, missing page doesn't crash).
 3. Look at it in the real app, light and dark mode.
 4. Follow `docs/release-cycle.md`, keeping the version at 1.3.0 (see the note above about re-publishing the same number).
+
+## Build phases (agreed 2026-11-23, nothing built yet)
+
+The guide text is approved (`docs/guide-draft-part1.md`, `part2`, `part3`). Phases run in order, each one tested before the next. Nothing is rebuilt, published or pushed as a release until phase 6, and only with the owner's go-ahead.
+
+| # | Phase | What gets built | Done when |
+|---|---|---|---|
+| 1 | **Guide content as data** | Turn the three drafts into bundled pages (`assets/guide/`), one file per page, plus a small loader. Links are written `[[link: ...]]` and resolved to a page id or a Settings/Footage target. Drop the "DRAFT" and "CONFIRM" lines. | Loader tests: every page loads, every link target exists, no dead links, no leftover "CONFIRM" or "DRAFT" text. |
+| 2 | **Guide window** | A separate window like Settings (not modal): topic list on the left in the three parts, page on the right, search box, clickable links that jump between pages, back button. Follows the theme (light and dark). | Window tests: opens, search finds a page, links navigate, a missing page never crashes. |
+| 3 | **Hook it up** | Help menu gets **User guide**. Links that point outside the guide open the right place: Settings tabs (AI Models, MCP, Cookies & Accounts), the Footage Manager. Not reachable before approval. | Tests: menu entry opens the window, each outside link opens its target. |
+| 4 | **Startup "?" help** | A small **?** button on the Welcome screen with the first-steps text (pick a name, Request access, wait for approval, the one-time download). | Test: button exists on the Welcome screen only and shows the text. |
+| 5 | **Check it for real** | Look at everything in the real app, light and dark: guide window, "?" button, the Data Vault counters after opening a new script. Also check the things flagged but not verified: the Core Engines speech-engine **update** button in an installed build (it runs `pip` through the app's own exe), and the Source links Info wording. Full test run. | Owner has seen it and the test run has only the known failures. |
+| 6 | **Rebuild and republish 1.3.0** | Rebuild, test the installer in Windows Sandbox again, upload, publish. **Server catch:** `publish-release` refuses a version number that already exists, even a withdrawn one, so the old 1.3.0 record has to be removed first (a one-off server step, or a small `delete-release` command). Machines that already have 1.3.0 are not offered the "new" 1.3.0, so reinstall by hand there. | Installer tested on a clean machine and download link serves the new file. |
+
+**Decisions needed before phase 3:** the **F1** key already opens Keyboard Shortcuts. Proposal: leave F1 alone and give the guide its own entry in the Help menu with no shortcut (or a different key if the owner wants one).
