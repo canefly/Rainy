@@ -284,3 +284,13 @@ def test_the_page_has_roomy_lines_gaps_and_table_cells(win):
 
 def test_topic_rows_are_roomier_than_before(win):
     assert "padding: 7px 8px" in win.styleSheet()
+
+
+def test_the_topic_list_has_no_branch_area_to_draw_a_curve_in(win):
+    """The tree's branch gutter drew a stray curve beside the selected row: there is no gutter now, and a blank icon
+    indents the pages under their part heading instead."""
+    assert win.tree.indentation() == 0
+    assert "::branch" in win.styleSheet() and "image: none" in win.styleSheet()
+    head = win.tree.topLevelItem(0)
+    assert head.icon(0).isNull()                                   # headings sit at the left edge
+    assert head.childCount() > 0 and all(not head.child(i).icon(0).isNull() for i in range(head.childCount()))

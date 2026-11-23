@@ -9,8 +9,8 @@ import os
 from typing import List, Optional
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import (QColor, QIcon, QPainter, QPalette, QTextBlockFormat, QTextCharFormat, QTextCursor,
-                           QTextDocument)
+from PySide6.QtGui import (QColor, QIcon, QPainter, QPalette, QPixmap, QTextBlockFormat, QTextCharFormat,
+                           QTextCursor, QTextDocument)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout)
 from qfluentwidgets import FluentIcon, SearchLineEdit, ToolButton
@@ -23,6 +23,7 @@ CONTACT_LINE = "Stuck? Message Cane (@yow_ph on Instagram or TikTok)."
 NOT_FOUND = "This page could not be found."
 NO_MATCH = "No pages match that search."
 PAGE_ROLE = Qt.UserRole
+CHILD_INDENT = 12                    # width of the blank 'icon' that indents a page under its part heading
 
 
 def _find_item(tree: QTreeWidget, page_id: str) -> Optional[QTreeWidgetItem]:
@@ -80,9 +81,9 @@ class GuideWindow(FramelessWindow):
         self.tree = QTreeWidget(left)
         self.tree.setObjectName("GuideTopics")
         self.tree.setHeaderHidden(True)
-        self.tree.setIndentation(10)
+        self.tree.setIndentation(0)                          # no branch area at all: it drew a curve beside the selected row
         self.tree.setRootIsDecorated(False)
-        self.tree.setIconSize(QSize(0, 0))
+        self.tree.setIconSize(QSize(CHILD_INDENT, CHILD_INDENT))
         self.tree.setUniformRowHeights(False)
         self.tree.setFocusPolicy(Qt.NoFocus)
         self.tree.currentItemChanged.connect(self._on_tree_changed)
@@ -142,9 +143,16 @@ class GuideWindow(FramelessWindow):
             for p in items:
                 child = QTreeWidgetItem(head, [p.title])
                 child.setData(0, PAGE_ROLE, p.id)
+                child.setIcon(0, self._indent_icon())
             head.setExpanded(True)
         self._syncing = False
         self._select_in_tree(self._current)
+
+    @staticmethod
+    def _indent_icon() -> QIcon:
+        blank = QPixmap(CHILD_INDENT, CHILD_INDENT)
+        blank.fill(Qt.transparent)
+        return QIcon(blank)
 
     def _fill_results(self, hits: List[guide.Page]) -> None:
         self._syncing = True
@@ -311,6 +319,7 @@ class GuideWindow(FramelessWindow):
             QFrame#GuideContent {{ background: transparent; }}
             QTreeWidget#GuideTopics {{ background: transparent; border: none; outline: none;
                 color: {pal['text']}; font-size: 13px; }}
+            QTreeWidget#GuideTopics::branch {{ background: transparent; border: none; image: none; width: 0px; }}
             QTreeWidget#GuideTopics::item {{ padding: 7px 8px; margin: 1px 0px; border-radius: 6px; }}
             QTreeWidget#GuideTopics::item:selected {{ background: {pal['surface_hover']}; color: {pal['text']}; }}
             QTreeWidget#GuideTopics::item:hover {{ background: {pal['surface_hover']}; }}
