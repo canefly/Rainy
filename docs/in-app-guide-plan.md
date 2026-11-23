@@ -8,7 +8,7 @@
 
 ## Shape
 
-- **Where:** a "User guide" entry in the existing **Help** menu (title bar), and a link from the first-run "Rainy is ready" note. Opens a normal Rainy window (same theme and look as About / Settings), not a browser.
+- **Where:** a "User guide" entry in the existing **Help** menu (title bar), and a link from the first-run "Rainy is ready" note. Opens in **its own separate window like Settings, not a modal dialog** (decided 2026-11-23): it can stay open beside the app while you work, and it never blocks Rainy. Same theme and look as Settings, not a browser.
 - **Layout:** a list of topics on the left, the page on the right, with a search box (the Settings window already has a "Find a setting" box to copy the pattern from).
 - **Content:** plain pages written as text files shipped inside the app (`assets/guide/*.md` or one structured file). Plain text only, no network needed, works offline. It is the app's own bundled content, so a bad update to the text can never break the app.
 - **Later option (not for this build):** load the guide text from the server for approved devices only (like announcements), so the text can change without a release. Only worth it if the guide changes often.
