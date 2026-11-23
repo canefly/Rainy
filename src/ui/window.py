@@ -144,6 +144,7 @@ class MainWindow(FluentWindow):
         self.title_menu.shortcuts_requested.connect(self._on_menu_shortcuts)
         self.title_menu.settings_requested.connect(self.open_settings)
         self.title_menu.about_requested.connect(self.open_about)
+        self.title_menu.guide_requested.connect(self.open_guide)
         self.title_menu.report_problem_requested.connect(self.open_bug_report)
 
         # Global Keyboard Accelerators
@@ -565,7 +566,7 @@ class MainWindow(FluentWindow):
             self._pre_gate_widget = current if current not in (self.gate_view, self.update_view) else None
             self.sidebar.hide()
             self.workspace_view.close_drawers()
-            for attr in ('pref_window', 'vault_window', 'about_window'):
+            for attr in ('pref_window', 'vault_window', 'about_window', 'guide_window'):
                 win = getattr(self, attr, None)
                 if win is not None:
                     win.hide()
@@ -655,7 +656,7 @@ class MainWindow(FluentWindow):
         if hasattr(self, 'update_view') and self.update_view:
             self.update_view.apply_theme()
         self._apply_backdrop_effect()
-        for attr in ('pref_window', 'vault_window', 'about_window'):
+        for attr in ('pref_window', 'vault_window', 'about_window', 'guide_window'):
             win = getattr(self, attr, None)
             if win is not None:
                 if hasattr(win, 'apply_theme'):
@@ -726,6 +727,44 @@ class MainWindow(FluentWindow):
         self.about_window.show()
         self.about_window.raise_()
         self.about_window.activateWindow()
+
+    # Where a link in the user guide may send you outside the guide
+    GUIDE_SETTINGS_TABS = {
+        "settings/cookies": "cookies",
+        "settings/ai-models": "ai",
+        "settings/mcp": "mcp",
+        "settings/shortcuts": "shortcuts",
+        "settings/data-vault": "vault",
+        "settings/core-engines": "engines",
+    }
+
+    def open_guide(self):
+        """Opens or focuses the user guide: its own window, only once this install is approved."""
+        if self._gated:
+            return
+        if getattr(self, 'guide_window', None) is None:
+            from .components.guide_window import GuideWindow
+            self.guide_window = GuideWindow()
+            self.guide_window.app_link_requested.connect(self._on_guide_link)
+        self.guide_window.show()
+        self.guide_window.raise_()
+        self.guide_window.activateWindow()
+
+    def _on_guide_link(self, place: str):
+        """A link in the guide pointing into the app: open that Settings tab, or the Footage Manager."""
+        if self._gated:
+            return
+        tab = self.GUIDE_SETTINGS_TABS.get(place)
+        if tab is not None:
+            self.open_settings(tab)
+        elif place == "footage":
+            if not self.current_doc:
+                InfoBar.info(
+                    title="Open a script first",
+                    content="The Footage Manager works on the script that is open.",
+                    parent=self, position=InfoBarPosition.TOP_RIGHT, duration=4000)
+                return
+            self._on_footage_clicked()
 
     def open_vault(self):
         """Opens or focuses the independent Data Vault desktop window."""
@@ -1252,6 +1291,8 @@ class MainWindow(FluentWindow):
             self.pref_window.close()
         if hasattr(self, 'about_window') and self.about_window:
             self.about_window.close()
+        if getattr(self, 'guide_window', None) is not None:
+            self.guide_window.close()
         if hasattr(self, 'vault_window') and self.vault_window:
             self.vault_window.close()
         if hasattr(self, 'workspace_view') and self.workspace_view:

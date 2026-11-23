@@ -141,6 +141,7 @@ class TitleBarMenuWidget(QWidget):
     export_timestamps_requested = Signal()
 
     # Help actions
+    guide_requested = Signal()
     shortcuts_requested = Signal()
     settings_requested = Signal()
     about_requested = Signal()
@@ -264,6 +265,10 @@ class TitleBarMenuWidget(QWidget):
 
     def _show_help_menu(self):
         menu = RoundMenu(parent=self)
+
+        guide_act = Action(FluentIcon.LIBRARY, "User Guide", self)
+        guide_act.triggered.connect(self.guide_requested.emit)
+        menu.addAction(guide_act)
 
         sc_act = Action(FluentIcon.HELP, "Keyboard Shortcuts", self)
         sc_act.setShortcut("F1")
