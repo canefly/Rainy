@@ -84,11 +84,16 @@ Write-Host ">>> Packaging portable release archive: $ZipPath..." -ForegroundColo
 if (Test-Path $ZipPath) {
     Remove-Item -Path $ZipPath -Force
 }
-$TarCmd = Get-Command "tar.exe" -ErrorAction SilentlyContinue
-if ($TarCmd) {
-    & $TarCmd.Source -a -c -f "$ZipPath" -C "$ProjectRoot\dist_nuitka\main.dist" .
+# Windows' own tar.exe (bsdtar) only: a `tar` found on PATH may be GNU tar (Git for Windows), which reads "D:" as a host name.
+$SysTar = Join-Path $env:SystemRoot "System32\tar.exe"
+if (Test-Path $SysTar) {
+    & $SysTar -a -c -f "$ZipPath" -C "$ProjectRoot\dist_nuitka\main.dist" .
+    if ($LASTEXITCODE -ne 0) { Write-Error "tar.exe failed with exit code $LASTEXITCODE while creating the portable archive" }
 } else {
     Compress-Archive -Path "$ProjectRoot\dist_nuitka\main.dist\*" -DestinationPath "$ZipPath" -Force
+}
+if (-not (Test-Path $ZipPath) -or (Get-Item $ZipPath).Length -lt 1MB) {
+    Write-Error "The portable archive was not created: $ZipPath"
 }
 
 Write-Host "=================================================================" -ForegroundColor Green
