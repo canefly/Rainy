@@ -70,7 +70,7 @@ What Rainy does automatically after each part, with nothing to click:
 - It keeps a tiny bit of room before and after each phrase so no word is clipped.
 - It never changes your original audio file.
 
-**CONFIRM:** if no speech model is installed yet, Rainy needs one before this works. Get it in [[link: Settings, AI Models]]. I did not check what the Transcribe tab says if none is installed.
+**Which speech model?** Transcribing uses a speech model. The default is a small one called **Base English**. If it is not on your computer yet, Rainy downloads it by itself the first time you press **Start queue**, and the progress shows in the terminal strip ("Downloading Base English…"). It only happens once. The dropdown next to **Add audio parts** lists the models you have. To see how big each model is, download others or remove them, open [[link: Settings, AI Models]]. Bigger models are more accurate but slower and use more memory.
 
 Next: [[link: Check the voiceover]]
 
