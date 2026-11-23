@@ -1,9 +1,9 @@
-# In-app user guide (planned: folded into 1.3.0, not a new version)
+# In-app user guide (planned: ships as Rainy 2.0.0)
 
 ## Decision (2026-11-23)
 
 - **No public guide or landing page.** `https://rainy.canefly.xyz/` stays an empty 404. Reason: Rainy is closely tied to the owner's work (Rainy), and a public manual would lay out every feature to anyone who might copy the concept.
-- **The manual lives inside the app.** Only approved users ever see it. Needs a new build. **Decision: do not bump the version.** Rainy has not been announced yet, so 1.3.0 is still the first release; the guide and anything else real use turns up get folded into a rebuilt 1.3.0 (one build, not one per idea). Before replacing the published file, check how the server handles re-publishing the same version number (the release records a SHA-256 and size, and `publish-release` may refuse a duplicate version): likely withdraw the old record and publish again, and reinstall by hand on the few machines that already have 1.3.0, since they will not be offered an update for the same number.
+- **The manual lives inside the app.** Only approved users ever see it. Needs a new build. **Decision (2026-11-23): this build ships as Rainy 2.0.0.** 1.3.0 was a continuation number from the old project, but Rainy is an entire rewrite, so the first announced release is 2.0.0. 1.3.0 stays on the server only as a test build and gets withdrawn once 2.0.0 is published. Because 2.0.0 is a brand-new version number, there is no duplicate-version problem on the server.
 - The installer download link is public by design (the app's own updates use it). The gate is device approval, not the link.
 
 ## Shape
@@ -60,7 +60,7 @@ Must say plainly in part 3:
 1. Write the pages.
 2. Build the guide window and the Help entry, with tests (opens, search finds a page, missing page doesn't crash).
 3. Look at it in the real app, light and dark mode.
-4. Follow `docs/release-cycle.md`, keeping the version at 1.3.0 (see the note above about re-publishing the same number).
+4. Follow `docs/release-cycle.md` with version 2.0.0.
 
 ## Build phases (agreed 2026-11-23, nothing built yet)
 
@@ -73,6 +73,6 @@ The guide text is approved (`docs/guide-draft-part1.md`, `part2`, `part3`). Phas
 | 3 | **Hook it up** | Help menu gets **User guide**. Links that point outside the guide open the right place: Settings tabs (AI Models, MCP, Cookies & Accounts), the Footage Manager. Not reachable before approval. | Tests: menu entry opens the window, each outside link opens its target. |
 | 4 | **Startup "?" help** | A small **?** button on the Welcome screen with the first-steps text (pick a name, Request access, wait for approval, the one-time download). | Test: button exists on the Welcome screen only and shows the text. |
 | 5 | **Check it for real** | Look at everything in the real app, light and dark: guide window, "?" button, the Data Vault counters after opening a new script. Also check the things flagged but not verified: the Core Engines speech-engine **update** button in an installed build (it runs `pip` through the app's own exe), and the Source links Info wording. Full test run. | Owner has seen it and the test run has only the known failures. |
-| 6 | **Rebuild and republish 1.3.0** | Rebuild, test the installer in Windows Sandbox again, upload, publish. **Server catch:** `publish-release` refuses a version number that already exists, even a withdrawn one, so the old 1.3.0 record has to be removed first (a one-off server step, or a small `delete-release` command). Machines that already have 1.3.0 are not offered the "new" 1.3.0, so reinstall by hand there. | Installer tested on a clean machine and download link serves the new file. |
+| 6 | **Release 2.0.0** | Bump the version to **2.0.0** in `src/core/updater.py` (`APP_VERSION`) and `installer/setup.iss` (`MyAppVersion`), then follow `docs/release-cycle.md`: build, test the installer in Windows Sandbox, upload `RainySetup_v2.0.0.exe` and the portable zip, publish 2.0.0, then **withdraw 1.3.0** so 2.0.0 is the latest. Machines that have 1.3.0 (your own) will be offered 2.0.0 through the update system, which doubles as a real test of the update flow. | Installer tested on a clean machine, the download link serves the new file, and an installed 1.3.0 offers the update. |
 
 **Decisions needed before phase 3:** the **F1** key already opens Keyboard Shortcuts. Proposal: leave F1 alone and give the guide its own entry in the Help menu with no shortcut (or a different key if the owner wants one).
