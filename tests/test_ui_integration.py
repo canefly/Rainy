@@ -439,9 +439,8 @@ def test_home_layout_margins_and_fixed_heights(qapp):
 
     # Verify bottom action cards exist
     assert hasattr(home, 'updates_card')
-    assert hasattr(home, 'copyright_card')
     assert home.updates_card is not None
-    assert home.copyright_card is not None
+    assert not hasattr(home, 'copyright_card')                 # the copyright helper is gone
 
     # Verify top alignment
     alignment = home.layout().alignment()
@@ -666,7 +665,6 @@ def test_themes_detent_sliders_and_pro_solid_modes(qapp):
     window = MainWindow()
     assert not isinstance(window.home_view.drop_card, ElevatedCardWidget)
     assert not isinstance(window.home_view.updates_card, ElevatedCardWidget)
-    assert not isinstance(window.home_view.copyright_card, ElevatedCardWidget)
 
     # Load a note and link into drawers, switch to Light Mode Adobe Gray, then Dark Mode OLED Black
     notes_drawer = window.workspace_view.notes_drawer

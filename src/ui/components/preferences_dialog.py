@@ -497,7 +497,6 @@ class PreferencesWindow(FramelessWindow):
             ("Core Engines", FluentIcon.DEVELOPER_TOOLS),
             ("Personalization", FluentIcon.PALETTE),
             ("Shortcuts", FluentIcon.COMMAND_PROMPT),
-            ("Copyright Helper", FluentIcon.VIDEO),
             ("Cookies & Accounts", FluentIcon.GLOBE),
             ("AI Models", FluentIcon.ROBOT),
             ("MCP", FluentIcon.CONNECT),
@@ -527,7 +526,6 @@ class PreferencesWindow(FramelessWindow):
         self.stack.addWidget(self._wrap_in_scroll(self._build_core_engines_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_appearance_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_shortcuts_tab()))
-        self.stack.addWidget(self._wrap_in_scroll(self._build_copyright_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_cookies_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_ai_mcp_tab()))
         self.stack.addWidget(self._wrap_in_scroll(self._build_mcp_tab()))
@@ -581,19 +579,17 @@ class PreferencesWindow(FramelessWindow):
             "shortcuts": 5,
             "keys": 5,
             "keyboard": 5,
-            "copyright": 6,
-            "helper": 6,
-            "cookies": 7,
-            "auth": 7,
-            "accounts": 7,
-            "ai": 8,
-            "models": 8,
-            "whisper": 8,
-            "mcp": 9,
-            "bridge": 9,
-            "about": 10,
-            "updates": 10,
-            "license": 10,
+            "cookies": 6,
+            "auth": 6,
+            "accounts": 6,
+            "ai": 7,
+            "models": 7,
+            "whisper": 7,
+            "mcp": 8,
+            "bridge": 8,
+            "about": 9,
+            "updates": 9,
+            "license": 9,
         }
         if isinstance(key_or_index, str):
             target = tab_map.get(key_or_index.lower().strip(), 0)
@@ -618,11 +614,10 @@ class PreferencesWindow(FramelessWindow):
             (["engine", "engines", "libmpv", "mpv", "ffmpeg", "binaries", "binary", "dependencies", "shinchiro", "btbn", "download engine"], 3),
             (["personalization", "appearance", "theme", "palette", "femboy", "pink", "blue", "green", "gray", "dark", "mode", "orb", "glow", "glass", "mica", "transparency", "dwm"], 4),
             (["shortcut", "shortcuts", "keyboard", "key", "timecode", "double click", "space", "meta", "drag"], 5),
-            (["copyright", "helper", "broadcast", "pts", "smpte", "strike", "demonetization", "license", "licensing", "audio-visual"], 6),
-            (["cookie", "cookies", "auth", "session", "firefox", "profile", "cookies.txt", "netscape", "paste", "restricted", "drive", "youtube"], 7),
-            (["ai", "whisper", "faster-whisper", "model", "models", "voiceover", "vo", "transcribe", "cuda", "censor", "photo"], 8),
-            (["mcp", "bridge", "antigravity", "claude", "codex", "cursor", "gemini", "pipe", "activity", "ai app"], 9),
-            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 10),
+            (["cookie", "cookies", "auth", "session", "firefox", "profile", "cookies.txt", "netscape", "paste", "restricted", "drive", "youtube"], 6),
+            (["ai", "whisper", "faster-whisper", "model", "models", "voiceover", "vo", "transcribe", "cuda", "censor", "photo"], 7),
+            (["mcp", "bridge", "antigravity", "claude", "codex", "cursor", "gemini", "pipe", "activity", "ai app"], 8),
+            (["about", "update", "updates", "version", "cane", "canefly", "discord", "tiktok", "instagram", "legal", "notice"], 9),
         ]
 
         for keywords, tab_idx in routes:
@@ -1044,37 +1039,6 @@ class PreferencesWindow(FramelessWindow):
         qd1.setFixedHeight(1)
         qd1.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
         qwc_layout.addWidget(qd1)
-
-        # Row Q2: Copyright Helper
-        q2 = QHBoxLayout()
-        q2.setContentsMargins(0, 4, 0, 4)
-        q2.setSpacing(12)
-        q2_icon = IconWidget(FluentIcon.VIDEO, qw_card)
-        q2_icon.setFixedSize(20, 20)
-        q2.addWidget(q2_icon, 0, Qt.AlignVCenter)
-        q2_col = QVBoxLayout()
-        q2_col.setContentsMargins(0, 0, 0, 0)
-        q2_col.setSpacing(1)
-        q2_title = QLabel("Copyright Helper Engine")
-        q2_title.setObjectName("PrefSectionTitle")
-        q2_sub = QLabel("Audio-visual heatmaps and PTS-to-SMPTE broadcast protection")
-        q2_sub.setObjectName("PrefCaption")
-        q2_col.addWidget(q2_title)
-        q2_col.addWidget(q2_sub)
-        q2.addLayout(q2_col, 1)
-
-        cr_btn = PushButton("Open Helper", qw_card)
-        cr_btn.setFixedHeight(32)
-        cr_btn.setIcon(FluentIcon.CHEVRON_RIGHT)
-        cr_btn.clicked.connect(lambda: self.switch_tab("copyright"))
-        q2.addWidget(cr_btn, 0, Qt.AlignVCenter)
-        qwc_layout.addLayout(q2)
-
-        # Divider Q2
-        qd2 = QFrame(qw_card)
-        qd2.setFixedHeight(1)
-        qd2.setStyleSheet("background-color: rgba(128, 128, 136, 0.12); border: none;")
-        qwc_layout.addWidget(qd2)
 
         # Row Q3: Diagnostics Zip Export
         q3 = QHBoxLayout()
@@ -2714,43 +2678,6 @@ class PreferencesWindow(FramelessWindow):
             table.setItem(row, 1, d_item)
 
         layout.addWidget(table, 1)
-        return widget
-
-    # --- 4. Copyright Helper Tab ---
-    def _build_copyright_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        layout.addLayout(self._create_tab_header(
-            "Copyright Helper",
-            "Audio-Visual & Segment Heatmaps Conforming Engine.",
-            badge_text="BETA"
-        ))
-
-        card = PrefCardFrame()
-        c_layout = QVBoxLayout(card)
-        c_layout.setContentsMargins(16, 14, 16, 14)
-        c_layout.setSpacing(8)
-
-        card_title = QLabel("Broadcast & Platform Delivery Protection")
-        card_title.setObjectName("PrefSectionTitle")
-        c_layout.addWidget(card_title)
-
-        info_lbl = QLabel(
-            "The Copyright Helper tool scans video segments and audio cues to identify high-risk "
-            "licensing content, background audio overlaps, and potential copyright strikes before export.\n\n"
-            "This conforming engine connects directly with PTS-to-SMPTE timecode verification to ensure "
-            "your YouTube, TikTok, and broadcast deliveries stay safe from demonetization."
-        )
-        info_lbl.setWordWrap(True)
-        info_lbl.setObjectName("PrefBodyText")
-        info_lbl.setStyleSheet("font-size: 12px; line-height: 1.55;")
-        c_layout.addWidget(info_lbl)
-        layout.addWidget(card)
-
-        layout.addStretch(1)
         return widget
 
     # --- 5. Cookies & Auth Tab ---

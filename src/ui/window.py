@@ -215,7 +215,6 @@ class MainWindow(FluentWindow):
         self.home_view.file_selected.connect(self.open_file)
         self.home_view.settings_requested.connect(self.open_settings)
         self.home_view.updates_requested.connect(self.open_about)
-        self.home_view.copyright_requested.connect(lambda: self.open_settings(initial_tab=4))
         self.stack.addWidget(self.home_view)
 
         self.workspace_view = WorkspaceView(self.stack)

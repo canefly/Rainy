@@ -36,7 +36,7 @@ def test_settings_window_initialization(qapp):
     assert not hasattr(win.user_profile, "sub_lbl")
 
     # Nav list & categories
-    assert win.nav_list.count() == 11
+    assert win.nav_list.count() == 10
     categories = [win._categories[i][0] for i in range(win.nav_list.count())]
     assert "Home" in categories
     assert "Data Vault" in categories
@@ -44,7 +44,7 @@ def test_settings_window_initialization(qapp):
     assert "Core Engines" in categories
     assert "Personalization" in categories
     assert "Shortcuts" in categories
-    assert "Copyright Helper" in categories
+    assert not any("opyright" in c for c in categories)         # the copyright helper is gone
     assert "Cookies & Accounts" in categories
     assert "AI Models" in categories
     assert "MCP" in categories
@@ -79,25 +79,24 @@ def test_settings_tab_switching_and_routing(qapp):
     assert win.nav_list.currentRow() == 5
     assert win.stack.currentIndex() == 5
 
-    win.switch_tab("copyright")
+    win.switch_tab("copyright")                                 # an old name now just lands on Home
+    assert win.nav_list.currentRow() == 0 and win.stack.currentIndex() == 0
+
+    win.switch_tab("cookies")
     assert win.nav_list.currentRow() == 6
     assert win.stack.currentIndex() == 6
 
-    win.switch_tab("cookies")
+    win.switch_tab("ai")
     assert win.nav_list.currentRow() == 7
     assert win.stack.currentIndex() == 7
 
-    win.switch_tab("ai")
+    win.switch_tab("mcp")
     assert win.nav_list.currentRow() == 8
     assert win.stack.currentIndex() == 8
 
-    win.switch_tab("mcp")
+    win.switch_tab("about")
     assert win.nav_list.currentRow() == 9
     assert win.stack.currentIndex() == 9
-
-    win.switch_tab("about")
-    assert win.nav_list.currentRow() == 10
-    assert win.stack.currentIndex() == 10
 
     win.switch_tab("home")
     assert win.nav_list.currentRow() == 0
@@ -108,10 +107,13 @@ def test_settings_tab_switching_and_routing(qapp):
     assert win.nav_list.currentRow() == 4  # Personalization
 
     win.search_box.setText("cookie")
-    assert win.nav_list.currentRow() == 7  # Cookies
+    assert win.nav_list.currentRow() == 6  # Cookies
 
     win.search_box.setText("mpv")
     assert win.nav_list.currentRow() == 3  # Core Engines
+
+    win.search_box.setText("copyright")
+    assert win.nav_list.currentRow() == 3  # nothing matches any more, so the page does not move
 
     win.close()
 
@@ -158,7 +160,7 @@ def test_settings_home_tab_components(qapp):
     assert any("View Live Log..." in t for t in button_texts)
     assert any("Configure" in t for t in button_texts)
     assert any("View Shortcuts" in t for t in button_texts)
-    assert any("Open Helper" in t for t in button_texts)
+    assert not any("Open Helper" in t for t in button_texts)      # the copyright helper row is gone
     assert any("Export (.zip)" in t for t in button_texts)
 
     win.close()

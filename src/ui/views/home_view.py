@@ -423,7 +423,7 @@ class RecentScriptsCard(QFrame):
 
 
 class HomeActionCard(CardWidget):
-    """Sleek bottom action cards matching HomeDashboard's Updates & Copyright Helper (stationary desktop hover)."""
+    """Sleek bottom action cards matching HomeDashboard's Updates card (stationary desktop hover)."""
     clicked = Signal()
 
     def __init__(self, icon_enum, title_text: str, subtitle_text: str, badge_text: str = "", parent=None):
@@ -529,7 +529,6 @@ class HomeView(QWidget):
     file_selected = Signal(str)
     settings_requested = Signal()
     updates_requested = Signal()
-    copyright_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -585,7 +584,7 @@ class HomeView(QWidget):
 
         main_layout.addLayout(grid_row)
 
-        # 3. Bottom Row: Check for Updates + Copyright Helper (matching React HomeDashboard)
+        # 3. Bottom Row: Check for Updates
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(20)
 
@@ -599,16 +598,6 @@ class HomeView(QWidget):
         )
         self.updates_card.clicked.connect(self.updates_requested.emit)
         bottom_row.addWidget(self.updates_card, 1)
-
-        self.copyright_card = HomeActionCard(
-            FluentIcon.CERTIFICATE, 
-            "Copyright Helper", 
-            "Audio Visual & Segment Heatmaps", 
-            badge_text="BETA", 
-            parent=self
-        )
-        self.copyright_card.clicked.connect(self.copyright_requested.emit)
-        bottom_row.addWidget(self.copyright_card, 1)
 
         main_layout.addLayout(bottom_row)
 
@@ -634,10 +623,6 @@ class HomeView(QWidget):
             self.updates_card.update_accent()
             self.updates_card.setBackgroundColor(self.updates_card._normalBackgroundColor())
             self.updates_card.update()
-        if hasattr(self, 'copyright_card'):
-            self.copyright_card.update_accent()
-            self.copyright_card.setBackgroundColor(self.copyright_card._normalBackgroundColor())
-            self.copyright_card.update()
 
     def refresh_recents(self):
         self.recents_card.refresh()
