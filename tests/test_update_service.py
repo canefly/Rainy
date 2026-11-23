@@ -497,7 +497,8 @@ def test_about_window_and_preferences_share_the_card(qapp):
     from src.ui.components.about_dialog import AboutWindow
     w = AboutWindow()
     assert w.update_card is not None and w.check_btn is w.update_card.check_btn and w.ver_badge is w.update_card.ver_badge
-    assert "v1.2.0" in w.ver_desc.text() and w.download_btn.isHidden()
+    from src.core.updater import APP_VERSION
+    assert f"v{APP_VERSION}" in w.ver_desc.text() and w.download_btn.isHidden()
     w.apply_theme()
     w.close()
     from src.ui.components.preferences_dialog import PreferencesWindow

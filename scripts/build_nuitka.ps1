@@ -79,7 +79,53 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Nuitka compilation failed with exit code $LASTEXITCODE"
 }
 
-# 5. Engines (libmpv, FFmpeg, FFprobe) are NOT bundled any more. After the license check passes the app
+# 5. knot-mcp.exe: the small bridge AI apps (Claude, Codex, ...) launch to reach a running Rainy.
+#    It only speaks JSON-RPC on stdin/stdout and talks to the app over a named pipe, so it needs nothing
+#    but the standard library. It is built as its own tiny program (not part of Rainy.exe, which has no
+#    console) and placed in main.dist\mcp. PySide6 and the in-process Qt test path are left out on purpose.
+Write-Host ">>> Building knot-mcp.exe (the AI-app bridge)..." -ForegroundColor Green
+$McpBuild = Join-Path $ProjectRoot "dist_nuitka\mcp_build"
+if (Test-Path $McpBuild) { Remove-Item -Recurse -Force $McpBuild }
+& $PythonExe -m nuitka `
+    --standalone `
+    --assume-yes-for-downloads `
+    --windows-console-mode=force `
+    --nofollow-import-to=PySide6 `
+    --nofollow-import-to=src.core.gui_ipc_server `
+    --output-dir=dist_nuitka\mcp_build `
+    --output-filename=knot-mcp.exe `
+    --include-data-files=src/core/instructions.md=instructions.md `
+    src/core/mcp_server.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Nuitka compilation of knot-mcp.exe failed with exit code $LASTEXITCODE"
+}
+$McpDest = Join-Path $ProjectRoot "dist_nuitka\main.dist\mcp"
+if (Test-Path $McpDest) { Remove-Item -Recurse -Force $McpDest }
+New-Item -ItemType Directory -Path $McpDest -Force | Out-Null
+Copy-Item -Path (Join-Path $McpBuild "mcp_server.dist\*") -Destination $McpDest -Recurse -Force
+
+# Prove the copy works: ask it to initialize, the way an AI app does, and expect our server name back.
+# (Raw bytes on purpose: PowerShell would put a byte-order mark in front of piped text, which a strict JSON reader rejects.)
+$InitMsg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"build-check","version":"1"}}}' + "`n"
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = (Join-Path $McpDest "knot-mcp.exe")
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardInput = $true
+$psi.RedirectStandardOutput = $true
+$psi.EnvironmentVariables["KNOT_MCP_PIPE"] = "knot-build-check-" + $PID
+$McpProc = [System.Diagnostics.Process]::Start($psi)
+$InitBytes = [System.Text.Encoding]::UTF8.GetBytes($InitMsg)
+$McpProc.StandardInput.BaseStream.Write($InitBytes, 0, $InitBytes.Length)
+$McpProc.StandardInput.Close()
+$Reply = $McpProc.StandardOutput.ReadToEnd()
+if (-not $McpProc.WaitForExit(20000)) { $McpProc.Kill() }
+if ($Reply -notmatch '"knot-native-mcp"') {
+    Write-Error "knot-mcp.exe did not answer initialize correctly. Reply was: $Reply"
+}
+Write-Host ">>> knot-mcp.exe answers initialize correctly." -ForegroundColor Green
+
+# 6. Engines (libmpv, FFmpeg, FFprobe) are NOT bundled any more. After the license check passes the app
 #    downloads them once into %LOCALAPPDATA%\com.canefly.knot\bin from the files the server has pinned
 #    (see docs/app-folder.md). The repo's bin\ folder is only for running from source.
 Write-Host ">>> Not bundling engines: the app downloads and verifies them on first run." -ForegroundColor Cyan

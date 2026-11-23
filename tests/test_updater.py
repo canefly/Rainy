@@ -34,7 +34,8 @@ def test_about_window_updates_ui(qapp):
     assert hasattr(w, "ver_badge")
     assert hasattr(w, "check_btn")
     assert hasattr(w, "download_btn")
-    assert "v1.2.0" in w.ver_desc.text()
+    from src.core.updater import APP_VERSION
+    assert f"v{APP_VERSION}" in w.ver_desc.text()
     assert w.download_btn.isHidden()
     w.close()
 

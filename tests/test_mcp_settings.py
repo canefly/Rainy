@@ -296,3 +296,31 @@ def test_settings_page_log_install_and_pause(qapp, fake_home):
     mcp_activity.clear()
     assert page.log_tree.topLevelItemCount() == 0
     page.deleteLater()
+
+
+# -- the bridge an installed build hands to AI apps ---------------------------------------------------
+def test_an_installed_build_points_ai_apps_at_the_bridge_exe_in_the_mcp_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(mi.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mi.sys, "executable", str(tmp_path / "Rainy" / "Rainy.exe"))
+    cmd, args = mi.server_command()
+    assert cmd == str(tmp_path / "Rainy" / "mcp" / "knot-mcp.exe") and args == []
+    assert mi.server_entry()["command"] == cmd
+
+
+def test_the_bridge_stays_standard_library_only_so_it_can_be_a_tiny_separate_exe():
+    """scripts/build_nuitka.ps1 compiles mcp_server.py alone with PySide6 and the in-process Qt path left out.
+    A new third-party import here would silently break that build, so it is caught here instead."""
+    import ast
+    import sys
+    from pathlib import Path
+    src = Path(mi.__file__).with_name("mcp_server.py").read_text(encoding="utf-8")
+    imported = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module)
+    outside_stdlib = {m for m in imported if m.split(".")[0] not in sys.stdlib_module_names}
+    assert outside_stdlib == {"src.core.gui_ipc_server"}, outside_stdlib       # the one lazy, test-only import the build excludes
+    build = (Path(mi.__file__).parents[2] / "scripts" / "build_nuitka.ps1").read_text(encoding="utf-8")
+    assert "--nofollow-import-to=src.core.gui_ipc_server" in build and "--nofollow-import-to=PySide6" in build

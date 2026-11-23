@@ -60,7 +60,7 @@ The old **AI & MCP** item is now two items:
 
 **What it launches:**
 - **Dev:** the venv's `python.exe` with `src/core/mcp_server.py` (never `pythonw.exe`, because stdio needs a console Python).
-- **Frozen build:** `knot-mcp.exe` next to the app.
+- **Installed build:** `mcp\knot-mcp.exe` inside the install folder, a small separate program (about 9 MB, standard library only) built by `scripts/build_nuitka.ps1`, which checks that it answers `initialize` before the installer is made.
 
 **Copy config JSON** gives the same entry for any other app.
 

@@ -58,7 +58,7 @@ def server_command() -> Tuple[str, List[str]]:
     """The command an AI app should launch to reach this Rainy."""
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        return os.path.join(exe_dir, "knot-mcp.exe"), []
+        return os.path.join(exe_dir, "mcp", "knot-mcp.exe"), []   # the small bridge built by scripts/build_nuitka.ps1
     py = os.path.abspath(sys.executable)
     if os.path.basename(py).lower() == "pythonw.exe":  # stdio needs a console python
         console = os.path.join(os.path.dirname(py), "python.exe")
