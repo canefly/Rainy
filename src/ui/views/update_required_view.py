@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ...core.updater import UpdateService
 from ..components.update_card import UpdateCard
+from ..logo import LogoLabel
 from ..theme import ThemeManager
 
 
@@ -30,11 +31,7 @@ class UpdateRequiredView(QWidget):
         lay.setContentsMargins(32, 28, 32, 24)
         lay.setSpacing(12)
 
-        self.logo = QLabel(self.card)
-        self.logo.setAlignment(Qt.AlignCenter)
-        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "logo.png"))
-        if os.path.exists(logo_path):
-            self.logo.setPixmap(QPixmap(logo_path).scaled(56, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.logo = LogoLabel(56, self.card)
         lay.addWidget(self.logo)
 
         self.title = QLabel("Update required", self.card)

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import IndeterminateProgressRing, LineEdit, PrimaryPushButton
 
 from ...core.license_core import LicenseSnapshot, LicenseState
+from ..logo import LogoLabel
 from ..theme import ThemeManager
 
 COLLECTION_NOTICE = (
@@ -49,11 +50,7 @@ class GateView(QWidget):
         lay.setContentsMargins(36, 32, 36, 28)
         lay.setSpacing(12)
 
-        self.logo = QLabel(self.card)
-        self.logo.setAlignment(Qt.AlignCenter)
-        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "logo.png"))
-        if os.path.exists(logo_path):
-            self.logo.setPixmap(QPixmap(logo_path).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.logo = LogoLabel(64, self.card)
         lay.addWidget(self.logo)
 
         self.title = QLabel(self.card)
