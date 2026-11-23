@@ -63,6 +63,8 @@ Rainy listens to your voiceover and writes down every line with its timing. Ever
 3. Press **Start queue**. Each file is transcribed on this computer; nothing is uploaded. Long files take a while, and you can keep working.
 4. When it finishes, the bottom line shows the transcript, with a **Reveal** button to find the file.
 
+**Heads up: this is heavy.** Transcribing runs an AI model on your computer. If you have an NVIDIA graphics card, Rainy uses it, and it can take a big share of your video memory (VRAM). **Close other editing and creative programs first** (Premiere, After Effects, DaVinci Resolve, games) so they do not fight for it. How fast it goes depends on your card and how much VRAM it has: a stronger card is much quicker. With no usable NVIDIA card, Rainy uses the processor instead, which works but is slower.
+
 What Rainy does automatically after each part, with nothing to click:
 - It finds where you actually speak and **deletes all the silence** between.
 - It keeps a tiny bit of room before and after each phrase so no word is clipped.
