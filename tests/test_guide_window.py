@@ -189,3 +189,24 @@ def test_a_page_always_opens_at_the_top(qapp):
     qapp.processEvents()
     assert w.browser.verticalScrollBar().value() == 0
     w.close()
+
+
+@pytest.mark.parametrize("dark", [True, False])
+def test_links_use_the_theme_accent_so_they_are_readable(win, dark):
+    ThemeManager.apply_theme(ThemeVariant.GRAY, dark)
+    win.apply_theme()
+    win.show_page("aroll-cards")
+    doc = win.browser.document()
+    accent = ThemeManager.get_palette()["accent"].lower()
+    seen = 0
+    block = doc.begin()
+    while block.isValid():
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid() and frag.charFormat().isAnchor():
+                seen += 1
+                assert frag.charFormat().foreground().color().name().lower() == accent
+            it += 1
+        block = block.next()
+    assert seen >= 2                                           # the page really has links, so this checked something

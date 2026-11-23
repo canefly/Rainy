@@ -9,7 +9,7 @@ import os
 from typing import List, Optional
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QTextCursor, QTextDocument
+from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout)
 from qfluentwidgets import FluentIcon, SearchLineEdit, ToolButton
@@ -208,7 +208,30 @@ class GuideWindow(FramelessWindow):
         self.browser.verticalScrollBar().setValue(0)
 
     def _render_markdown(self, md: str) -> None:
-        self.browser.document().setMarkdown(md, QTextDocument.MarkdownFeature.MarkdownDialectGitHub)
+        doc = self.browser.document()
+        doc.setMarkdown(md, QTextDocument.MarkdownFeature.MarkdownDialectGitHub)
+        self._color_links(doc)
+
+    def _color_links(self, doc: QTextDocument) -> None:
+        """Markdown links come out in Qt's default dark blue, unreadable on a dark theme: use the theme's accent."""
+        ranges = []
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid() and frag.charFormat().isAnchor():
+                    ranges.append((frag.position(), frag.position() + frag.length()))
+                it += 1
+            block = block.next()
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(ThemeManager.get_palette()["accent"]))
+        fmt.setFontUnderline(True)
+        for start, end in ranges:
+            cur = QTextCursor(doc)
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.KeepAnchor)
+            cur.mergeCharFormat(fmt)
 
     def _render_text(self, text: str) -> None:
         self.browser.document().setPlainText(text)
