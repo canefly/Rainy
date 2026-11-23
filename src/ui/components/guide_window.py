@@ -9,7 +9,8 @@ import os
 from typing import List, Optional
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtGui import (QColor, QIcon, QPainter, QPalette, QTextBlockFormat, QTextCharFormat, QTextCursor,
+                           QTextDocument)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout)
 from qfluentwidgets import FluentIcon, SearchLineEdit, ToolButton
@@ -69,20 +70,20 @@ class GuideWindow(FramelessWindow):
         left.setObjectName("GuideSidebar")
         left.setFixedWidth(270)
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(14, 14, 8, 14)
+        lv.setContentsMargins(14, 12, 8, 14)
         lv.setSpacing(10)
-        self.search = SearchLineEdit(left)
+        self.search = SearchLineEdit(self.titleBar)          # lives in the title bar, centred (see _place_search)
         self.search.setPlaceholderText("Search the guide")
         self.search.setClearButtonEnabled(True)
+        self.search.setFixedHeight(30)
         self.search.textChanged.connect(self._on_search)
-        lv.addWidget(self.search)
         self.tree = QTreeWidget(left)
         self.tree.setObjectName("GuideTopics")
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(10)
         self.tree.setRootIsDecorated(False)
         self.tree.setIconSize(QSize(0, 0))
-        self.tree.setUniformRowHeights(True)
+        self.tree.setUniformRowHeights(False)
         self.tree.setFocusPolicy(Qt.NoFocus)
         self.tree.currentItemChanged.connect(self._on_tree_changed)
         lv.addWidget(self.tree, 1)
@@ -211,6 +212,39 @@ class GuideWindow(FramelessWindow):
         doc = self.browser.document()
         doc.setMarkdown(md, QTextDocument.MarkdownFeature.MarkdownDialectGitHub)
         self._color_links(doc)
+        self._loosen(doc)
+
+    LINE_HEIGHT_PERCENT = 150      # a little air between lines
+    PARAGRAPH_GAP = 10             # space after each paragraph
+    HEADING_GAP_ABOVE = 16
+    TABLE_CELL_PADDING = 8
+
+    def _loosen(self, doc: QTextDocument) -> None:
+        """Markdown comes out cramped: tall lines, a gap after every paragraph and heading, roomy table cells."""
+        block = doc.begin()
+        cur = QTextCursor(doc)
+        while block.isValid():
+            fmt = block.blockFormat()
+            heading = fmt.headingLevel() > 0
+            fmt.setLineHeight(float(self.LINE_HEIGHT_PERCENT), QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+            fmt.setTopMargin(self.HEADING_GAP_ABOVE if heading and block != doc.begin() else fmt.topMargin())
+            fmt.setBottomMargin(self.PARAGRAPH_GAP if not heading else self.PARAGRAPH_GAP - 2)
+            cur.setPosition(block.position())
+            cur.setBlockFormat(fmt)
+            block = block.next()
+        done = set()                                   # a table is reached from every cell, so style each only once
+        block = doc.begin()
+        while block.isValid():
+            cur.setPosition(block.position())
+            table = cur.currentTable()
+            if table is not None and table.firstPosition() not in done:
+                done.add(table.firstPosition())
+                tf = table.format()
+                tf.setCellPadding(self.TABLE_CELL_PADDING)
+                tf.setTopMargin(4)
+                tf.setBottomMargin(self.PARAGRAPH_GAP + 4)
+                table.setFormat(tf)
+            block = block.next()
 
     def _color_links(self, doc: QTextDocument) -> None:
         """Markdown links come out in Qt's default dark blue, unreadable on a dark theme: use the theme's accent."""
@@ -277,15 +311,51 @@ class GuideWindow(FramelessWindow):
             QFrame#GuideContent {{ background: transparent; }}
             QTreeWidget#GuideTopics {{ background: transparent; border: none; outline: none;
                 color: {pal['text']}; font-size: 13px; }}
-            QTreeWidget#GuideTopics::item {{ padding: 5px 6px; border-radius: 5px; }}
+            QTreeWidget#GuideTopics::item {{ padding: 7px 8px; margin: 1px 0px; border-radius: 6px; }}
             QTreeWidget#GuideTopics::item:selected {{ background: {pal['surface_hover']}; color: {pal['text']}; }}
             QTreeWidget#GuideTopics::item:hover {{ background: {pal['surface_hover']}; }}
             QTextBrowser#GuidePage {{ background: {pal['surface']}; color: {pal['text']};
                 border: 1px solid {pal['border']}; border-radius: 8px; padding: 10px; font-size: 14px; }}
             QLabel#GuideContact {{ color: {pal['muted']}; font-size: 12px; background: transparent; }}
         """)
+        self._apply_caption_buttons(pal)
         if self._current:
             self.show_page(self._current, record=False)
+
+    def _apply_caption_buttons(self, pal) -> None:
+        """Minimise / maximise / close in the theme's text colour (white on dark), like the Settings window.
+        qfluentwidgets re-applies its own style on polish, so these use a widget-level stylesheet, which wins."""
+        tb = self.titleBar
+        base = QColor("#ffffff") if pal["is_dark"] else QColor(pal["text"])      # white on dark
+
+        def rgba(c: QColor) -> str:
+            return f"rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()})"
+
+        hover = QColor(base.red(), base.green(), base.blue(), 28)
+        press = QColor(base.red(), base.green(), base.blue(), 46)
+        for btn in (tb.minBtn, tb.maxBtn):
+            btn.setStyleSheet(
+                f"qproperty-normalColor: {rgba(base)}; qproperty-hoverColor: {rgba(base)}; "
+                f"qproperty-pressedColor: {rgba(base)}; qproperty-normalBackgroundColor: rgba(0, 0, 0, 0); "
+                f"qproperty-hoverBackgroundColor: {rgba(hover)}; qproperty-pressedBackgroundColor: {rgba(press)};")
+            btn.update()
+        tb.closeBtn.setStyleSheet(
+            f"qproperty-normalColor: {rgba(base)}; qproperty-hoverColor: rgba(255, 255, 255, 255); "
+            f"qproperty-pressedColor: rgba(255, 255, 255, 255); qproperty-normalBackgroundColor: rgba(0, 0, 0, 0); "
+            f"qproperty-hoverBackgroundColor: rgba(232, 17, 35, 255); "
+            f"qproperty-pressedBackgroundColor: rgba(241, 112, 122, 255);")
+        tb.closeBtn.update()
+
+    def _place_search(self) -> None:
+        """Centre the search box in the title bar, leaving room for the window buttons on the right."""
+        width = max(180, min(380, self.width() - 2 * 160))
+        self.search.setFixedWidth(width)
+        self.search.move((self.width() - width) // 2, (self.titleBar.height() - self.search.height()) // 2)
+        self.search.raise_()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._place_search()
 
     def paintEvent(self, e) -> None:
         painter = QPainter(self)
@@ -298,4 +368,5 @@ class GuideWindow(FramelessWindow):
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
+        self._place_search()
         ThemeManager.enable_window_backdrop(self)

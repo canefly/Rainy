@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from src.core import guide
@@ -224,3 +224,63 @@ def test_links_use_the_theme_accent_so_they_are_readable(win, dark):
             it += 1
         block = block.next()
     assert seen >= 2                                           # the page really has links, so this checked something
+
+
+# -- the look changes: search in the title bar, white window buttons on dark, roomier spacing --------------
+def test_the_search_box_lives_in_the_title_bar_centred(qapp):
+    w = gw.GuideWindow()
+    w.show()
+    qapp.processEvents()
+    assert w.search.parent() is w.titleBar
+    mid = w.search.x() + w.search.width() / 2
+    assert abs(mid - w.width() / 2) <= 2                                   # centred
+    assert w.search.geometry().right() < w.titleBar.minBtn.geometry().left()   # clear of the window buttons
+    assert w.search.y() >= 0 and w.search.geometry().bottom() <= w.titleBar.height()
+    w.resize(700, 500)
+    qapp.processEvents()
+    assert abs((w.search.x() + w.search.width() / 2) - w.width() / 2) <= 2     # and stays centred when resized
+    w.close()
+
+
+def test_search_still_works_from_the_title_bar(win):
+    win.search.setText("transcribe")
+    assert win.tree.topLevelItemCount() >= 1 and win.tree.topLevelItemCount() < 15
+
+
+@pytest.mark.parametrize("dark", [True, False])
+def test_window_buttons_are_white_on_dark_and_the_text_colour_on_light(win, dark):
+    switch_theme(dark)
+    win.apply_theme()
+    want = "rgba(255, 255, 255, 255)" if dark else None
+    if not dark:
+        c = QColor(ThemeManager.get_palette()["text"])
+        want = f"rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()})"
+    for btn in (win.titleBar.minBtn, win.titleBar.maxBtn, win.titleBar.closeBtn):
+        assert f"qproperty-normalColor: {want}" in btn.styleSheet()
+
+
+def test_the_page_has_roomy_lines_gaps_and_table_cells(win):
+    win.show_page("aroll-cards")
+    doc = win.browser.document()
+    block = doc.begin()
+    seen = 0
+    while block.isValid():
+        fmt = block.blockFormat()
+        if block.text().strip():
+            assert fmt.lineHeight() == gw.GuideWindow.LINE_HEIGHT_PERCENT
+            seen += 1
+        block = block.next()
+    assert seen > 5
+    from PySide6.QtGui import QTextCursor
+    cur, tables, b = QTextCursor(doc), {}, doc.begin()
+    while b.isValid():
+        cur.setPosition(b.position())
+        tbl = cur.currentTable()
+        if tbl is not None:
+            tables[tbl.firstPosition()] = tbl.format().cellPadding()
+        b = b.next()
+    assert tables and set(tables.values()) == {gw.GuideWindow.TABLE_CELL_PADDING}
+
+
+def test_topic_rows_are_roomier_than_before(win):
+    assert "padding: 7px 8px" in win.styleSheet()
