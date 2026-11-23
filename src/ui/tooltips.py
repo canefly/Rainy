@@ -87,11 +87,29 @@ class TipFilter(QObject):
 
 
 _filter = None
+_patched = False
 
 
 def install_tooltips() -> None:
-    global _filter
+    """Give every widget that gets a hover tip our drawn tip. The filter is attached to those widgets only (not to the
+    whole application), so it never sees the thousands of other events a running window produces."""
+    global _filter, _patched
     app = QApplication.instance()
-    if app is not None and _filter is None:
+    if app is None:
+        return
+    if _filter is None:
         _filter = TipFilter(app)
-        app.installEventFilter(_filter)
+    if _patched:
+        return
+    _patched = True
+    original = QWidget.setToolTip
+
+    def set_tool_tip(self, text):
+        original(self, text)
+        if text:
+            try:
+                self.installEventFilter(_filter)      # installing twice on one widget is a no-op
+            except Exception:  # noqa: BLE001  (cosmetic)
+                pass
+
+    QWidget.setToolTip = set_tool_tip

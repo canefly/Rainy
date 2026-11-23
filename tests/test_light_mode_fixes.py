@@ -146,3 +146,18 @@ def test_rainy_draws_its_own_hover_tips_from_the_theme(qapp, dark):
     assert not f.bubble.isVisible()
     plain = QPushButton("y")
     assert f.eventFilter(plain, ev) is False                       # nothing to show: Qt handles it as before
+
+
+def test_tips_are_attached_per_widget_not_to_the_whole_app(qapp):
+    from PySide6.QtWidgets import QPushButton
+    from src.ui import tooltips
+    tooltips.install_tooltips()
+    b = QPushButton("x")
+    b.setToolTip("hello")
+    assert tooltips._filter is not None and b.toolTip() == "hello"
+    # the filter was attached to the button, so a tip event on it is drawn by Rainy
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QHelpEvent
+    ev = QHelpEvent(QEvent.ToolTip, QPoint(1, 1), QPoint(5, 5))
+    assert tooltips._filter.eventFilter(b, ev) is True
+    tooltips._filter.hide_tip()
