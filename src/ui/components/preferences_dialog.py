@@ -17,6 +17,7 @@ from qfluentwidgets import (
     MessageBoxBase, SearchLineEdit, InfoBar, InfoBarPosition, SmoothScrollArea
 )
 
+from ..legal import NOTICE_TEXT, NOTICE_TITLE
 from ..theme import ThemeManager, ThemeVariant
 from .widgets import MagneticDetentSlider, safe_copy_to_clipboard
 from ...core.database import db
@@ -3710,19 +3711,16 @@ class PreferencesWindow(FramelessWindow):
         sc_layout.addLayout(s_grid)
         layout.addWidget(socials_card)
 
-        # Card 3: Legal Notice (Restrained 1px elevation stroke, 16x12 margins)
+        # Card 3: Ownership notice (Restrained 1px elevation stroke, 16x12 margins)
         legal_card = PrefCardFrame()
         lc_layout = QVBoxLayout(legal_card)
         lc_layout.setContentsMargins(16, 12, 16, 12)
         lc_layout.setSpacing(4)
-        lc_title = QLabel("Legal Notice")
+        lc_title = QLabel(NOTICE_TITLE)
         lc_title.setObjectName("PrefSectionTitle")
         lc_layout.addWidget(lc_title)
 
-        lc_text = QLabel(
-            "This software is the exclusive property of Cane. Unauthorized reproduction, distribution, "
-            "modification, or reverse engineering of this codebase is strictly prohibited by law."
-        )
+        lc_text = QLabel(NOTICE_TEXT)
         lc_text.setWordWrap(True)
         lc_text.setObjectName("PrefCaption")
         lc_layout.addWidget(lc_text)

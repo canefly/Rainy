@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 from qframelesswindow import FramelessWindow, StandardTitleBar
 from qfluentwidgets import FluentIcon, PushButton, SmoothScrollArea
+from ..legal import COPYRIGHT_LINE, NOTICE_TEXT, NOTICE_TITLE
 from ..theme import ThemeManager
 from .update_card import UpdateCard
 
@@ -108,30 +109,25 @@ class AboutWindow(FramelessWindow):
             row.mousePressEvent = lambda e, u=url: webbrowser.open(u)
             b_layout.addWidget(row)
 
-        # 3. Legal Notice Box
+        # 3. Ownership notice
         legal_box = QFrame(body)
         legal_box.setObjectName("PrefCard")
         l_layout = QVBoxLayout(legal_box)
         l_layout.setContentsMargins(16, 12, 16, 12)
         l_layout.setSpacing(4)
 
-        l_title = QLabel("LEGAL NOTICE", legal_box)
+        l_title = QLabel(NOTICE_TITLE, legal_box)
         l_title.setObjectName("PrefSectionTitle")
         l_layout.addWidget(l_title)
 
-        l_desc = QLabel(
-            "This software is the exclusive property of Cane. Unauthorized reproduction, distribution, "
-            "modification, or reverse engineering of this codebase, in whole or in part, is strictly prohibited by law. "
-            "Violators will be subject to maximum civil liabilities, statutory damages, and immediate legal prosecution.",
-            legal_box
-        )
+        l_desc = QLabel(NOTICE_TEXT, legal_box)
         l_desc.setWordWrap(True)
         l_desc.setObjectName("PrefCaption")
         l_layout.addWidget(l_desc)
         b_layout.addWidget(legal_box)
 
         # Copyright tag
-        cr_lbl = QLabel("Rainy · All rights reserved", body)
+        cr_lbl = QLabel(COPYRIGHT_LINE, body)
         cr_lbl.setObjectName("PrefCaption")
         cr_lbl.setAlignment(Qt.AlignCenter)
         b_layout.addWidget(cr_lbl)
