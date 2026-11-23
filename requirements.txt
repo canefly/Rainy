@@ -10,3 +10,5 @@ av>=11.0.0
 Nuitka>=4.3.0
 cryptography>=43
 keyring>=25
+
+certifi>=2024.2.2

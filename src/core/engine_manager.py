@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
-from . import app_paths
+from . import app_paths, net_tls
 from .archive_extract import extract_wanted
 from .license_core import dev_overrides_allowed
 from .logger import get_logger
@@ -269,7 +269,7 @@ class EngineDownloadWorker(QThread):
         
         api_url = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
         req = urllib.request.Request(api_url, headers={"User-Agent": "Rainy-Desktop/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=net_tls.ssl_context()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         tag = data.get("tag_name", "latest")
@@ -356,7 +356,7 @@ class EngineDownloadWorker(QThread):
 
         api_url = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
         req = urllib.request.Request(api_url, headers={"User-Agent": "Rainy-Desktop/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=net_tls.ssl_context()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         tag = data.get("tag_name", "latest")
@@ -498,7 +498,7 @@ class EngineDownloadWorker(QThread):
         downloaded = 0
         chunk_size = 64 * 1024
 
-        with urllib.request.urlopen(req, timeout=30) as response, open(dest_path, "wb") as out_file:
+        with urllib.request.urlopen(req, timeout=30, context=net_tls.ssl_context()) as response, open(dest_path, "wb") as out_file:
             real_total = total_bytes or int(response.headers.get("content-length", 0))
             while True:
                 if self._is_cancelled:

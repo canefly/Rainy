@@ -100,6 +100,8 @@ class LiveChannel(QObject):
             logger.error("Live channel disabled: %s", e)
             return
         sock = QWebSocket()
+        if url.lower().startswith("wss:"):
+            self._trust_bundled_roots(sock)
         self._ws = sock
         self._down_handled = False
         self._error_code = None
@@ -108,6 +110,24 @@ class LiveChannel(QObject):
         sock.errorOccurred.connect(lambda _e, s=sock: self._on_down(s))
         sock.textMessageReceived.connect(lambda text, s=sock: self._on_text(s, text))
         sock.open(QUrl(url))
+
+    @staticmethod
+    def _trust_bundled_roots(sock: QWebSocket) -> None:
+        """Same idea as net_tls for the live connection: also trust the bundled public roots, so a Windows that has
+        not downloaded a root yet can still connect. Never fatal: without it the plain system roots are used."""
+        try:
+            from PySide6.QtNetwork import QSsl, QSslCertificate, QSslConfiguration
+            from .net_tls import bundled_cafile
+            path = bundled_cafile()
+            if not path:
+                return
+            certs = QSslCertificate.fromPath(path, QSsl.EncodingFormat.Pem)
+            if certs:
+                cfg = QSslConfiguration.defaultConfiguration()
+                cfg.addCaCertificates(certs)
+                sock.setSslConfiguration(cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not add the bundled certificates to the live channel: %s", e)
 
     def _discard(self, sock: QWebSocket) -> None:
         try:

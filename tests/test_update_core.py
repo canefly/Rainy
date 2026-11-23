@@ -10,6 +10,8 @@ import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -612,3 +614,34 @@ def test_controller_fetch_engine_manifest():
     with pytest.raises(ApiRejected) as e:
         env.ctl.fetch_engine_manifest()
     assert e.value.code == "not_registered"
+
+
+# -- certificates ------------------------------------------------------------------------------------
+def test_a_certificate_failure_is_reported_as_a_certificate_problem_not_a_network_one(tmp_path):
+    import ssl
+
+    def opener(req, timeout):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate"))
+
+    with pytest.raises(DownloadError) as e:
+        download_verified("https://example.com/a.7z", tmp_path / "a.7z", sha256=SHA, opener=opener)
+    assert e.value.code == "certificate" and "security certificate" in uc.friendly_download_error(e.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_dns_failure_is_still_a_network_problem(tmp_path):
+    import socket
+
+    def opener(req, timeout):
+        raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
+
+    with pytest.raises(DownloadError) as e:
+        download_verified("https://example.com/a.7z", tmp_path / "a.7z", sha256=SHA, opener=opener)
+    assert e.value.code == "network"
+
+
+def test_the_default_downloader_uses_the_bundled_roots():
+    from src.core import net_tls
+    opener = uc.default_opener().__self__
+    https = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert len(https) == 1 and https[0]._context is net_tls.ssl_context()

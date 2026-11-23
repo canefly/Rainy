@@ -69,6 +69,8 @@ Write-Host ">>> Invoking Nuitka compiler..." -ForegroundColor Green
     --include-package-data=qfluentwidgets `
     --include-package=docx `
     --include-package-data=docx `
+    --include-package=certifi `
+    --include-package-data=certifi `
     --include-data-dir=assets=assets `
     --windows-icon-from-ico=assets/logo.ico `
     --output-dir=dist_nuitka `

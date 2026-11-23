@@ -28,6 +28,11 @@ from typing import Callable, Dict, Mapping, Optional, Protocol
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from . import net_tls
+from .logger import get_logger
+
+logger = get_logger("license")
+
 DEFAULT_API_URL = "https://rainy.canefly.xyz"
 
 # kid -> base64url Ed25519 public key. Filled in at release time with the output of
@@ -294,7 +299,23 @@ class MemorySettings:
 
 # --------------------------------------------------------------------------- HTTP client
 class ApiUnreachable(Exception):
-    """Network failure, timeout, or a server-side 5xx / proxy error page."""
+    """Network failure, timeout, or a server-side 5xx / proxy error page. `kind` says why when we know
+    (see net_tls.failure_kind): 'certificate', 'tls', 'dns', 'timeout', 'refused' or 'other'."""
+
+    def __init__(self, message: str = "", kind: str = "other"):
+        super().__init__(message)
+        self.kind = kind
+
+
+UNREACHABLE_CERTIFICATE_TEXT = ("Couldn't verify the server's security certificate. If you're on a work or school "
+                                "network, or your antivirus scans web traffic, it may be getting in the way.")
+
+
+def unreachable_text(kind: str) -> str:
+    """A sentence for the person: a certificate problem is not fixed by checking the internet connection."""
+    if kind in ("certificate", "tls"):
+        return UNREACHABLE_CERTIFICATE_TEXT
+    return "Can't reach the server. Check your connection and try again."
 
 
 class ApiRejected(Exception):
@@ -308,7 +329,7 @@ class ApiRejected(Exception):
 
 class LicenseApi:
     def __init__(self, base_url: str, *, timeout: float = 8.0, app_version: str = "0",
-                 opener: Callable = urllib.request.urlopen, clock: Callable[[], float] = time.time):
+                 opener: Callable = net_tls.open_url, clock: Callable[[], float] = time.time):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.user_agent = f"Rainy/{app_version} Native"
@@ -341,7 +362,9 @@ class LicenseApi:
             extra = {k: v for k, v in err.items() if k not in ("code", "message")}
             raise ApiRejected(e.code, str(err.get("code", f"http_{e.code}")), str(err.get("message", "")), extra) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-            raise ApiUnreachable(str(e)) from None
+            kind = net_tls.failure_kind(e)
+            logger.warning("Server unreachable (%s %s): %s", method, path, net_tls.describe_failure(e))
+            raise ApiUnreachable(str(e), kind) from None
         try:
             data = json.loads(raw)
         except ValueError:
@@ -549,9 +572,9 @@ class LicenseController:
 
         try:
             resp = self.api.register(payload, priv)
-        except ApiUnreachable:
+        except ApiUnreachable as e:
             return self._set(LicenseState.NEEDS_REGISTRATION, editor_name=name,
-                             message="Can't reach the server. Check your connection and try again.")
+                             message=unreachable_text(getattr(e, "kind", "other")))
         except ApiRejected as e:
             return self._registration_rejected(e, name)
 

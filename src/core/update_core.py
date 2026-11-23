@@ -30,11 +30,14 @@ from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import app_paths
+from . import app_paths, net_tls
 
 from .license_core import (
-    ApiRejected, ApiUnreachable, ManifestError, dev_overrides_allowed, verify_manifest,
+    ApiRejected, ApiUnreachable, ManifestError, dev_overrides_allowed, unreachable_text, verify_manifest,
 )
+from .logger import get_logger
+
+logger = get_logger("update_core")
 
 FEED_MAX_AGE_SECONDS = 30 * 86400      # a replayed older feed can't hide a newer release for longer than this
 ENGINE_MAX_AGE_SECONDS = 7 * 86400
@@ -138,6 +141,8 @@ def friendly_download_error(e: DownloadError) -> str:
     return {
         "bad_url": "The download address isn't a secure https link, so it was refused.",
         "network": "Couldn't download the file. Check your connection and try again.",
+        "certificate": "Couldn't verify the download site's security certificate. If you're on a work or school network, "
+                       "or your antivirus scans web traffic, it may be getting in the way.",
         "too_big": "The download was larger than expected, so it was stopped.",
         "size_mismatch": "The download was the wrong size, so it was discarded.",
         "hash_mismatch": "The download didn't match its signed fingerprint, so it was discarded and not used.",
@@ -167,7 +172,8 @@ class _SafeRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def default_opener(allow_http_local: Optional[bool] = None) -> Callable:
-    return urllib.request.build_opener(_SafeRedirects(allow_http_local)).open
+    return urllib.request.build_opener(_SafeRedirects(allow_http_local),
+                                       urllib.request.HTTPSHandler(context=net_tls.ssl_context())).open
 
 
 def sha256_file(path: Path) -> Tuple[str, int]:
@@ -238,7 +244,9 @@ def download_verified(url: str, dest, *, sha256: str, size: Optional[int] = None
         raise
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
         _remove_quietly(part)
-        raise DownloadError("network", str(e)) from None
+        logger.warning("Download failed (%s): %s", url.split("?")[0], net_tls.describe_failure(e))
+        kind = net_tls.failure_kind(e)
+        raise DownloadError("certificate" if kind in ("certificate", "tls") else "network", str(e)) from None
     except OSError as e:
         _remove_quietly(part)
         raise DownloadError("disk", str(e)) from None
@@ -373,7 +381,9 @@ def load_engine_entries(controller, now: float) -> List[EngineEntry]:
     Blocking: call from a worker thread. Raises EngineManifestError with a message fit to show."""
     try:
         reply = controller.fetch_engine_manifest()
-    except ApiUnreachable:
+    except ApiUnreachable as e:
+        if getattr(e, "kind", "other") in ("certificate", "tls"):
+            raise EngineManifestError("unreachable", unreachable_text(e.kind)) from None
         raise EngineManifestError("unreachable", "Can't reach the server to get the verified download list. Check your connection and try again.") from None
     except ApiRejected as e:
         if e.code == "not_registered":

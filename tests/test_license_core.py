@@ -733,3 +733,48 @@ def test_push_with_missing_key_does_not_crash(env):
     env.registered()
     env.keystore.seed = None
     assert env.ctl.apply_push({"t": "token", "token": "x"}) is None
+
+
+# -- why the server could not be reached ---------------------------------------------------------------
+def test_a_certificate_failure_is_labelled_and_gets_its_own_message(caplog):
+    import logging
+    import ssl
+
+    def opener(req, timeout):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate"))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(lc.ApiUnreachable) as e:
+            make_api(opener).refresh("a" * 32, dev_key())
+    assert e.value.kind == "certificate"
+    assert "security certificate" in lc.unreachable_text(e.value.kind) and "Check your connection" not in lc.unreachable_text("certificate")
+    assert "certificate: SSLCertVerificationError" in caplog.text      # the reason now reaches the log, not just "unreachable"
+
+
+def test_other_failures_keep_the_connection_message_and_say_why_in_the_log(caplog):
+    import logging
+    import socket
+
+    def opener(req, timeout):
+        raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(lc.ApiUnreachable) as e:
+            make_api(opener).refresh("a" * 32, dev_key())
+    assert e.value.kind == "dns" and "Check your connection" in lc.unreachable_text("dns")
+    assert "dns:" in caplog.text
+
+
+def test_registering_over_a_certificate_failure_tells_the_person_what_it_is():
+    env = Env()
+    env.api.register_replies.append(lc.ApiUnreachable("x", "certificate"))
+    snap = env.ctl.register("Cane")
+    assert snap.state is LicenseState.NEEDS_REGISTRATION and "security certificate" in snap.message
+    env2 = Env()
+    env2.api.register_replies.append(lc.ApiUnreachable("x", "timeout"))
+    assert "Check your connection" in env2.ctl.register("Cane").message
+
+
+def test_the_real_api_object_trusts_the_bundled_roots_by_default():
+    from src.core import net_tls
+    assert LicenseApi("https://x", app_version="1")._open is net_tls.open_url

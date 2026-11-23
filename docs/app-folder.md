@@ -12,6 +12,7 @@ Everything the app downloads or creates lives in **one folder**, decided in one 
     cache\             waveforms and speech envelopes (safe to delete, rebuilds)
     logs\              knot.log (rotated)
     updates\           downloaded installers (old ones are cleaned up)
+    ui_config.json     the UI library's theme settings (see below)
 ```
 
 Back up that one folder and you have everything. It is writable without admin rights and survives reinstalls and updates.
@@ -56,6 +57,24 @@ An installed build looks nowhere else, so a stray copy on the machine can't be l
 (the server downloads it once and records the fingerprint), then `withdraw-engine <id>` for the old one. Apps pick
 up the new list the next time they need an engine. Pinning to a permanent release asset matters: if upstream
 deletes the file, new installs can't set up until a replacement is pinned.
+
+## Installed for all users (Program Files)
+
+An all-users install puts the program in `C:\Program Files\Rainy`, which a normal Windows user cannot write to. Everything the app
+writes therefore goes to the app folder above, never next to the program. (Found by installing it: the UI library
+wrote `config\config.json` into the folder it started in, the save failed, and the app quit with no message. Its settings
+file is now `ui_config.json` in the app folder, a failed save is logged and skipped, and any error while starting is
+written to `logs\knot.log` and shown in a message box.)
+
+## Certificates (HTTPS)
+
+Python only trusts the root certificates already in the Windows store, and Windows fetches a missing root only when a
+Windows program (a browser) asks. On a fresh Windows (a new PC, Windows Sandbox) the app said "can't reach the server"
+and could not download its engines or AI models while Edge worked. So the app trusts the Windows roots **and** a bundled
+public list (`certifi`, in `src/core/net_tls.py`), for the license server, signed downloads, the AI model download and
+the live connection. Certificates are still verified (the bundle only adds known public authorities). If a certificate
+cannot be verified the message says so (work or school network, antivirus that scans web traffic) instead of "check
+your connection", and the reason is written to the log.
 
 ## Developer switches
 

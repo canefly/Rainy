@@ -6,6 +6,10 @@ from PySide6.QtGui import QColor, QPainter, QPixmap, QImage, QBrush, QRadialGrad
 from PySide6.QtWidgets import QWidget, QApplication
 from qfluentwidgets import setThemeColor, Theme as FluentTheme, setTheme
 
+from . import ui_config
+
+ui_config.install()   # before anything can change a theme: keeps the settings file out of the install folder
+
 def disable_menu_animations():
     """
     Globally disables sliding, masking, and fading animations for all QFluentWidgets menus:

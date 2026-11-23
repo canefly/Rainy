@@ -18,7 +18,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, QSize, QThreadPool, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader
 
-from . import app_paths
+from . import app_paths, net_tls
 from .database import db
 from .logger import get_logger
 
@@ -285,7 +285,8 @@ class _DownloadTask(QRunnable):
         headers = {"User-Agent": "Rainy"}
         if have:
             headers["Range"] = f"bytes={have}-"
-        return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=self.TIMEOUT_S)
+        return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=self.TIMEOUT_S,
+                                      context=net_tls.ssl_context())
 
     def _fetch(self, name: str, size: int, sha256: str):
         dest = _model_file(name)

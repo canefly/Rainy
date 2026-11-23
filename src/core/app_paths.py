@@ -66,6 +66,12 @@ def updates_dir(create: bool = False) -> str:
     return _sub("updates", create)
 
 
+def ui_config_file() -> str:
+    """Where the UI library keeps its theme settings. (Its own default is a relative config/config.json in
+    whatever folder the app was started from, which is the install folder and not writable for a normal user.)"""
+    return os.path.join(app_home(), "ui_config.json")
+
+
 # --------------------------------------------------------------------------- engines
 def _source_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
