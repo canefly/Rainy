@@ -7,7 +7,7 @@
 #define MyAppName "Rainy"
 #define MyAppVersion "1.3.0"
 #define MyAppPublisher "Canefly"
-#define MyAppURL "https://github.com/canefly/knot-tool-native"
+#define MyAppURL "https://github.com/canefly/Rainy"
 #define MyAppExeName "Rainy.exe"
 #define SourceDist "..\\dist_nuitka\\main.dist"
 
