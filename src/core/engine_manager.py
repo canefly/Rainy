@@ -478,6 +478,11 @@ class EngineDownloadWorker(QThread):
             self.finished.emit(self.engine_id, False, "The verified archive did not contain ffmpeg.exe and ffprobe.exe.")
 
     def _update_whisper(self):
+        from . import app_paths
+        if app_paths.is_packaged():
+            # see EngineUpdateWorker: "Rainy.exe -m pip" would open another Rainy instead of updating anything
+            self.finished.emit(self.engine_id, True, "The speech engine is built into Rainy and updates when Rainy updates.")
+            return
         self.progress.emit(self.engine_id, 10, "Updating faster-whisper package...")
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "faster-whisper"],

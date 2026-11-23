@@ -378,6 +378,9 @@ class ModelDownloadWorker(QRunnable):
             self.signals.finished.emit(self.model_id, False, str(e))
 
 
+ENGINE_BUILT_IN_MESSAGE = "The speech engine is built into Rainy and updates when Rainy updates."
+
+
 class EngineUpdateSignals(QObject):
     finished = Signal(bool, str)  # (success, output_message)
 
@@ -389,6 +392,12 @@ class EngineUpdateWorker(QRunnable):
         self.signals = EngineUpdateSignals()
 
     def run(self):
+        from . import app_paths
+        if app_paths.is_packaged():
+            # In an installed Rainy, sys.executable is Rainy.exe itself, not a Python with pip: running it with "-m pip"
+            # would just open a second Rainy. The speech engine ships inside the app and updates with it.
+            self.signals.finished.emit(True, ENGINE_BUILT_IN_MESSAGE)
+            return
         try:
             cmd = [
                 sys.executable, "-m", "pip", "install", "--upgrade",
