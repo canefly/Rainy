@@ -72,15 +72,13 @@ Next: [[link: Source links]]
 
 ## P4. Source links
 
-Open them with the link icon in the left bar. It lists every link found in your script, as a checklist.
+Open them with the link icon in the left bar. Think of it as a smart checklist: it lists every link found in your script and tells you about each one.
 
-- **Tick** a link when you have downloaded or used it.
-- **Relink** attaches a local footage file to a link, for when you already have the clip on this computer.
-- **Info** shows details about a link.
+- **Tick** a link when you have handled it.
+- **Info** shows what the link says (its title and details), and whether its footage is linked on this computer.
+- You **cannot link footage here.** This window only tells you the state. If a link shows its footage is **missing**, go back to the Footage Manager and fix it there: [[link: Link your footage]].
 
-To link all your footage at once instead, see [[link: Link your footage]].
-
-**CONFIRM:** I summarised this from the code, not from using it. Please check the buttons on the Source Links window and tell me if anything is wrong or missing.
+**Link details not showing?** For private Google Drive links, Rainy needs permission to read them. Set it up in [[link: Settings, Cookies & Accounts]] by importing your Firefox cookies, using a Firefox that is signed in to the Google account that can open those files.
 
 Next: [[link: Export Premiere XML on its own]]
 
