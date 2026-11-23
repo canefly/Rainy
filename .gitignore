@@ -104,3 +104,6 @@ $RECYCLE.BIN/
 
 # Temporary test artifacts
 bottom_crop.png
+
+# UI library settings written when running from source
+config/
