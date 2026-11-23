@@ -1,9 +1,9 @@
-# In-app user guide (planned for 1.3.1)
+# In-app user guide (planned: folded into 1.3.0, not a new version)
 
 ## Decision (2026-11-23)
 
 - **No public guide or landing page.** `https://rainy.canefly.xyz/` stays an empty 404. Reason: Rainy is closely tied to the owner's work (Rainy), and a public manual would lay out every feature to anyone who might copy the concept.
-- **The manual lives inside the app.** Only approved users ever see it. Needs a new build, so it ships as 1.3.1, bundled with whatever else real use turns up (one build, not one per idea).
+- **The manual lives inside the app.** Only approved users ever see it. Needs a new build. **Decision: do not bump the version.** Rainy has not been announced yet, so 1.3.0 is still the first release; the guide and anything else real use turns up get folded into a rebuilt 1.3.0 (one build, not one per idea). Before replacing the published file, check how the server handles re-publishing the same version number (the release records a SHA-256 and size, and `publish-release` may refuse a duplicate version): likely withdraw the old record and publish again, and reinstall by hand on the few machines that already have 1.3.0, since they will not be offered an update for the same number.
 - The installer download link is public by design (the app's own updates use it). The gate is device approval, not the link.
 
 ## Shape
@@ -40,4 +40,4 @@
 1. Write the pages.
 2. Build the guide window and the Help entry, with tests (opens, search finds a page, missing page doesn't crash).
 3. Look at it in the real app, light and dark mode.
-4. Follow `docs/release-cycle.md` for 1.3.1.
+4. Follow `docs/release-cycle.md`, keeping the version at 1.3.0 (see the note above about re-publishing the same number).
