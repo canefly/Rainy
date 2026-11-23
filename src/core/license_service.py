@@ -125,6 +125,12 @@ class LicenseService(QObject):
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def peek(cls) -> Optional["LicenseService"]:
+        """The running service, or None. Unlike instance() this never creates one (so a settings window
+        or a test can ask "who is signed in?" without starting a license check)."""
+        return cls._instance
+
     # -- state -----------------------------------------------------------------------
     @property
     def is_unlocked(self) -> bool:

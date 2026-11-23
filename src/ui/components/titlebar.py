@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame, QAbstractBut
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton
 from qfluentwidgets import ToolButton, TransparentToolButton, FluentIcon, RoundMenu, Action
 
-from .widgets import StatusDot, ClickableLabel, CopiedToastIndicator
+from .widgets import StatusDot, CopiedToastIndicator
 from ..theme import ThemeManager
 
 
@@ -69,16 +69,11 @@ class TitleBarBrandingWidget(QWidget):
         self.title_lbl.setObjectName("TitleBrandingText")
         layout.addWidget(self.title_lbl)
 
-        # 2. Made By Canefly link
-        self.author_link = ClickableLabel("Made By Canefly", url="https://www.instagram.com/yow_ph/", parent=self)
-        layout.addWidget(self.author_link)
         self.apply_theme()
 
     def apply_theme(self):
         pal = ThemeManager.get_palette()
         text_col = pal.get("text", "#ffffff")
-        muted_col = pal.get("muted", "#64748b")
-        accent_col = pal.get("accent", "#38bdf8")
         self.title_lbl.setStyleSheet(f"""
             QLabel#TitleBrandingText {{
                 font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, sans-serif;
@@ -87,10 +82,6 @@ class TitleBarBrandingWidget(QWidget):
                 color: {text_col};
             }}
         """)
-        self.author_link.setStyles(
-            default_style=f"color: {muted_col}; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; font-size: 11px; font-weight: 500;",
-            hover_style=f"color: {accent_col}; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; font-size: 11px; font-weight: 500; text-decoration: underline;"
-        )
 
 
 class TitleBarMenuButton(QPushButton):

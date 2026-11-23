@@ -32,8 +32,8 @@ def test_settings_window_initialization(qapp):
     # Profile card
     assert hasattr(win, "user_profile")
     assert isinstance(win.user_profile, UserProfileCard)
-    assert win.user_profile.name_lbl.text() == "Cane fly"
-    assert win.user_profile.sub_lbl.text() == "canefly@outlook.ph"
+    assert win.user_profile.name_lbl.text() == "Editor"        # nobody is signed in under test: no personal name, no email
+    assert not hasattr(win.user_profile, "sub_lbl")
 
     # Nav list & categories
     assert win.nav_list.count() == 11

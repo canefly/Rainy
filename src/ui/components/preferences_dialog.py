@@ -82,6 +82,11 @@ class UserAvatarWidget(QWidget):
         super().__init__(parent)
         self.setFixedSize(40, 40)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._initials = "E"
+
+    def set_initials(self, initials: str) -> None:
+        self._initials = initials or "E"
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -100,15 +105,29 @@ class UserAvatarWidget(QWidget):
         painter.setPen(QColor(255, 255, 255))
         font = QFont("Segoe UI Variable Display", 12, QFont.Bold)
         painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, "CF")
+        painter.drawText(rect, Qt.AlignCenter, self._initials)
+
+
+def initials_for(name: str) -> str:
+    """Up to two capital letters for the avatar: the first letters of the first two words, or one letter for
+    a one-word name. Anything that isn't a letter or digit is skipped, so "  *Cane fly*" is still "CF"."""
+    words = [w for w in (name or "").split() if any(c.isalnum() for c in w)]
+    letters = []
+    for w in words[:2]:
+        first = next(c for c in w if c.isalnum())
+        letters.append(first.upper())
+    return "".join(letters) or "E"
 
 
 class UserProfileCard(QFrame):
-    """Windows 11 Settings left-rail user profile card."""
+    """Windows 11 Settings left-rail profile: the editor's avatar circle and name, nothing else."""
+    FALLBACK_NAME = "Editor"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("UserProfileCard")
         self.setFixedHeight(60)
+        self._name = ""
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -117,37 +136,67 @@ class UserProfileCard(QFrame):
         self.avatar = UserAvatarWidget(self)
         layout.addWidget(self.avatar, 0, Qt.AlignVCenter)
 
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(2)
+        # The name sits on the avatar's centre line. Names are typed by people, so never read them as rich text.
+        self.name_lbl = QLabel(self)
+        self.name_lbl.setTextFormat(Qt.PlainText)
+        self.name_lbl.setWordWrap(False)
+        self.name_lbl.setMinimumWidth(0)
+        self.name_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.name_lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        layout.addWidget(self.name_lbl, 1, Qt.AlignVCenter)
 
-        self.name_lbl = QLabel("Cane fly", self)
-        self.name_lbl.setStyleSheet(
-            "font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; "
-            "font-size: 14.5px; font-weight: 700; color: #ffffff;"
-        )
-        text_col.addWidget(self.name_lbl)
+        self.apply_theme()
+        self.set_name(self._signed_in_name())
+        from ...core.license_service import LicenseService
+        service = LicenseService.peek()
+        if service is not None:
+            service.state_changed.connect(self._on_license_state)
 
-        self.sub_lbl = QLabel("canefly@outlook.ph", self)
-        self.sub_lbl.setStyleSheet(
-            "font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; "
-            "font-size: 12px; color: #a1a1aa;"
-        )
-        text_col.addWidget(self.sub_lbl)
+    # -- who is signed in ------------------------------------------------------------
+    @staticmethod
+    def _signed_in_name() -> str:
+        from ...core.license_service import LicenseService
+        service = LicenseService.peek()
+        return (service.snapshot.editor_name if service is not None else "") or ""
 
-        layout.addLayout(text_col, 1)
+    def _on_license_state(self, snap) -> None:
+        self.set_name(getattr(snap, "editor_name", "") or "")
+
+    def set_name(self, name: str) -> None:
+        self._name = (name or "").strip() or self.FALLBACK_NAME
+        self.avatar.set_initials(initials_for(self._name))
+        self.name_lbl.setText(self._name)
+        self.name_lbl.setToolTip("")
+        self._elide()
+
+    def _elide(self) -> None:
+        """A long name is cut with an ellipsis (full name in the tooltip) instead of pushing the layout around.
+        Only once the card is on screen and laid out: before that its width means nothing."""
+        width = self.name_lbl.width()
+        if not self.isVisible() or width <= 1:
+            return
+        shown = self.name_lbl.fontMetrics().elidedText(self._name, Qt.ElideRight, width)
+        self.name_lbl.setText(shown)
+        self.name_lbl.setToolTip(self._name if shown != self._name else "")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.layout() is not None:
+            self.layout().activate()                  # so the label has its real width
+        self.name_lbl.setText(self._name)
+        self._elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.name_lbl.setText(self._name)
+        self._elide()
 
     def apply_theme(self):
         is_dark = ThemeManager.is_dark
         text_col = "#ffffff" if is_dark else "#18181b"
-        muted = "#a1a1aa" if is_dark else "#52525b"
         self.name_lbl.setStyleSheet(
             f"font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; "
             f"font-size: 14.5px; font-weight: 700; color: {text_col};"
-        )
-        self.sub_lbl.setStyleSheet(
-            f"font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; "
-            f"font-size: 12px; color: {muted};"
         )
         self.avatar.update()
 
