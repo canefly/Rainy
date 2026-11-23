@@ -3,8 +3,8 @@ import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import IndeterminateProgressRing, LineEdit, PrimaryPushButton
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import FluentIcon, IndeterminateProgressRing, LineEdit, PrimaryPushButton, TransparentToolButton
 
 from ...core.license_core import LicenseSnapshot, LicenseState
 from ..logo import LogoLabel
@@ -14,6 +14,16 @@ COLLECTION_NOTICE = (
     "To verify you, Rainy sends your editor name, a hardware summary (CPU, GPU, RAM, "
     "Windows version) and your public IP, which gives a rough city/region. No GPS, no files."
 )
+
+HELP_TEXT = "\n".join((
+    "New here? This is what happens:",
+    "1. Type the name you edit under and press Request access.",
+    "2. Wait for Cane to approve you. Leave Rainy open: this screen unlocks by itself.",
+    "3. After that, Rainy downloads a few helper programs, one time. You can keep using Rainy while it does.",
+    "Stuck? Message Cane.",
+))
+# the screens where a first-time user might not know what to do
+_HELP_STATES = {LicenseState.NEEDS_REGISTRATION, LicenseState.PENDING}
 
 _ERROR_STATES = {LicenseState.REVOKED, LicenseState.ERROR, LicenseState.EXPIRED}
 
@@ -49,6 +59,17 @@ class GateView(QWidget):
         lay = QVBoxLayout(self.card)
         lay.setContentsMargins(36, 32, 36, 28)
         lay.setSpacing(12)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addStretch(1)
+        self.help_btn = TransparentToolButton(FluentIcon.HELP, self.card)
+        self.help_btn.setObjectName("GateHelpButton")
+        self.help_btn.setFixedSize(28, 28)
+        self.help_btn.setToolTip("What do I do here?")
+        self.help_btn.clicked.connect(self.toggle_help)
+        top.addWidget(self.help_btn)
+        lay.addLayout(top)
 
         self.logo = LogoLabel(64, self.card)
         lay.addWidget(self.logo)
@@ -90,6 +111,13 @@ class GateView(QWidget):
         self.notice.setWordWrap(True)
         lay.addWidget(self.notice)
 
+        self.help_text = QLabel(HELP_TEXT, self.card)
+        self.help_text.setObjectName("GateHelpText")
+        self.help_text.setTextFormat(Qt.PlainText)
+        self.help_text.setWordWrap(True)
+        self.help_text.setVisible(False)
+        lay.addWidget(self.help_text)
+
         self.footer = QLabel(self.card)
         self.footer.setAlignment(Qt.AlignCenter)
         self.footer.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -109,6 +137,9 @@ class GateView(QWidget):
         self.body.setStyleSheet(f"color: {pal['muted']}; font-size: 13px; background: transparent;")
         self.notice.setStyleSheet(f"color: {pal['muted']}; font-size: 11px; background: transparent;")
         self.footer.setStyleSheet(f"color: {pal['muted']}; font-size: 11px; background: transparent;")
+        self.help_text.setStyleSheet(
+            f"color: {pal['text']}; font-size: 12px; background: {pal['surface_hover']}; "
+            f"border: 1px solid {pal['border']}; border-radius: 8px; padding: 10px;")
         self._style_message(self._state)
 
     def _style_message(self, state: LicenseState):
@@ -117,10 +148,28 @@ class GateView(QWidget):
             color = "#f59e0b"
         self.message.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 600; background: transparent;")
 
+    def toggle_help(self):
+        self.help_text.setVisible(not self.help_text.isVisible())
+        self._refit_card()
+
+    def _refit_card(self):
+        """Wrapped text only knows its height once it has a width, so make the card measure itself again after
+        the help appears or goes away (otherwise the last lines are cut off)."""
+        lay = self.card.layout()
+        self.card.setMinimumHeight(0)
+        lay.invalidate()
+        lay.activate()
+        self.card.setMinimumHeight(max(self.card.sizeHint().height(), lay.totalHeightForWidth(self.card.width())))
+
     # -- content ---------------------------------------------------------------------
     def show_snapshot(self, snap: LicenseSnapshot):
         self._state = snap.state
         s = snap.state
+        can_help = s in _HELP_STATES
+        self.help_btn.setVisible(can_help)
+        if not can_help and self.help_text.isVisibleTo(self):
+            self.help_text.setVisible(False)
+            self._refit_card()
         name = snap.editor_name or "there"
         title, body, button = "", "", None
         show_input = show_spinner = show_notice = False
