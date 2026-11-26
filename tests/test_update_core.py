@@ -58,7 +58,7 @@ def test_server_feed_verifies_and_parses():
     m = parse_feed({"manifest": FEED}, KEYS, NOW)
     assert m == UpdateManifest(
         version="1.3.0", released_at="2026-11-22T10:00:00Z", size=123456, sha256="ab" * 32, min_supported="1.2.0",
-        url="https://rainy.canefly.xyz/download/RainyTools_Setup_v1.3.0.exe", notes=("Faster export", "Fixed a crash"))
+        url="https://click.canefly.xyz/download/ClickablesTools_Setup_v1.3.0.exe", notes=("Faster export", "Fixed a crash"))
 
 
 def test_server_null_feed_means_nothing_published():
