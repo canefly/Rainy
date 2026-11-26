@@ -1,7 +1,7 @@
 """Licensing core (no Qt): device key, signed requests, token checks and the unlock state machine.
 
 Talks to rainy-api. The wire format (headers, canonical bytes, token layout, error codes) is
-documented in docs/rainy-api-plan.md ("Wire format") and must stay byte-for-byte compatible
+documented in the private rainy-api plan ("Wire format") and must stay byte-for-byte compatible
 with rainy-api/app/security/signing.py. tests/test_license_core.py pins that with fixed vectors.
 
 Security notes

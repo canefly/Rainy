@@ -7,7 +7,7 @@ Two ways the state moves:
 - HTTP polling: the fallback. While the live channel is healthy it only runs rarely as a safety net;
   when the channel is down it goes back to the faster schedule so nothing is missed.
 
-See docs/rainy-api-plan.md.
+See the private rainy-api plan.
 """
 from typing import Callable, Optional
 

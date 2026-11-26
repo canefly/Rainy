@@ -1,6 +1,6 @@
 """Announcements, bug reports and opt-in analytics: the parts that need no Qt.
 
-Talks to rainy-api (docs/rainy-api-plan.md, "Announcements, bug reports and analytics").
+Talks to rainy-api (the private rainy-api plan, "Announcements, bug reports and analytics").
 
 Principles
 - Announcements are text the owner wants editors to read. They arrive over HTTPS in a manifest signed

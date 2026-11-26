@@ -60,7 +60,7 @@ Must say plainly in part 3:
 1. Write the pages.
 2. Build the guide window and the Help entry, with tests (opens, search finds a page, missing page doesn't crash).
 3. Look at it in the real app, light and dark mode.
-4. Follow `docs/release-cycle.md` with version 2.0.0.
+4. Follow the private release-cycle notes with version 2.0.0.
 
 ## Build phases (agreed 2026-11-23, nothing built yet)
 

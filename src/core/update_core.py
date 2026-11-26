@@ -11,7 +11,7 @@ Everything that decides *what code runs on this machine* lives here, so it is sm
 - The installer is re-verified immediately before it is launched, so swapping the file after the
   download finishes doesn't help an attacker.
 
-The wire format is documented in docs/rainy-api-plan.md.
+The wire format is documented in the private rainy-api plan.
 """
 import hashlib
 import hmac

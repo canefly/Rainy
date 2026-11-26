@@ -4,7 +4,7 @@ All network work runs on the thread pool; the UI thread only ever sees finished 
 signals. Failures here are never allowed to disturb the editor: announcements and analytics fail
 quietly (logged), and a bug report tells the person plainly what went wrong.
 
-See docs/rainy-api-plan.md and src/core/extras_core.py.
+See the private rainy-api plan and src/core/extras_core.py.
 """
 import os
 import time

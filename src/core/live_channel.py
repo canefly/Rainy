@@ -5,7 +5,7 @@ server frame to the license service. It makes no licensing decisions itself.
 
 Backoff matters: when the server tells us something that retrying won't fix (another copy of this
 device connected, we're rate limited, our signature was refused) we wait much longer instead of
-hammering it. Protocol details: docs/rainy-api-plan.md ("Live channel").
+hammering it. Protocol details: the private rainy-api plan ("Live channel").
 """
 import json
 import random

@@ -1,0 +1,31 @@
+Rainy: Source-Available, All Rights Reserved
+
+Copyright (c) 2026 canefly. All rights reserved.
+
+This source code is published for viewing and reference only.
+
+You may read the code on GitHub and clone it to your own computer for the sole
+purpose of reading and learning from it.
+
+You may NOT, without prior written permission from the copyright holder:
+
+  - copy, modify, merge, or create derivative works of this code
+  - redistribute, publish, sublicense, sell, or host this code or any build of it
+  - use this code, in whole or in part, in any other project or service
+  - run, or provide access to, a copy of the Rainy application or its server
+    components, other than a build officially distributed by the copyright holder
+    and approved for you by the copyright holder
+  - remove or bypass the license-approval, update-verification, or other
+    protective mechanisms in the software
+
+No patent or trademark rights are granted. The names "Rainy" and "knot" and the
+Rainy logo are not licensed for use.
+
+The software is provided "as is", without warranty of any kind. The copyright
+holder is not liable for any claim, damages, or other liability arising from its
+use.
+
+Third-party components (for example PySide6, FFmpeg, libmpv and the Python
+packages listed in requirements.txt) remain under their own licenses.
+
+For permission requests, open an issue at https://github.com/canefly/Rainy/issues.
